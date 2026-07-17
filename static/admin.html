@@ -217,7 +217,7 @@ tr:last-child td{border-bottom:none}
       <div class="panel-body">
         <div class="settings-grid">
           <div class="setting-row">
-            <div class="label"><b>强制走代理</b><p>代理全挂时报错而非用真实 IP 直连</p></div>
+            <div class="label"><b>禁止服务器直连抖音</b><p>开启后所有抖音请求只走代理，无可用代理即报错，绝不暴露服务器 IP（建议常开）</p></div>
             <label class="switch ctl"><input type="checkbox" id="s_force"><span class="slider"></span></label>
           </div>
           <div class="setting-row">
@@ -299,12 +299,12 @@ async function load(){
   let s;
   try { s = await api('/api/admin/state'); } catch(err){ return; }
   const st = s.stats, en = s.proxies.filter(p=>p.enabled).length,
-        reach = s.proxies.filter(p=>p.douyin_ok===true).length;
+        banned = s.proxies.filter(p=>p.banned).length;
   $('#statRow').innerHTML = `
     <div class="stat"><div class="k">代理总数</div><div class="v tnum">${s.proxies.length} <small>/ 启用 ${en}</small></div></div>
-    <div class="stat"><div class="k">抖音可达</div><div class="v tnum">${reach}</div></div>
+    <div class="stat"><div class="k">已封禁 IP</div><div class="v tnum" style="${banned?'color:var(--danger)':''}">${banned}</div></div>
     <div class="stat"><div class="k">经代理 / 直连</div><div class="v tnum">${st.via_proxy}<small> / ${st.direct}</small></div></div>
-    <div class="stat"><div class="k">自动重试次数</div><div class="v tnum">${st.retries||0}</div></div>`;
+    <div class="stat"><div class="k">封禁 / 重试</div><div class="v tnum">${st.banned||0}<small> / ${st.retries||0}</small></div></div>`;
 
   // settings
   const g = s.settings;
@@ -321,7 +321,8 @@ async function load(){
   // table
   $('#emptyRow').style.display = s.proxies.length ? 'none' : '';
   $('#proxyBody').innerHTML = s.proxies.map(p => {
-    const health = p.auto_off ? `<span class="badge warn">自动停用</span>`
+    const health = p.banned ? `<span class="badge bad" title="${esc(p.banned_reason||'IP 被封禁')}">已封禁</span>`
+      : p.auto_off ? `<span class="badge warn">自动停用</span>`
       : p.fail>=3 ? `<span class="badge bad">异常</span>`
       : p.last_ok ? `<span class="badge ok">正常</span>` : `<span class="badge idle">未测</span>`;
     const dy = p.douyin_ok===true ? `<span class="badge ok">可达</span>`

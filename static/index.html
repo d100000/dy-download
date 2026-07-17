@@ -10,7 +10,7 @@
   --bg:#0E1013; --bg-glow-a:rgba(254,44,85,.10); --bg-glow-b:rgba(37,244,238,.06);
   --surface:#16191E; --surface-2:#1C2026; --border:#272C34; --border-strong:#343B45;
   --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
-  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#FFFFFF;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#FFFFFF; --accent-soft:#33161E;
   --ok:#25F4EE; --ok-ink:#062B29; --danger-bg:#2A161B; --danger-border:#57222E; --danger-text:#FF97AC;
   --shadow:0 24px 60px -24px rgba(0,0,0,.6);
   --radius:16px;
@@ -19,7 +19,7 @@
   --bg:#F7F8FA; --bg-glow-a:rgba(224,35,78,.07); --bg-glow-b:rgba(15,168,160,.06);
   --surface:#FFFFFF; --surface-2:#F2F4F7; --border:#E4E7EC; --border-strong:#CBD2DB;
   --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
-  --accent:#E0234E; --accent-hover:#C71D44; --accent-ink:#FFFFFF;
+  --accent:#E0234E; --accent-hover:#C71D44; --accent-ink:#FFFFFF; --accent-soft:#FDEDF1;
   --ok:#0FA8A0; --ok-ink:#FFFFFF; --danger-bg:#FDECEF; --danger-border:#F5C2CC; --danger-text:#B4173C;
   --shadow:0 20px 50px -24px rgba(23,25,29,.18);
 }
@@ -142,15 +142,51 @@ h1 .hl{color:var(--accent)}
 }
 .v-title{font-size:18px; font-weight:600; line-height:1.55; word-break:break-word}
 .author-row{display:flex; align-items:center; gap:10px}
-.author-row img{width:34px; height:34px; border-radius:50%; background:var(--surface-2); object-fit:cover}
+.author-row img{width:34px; height:34px; border-radius:50%; background:var(--surface-2); object-fit:cover; display:block}
 .author-row .name{font-size:14px; font-weight:500}
 .author-row .sub{font-size:12.5px; color:var(--muted)}
+.avatar-link{display:block; border-radius:50%; position:relative; transition:transform .15s, box-shadow .15s}
+.avatar-link:hover{transform:scale(1.06); box-shadow:0 0 0 2px var(--accent)}
+.avatar-link .ph{width:34px; height:34px; border-radius:50%; background:var(--surface-2)}
+
+/* 作者悬停浮层 */
+.author-tip{
+  position:fixed; z-index:100; left:0; top:0; width:270px; max-width:86vw;
+  background:var(--surface); border:1px solid var(--border); border-radius:14px;
+  box-shadow:var(--shadow); padding:14px 16px; pointer-events:none;
+  opacity:0; transform:translateY(4px); transition:opacity .15s, transform .15s;
+}
+.author-tip.show{opacity:1; transform:translateY(0)}
+.author-tip .ah{display:flex; align-items:center; gap:11px}
+.author-tip .ah img{width:44px; height:44px; border-radius:50%; object-fit:cover; background:var(--surface-2); flex:none}
+.author-tip .an{font-size:15px; font-weight:600; line-height:1.3}
+.author-tip .ai{font-size:12px; color:var(--muted); margin-top:2px}
+.author-tip .asig{font-size:12.5px; color:var(--muted); margin-top:10px; line-height:1.6;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
+.author-tip .astats{display:flex; gap:6px; margin-top:12px}
+.author-tip .s{flex:1; text-align:center; background:var(--surface-2); border-radius:9px; padding:7px 2px}
+.author-tip .s b{display:block; font-size:14px; font-weight:700; font-variant-numeric:tabular-nums}
+.author-tip .s span{font-size:11px; color:var(--muted)}
+.author-tip .atip{font-size:11px; color:var(--faint); margin-top:10px; text-align:center}
 .meta-row{display:flex; gap:22px; flex-wrap:wrap; padding:12px 0; border-top:1px solid var(--border); border-bottom:1px solid var(--border)}
 .meta-item .k{font-size:12px; color:var(--muted); letter-spacing:.04em}
 .meta-item .v{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums}
+.stats-row{display:flex; gap:8px; flex-wrap:wrap}
+.stat-chip{flex:1; min-width:64px; text-align:center; background:var(--surface-2);
+  border:1px solid var(--border); border-radius:11px; padding:9px 4px}
+.stat-chip b{display:block; font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.2}
+.stat-chip span{font-size:11.5px; color:var(--muted)}
+.extras{display:flex; flex-direction:column; gap:7px}
+.extra-line{font-size:13px; color:var(--muted); display:flex; gap:6px; align-items:baseline}
+.extra-line span{color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.tag-row{display:flex; flex-wrap:wrap; gap:6px}
+.tag{font-size:12px; color:var(--accent); background:var(--accent-soft); padding:2px 9px; border-radius:99px}
 .actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:auto}
 .actions .primary-btn{text-decoration:none}
 a.ghost-btn{text-decoration:none}
+.tip{font-size:12px; color:var(--faint); margin-top:10px}
+.fallback-hint{font-size:12px; color:var(--muted); text-align:center; margin-top:8px}
+.fallback-hint a{color:var(--accent)}
 
 /* ---------- album ---------- */
 .album-head{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:20px 24px 0; flex-wrap:wrap}
@@ -160,12 +196,13 @@ a.ghost-btn{text-decoration:none}
 }
 .album-item{position:relative; border-radius:10px; overflow:hidden; background:var(--surface-2); aspect-ratio:3/4}
 .album-item img{width:100%; height:100%; object-fit:cover; display:block}
-.album-item a{
+.album-item a, .album-item button{
   position:absolute; right:8px; bottom:8px; width:32px; height:32px; border-radius:9px;
   background:rgba(0,0,0,.55); color:#fff; display:grid; place-items:center;
-  backdrop-filter:blur(4px); text-decoration:none; opacity:0; transition:opacity .15s;
+  backdrop-filter:blur(4px); text-decoration:none; border:none; cursor:pointer;
+  opacity:0; transition:opacity .15s;
 }
-.album-item:hover a, .album-item a:focus-visible{opacity:1}
+.album-item:hover a, .album-item:hover button, .album-item a:focus-visible, .album-item button:focus-visible{opacity:1}
 .album-item .idx{
   position:absolute; left:8px; top:8px; font-size:11px; font-weight:600;
   background:rgba(0,0,0,.5); color:#fff; padding:1px 8px; border-radius:99px;
@@ -300,21 +337,143 @@ const fmtDur = (ms) => {
   const s = Math.round((ms||0)/1000);
   return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 };
+const fmtNum = (n) => (n===null||n===undefined) ? '—' : (n>=10000 ? (n/10000).toFixed(1)+'w' : String(n));
+const fmtDate = (sec) => { if(!sec) return ''; const d=new Date(sec*1000); const p=n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+
+function statsRow(st){
+  if (!st) return '';
+  const c = [['❤ 点赞', st.digg], ['💬 评论', st.comment], ['★ 收藏', st.collect], ['↗ 分享', st.share]];
+  return `<div class="stats-row">${c.map(([label, n]) =>
+    `<div class="stat-chip"><b>${fmtNum(n)}</b><span>${label}</span></div>`).join('')}</div>`;
+}
+
+function extrasBlock(d){
+  let h = '';
+  if (d.music && d.music.title)
+    h += `<div class="extra-line">🎵 <span>${esc(d.music.title)}</span></div>`;
+  if (d.location)
+    h += `<div class="extra-line">📍 <span>${esc(d.location)}</span></div>`;
+  if (d.tags && d.tags.length)
+    h += `<div class="tag-row">${d.tags.map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}</div>`;
+  return h ? `<div class="extras">${h}</div>` : '';
+}
 
 function render(d){
   if (d.kind === 'note') renderAlbum(d); else renderVideo(d);
   result.classList.add('show');
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
+  wireAvatar(d.item_id);
 }
 
 function authorRow(d){
+  const av = d.avatar ? `<img src="${esc(d.avatar)}" alt="">` : '<div class="ph"></div>';
+  const inner = d.author_url
+    ? `<a class="avatar-link" href="${esc(d.author_url)}" target="_blank" rel="noopener"
+         data-item="${esc(d.item_id)}" title="点击访问 TA 的抖音主页">${av}</a>`
+    : av;
   return `<div class="author-row">
-    ${d.avatar ? `<img src="${esc(d.avatar)}" alt="">` : ''}
+    ${inner}
     <div>
       <div class="name">${esc(d.author) || '未知作者'}</div>
-      <div class="sub">作品 ID ${esc(d.item_id)}</div>
+      <div class="sub">${d.author_url ? '点击头像访问主页 · 悬停查看资料' : ('作品 ID ' + esc(d.item_id))}</div>
     </div>
   </div>`;
+}
+
+/* ---- 作者悬停浮层：悬停 2s 拉取，本地缓存 10 分钟，浮层跟随鼠标 ---- */
+const AUTHOR_TTL = 10 * 60 * 1000;   // 本地缓存 10 分钟
+let _hoverTimer = null, _tipEl = null, _mouse = {x:0, y:0};
+
+function _tip(){
+  if (!_tipEl){
+    _tipEl = document.createElement('div');
+    _tipEl.className = 'author-tip';
+    document.body.appendChild(_tipEl);
+  }
+  return _tipEl;
+}
+function _num(n){ return (n===null||n===undefined) ? '—' : (n>=10000 ? (n/10000).toFixed(1)+'w' : n); }
+function positionTip(){
+  const t = _tip(); const r = t.getBoundingClientRect();
+  let x = _mouse.x + 16, y = _mouse.y + 16;
+  if (x + r.width > innerWidth - 8) x = _mouse.x - r.width - 16;
+  if (y + r.height > innerHeight - 8) y = innerHeight - r.height - 8;
+  t.style.left = Math.max(8, x) + 'px';
+  t.style.top = Math.max(8, y) + 'px';
+}
+async function getAuthor(itemId){
+  const key = 'dyauthor:' + itemId;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw){ const o = JSON.parse(raw); if (Date.now() - o.t < AUTHOR_TTL) return o.d; }
+  } catch {}
+  const r = await fetch('/api/author?item_id=' + encodeURIComponent(itemId));
+  if (!r.ok) throw new Error('fetch failed');
+  const d = await r.json();
+  try { localStorage.setItem(key, JSON.stringify({t: Date.now(), d})); } catch {}
+  return d;
+}
+function showTip(a){
+  const t = _tip();
+  const stat = (label, n) => `<div class="s"><b>${_num(n)}</b><span>${label}</span></div>`;
+  t.innerHTML = `
+    <div class="ah">
+      ${a.avatar ? `<img src="${esc(a.avatar)}" alt="">` : ''}
+      <div class="am">
+        <div class="an">${esc(a.nickname) || '未知作者'}</div>
+        ${a.douyin_id ? `<div class="ai">抖音号：${esc(a.douyin_id)}</div>` : ''}
+      </div>
+    </div>
+    ${a.signature ? `<div class="asig">${esc(a.signature)}</div>` : ''}
+    <div class="astats">
+      ${stat('作品', a.aweme_count)}${stat('关注', a.following_count)}
+      ${stat('粉丝', a.follower_count)}${stat('获赞', a.total_favorited)}
+    </div>
+    <div class="atip">点击头像打开抖音主页</div>`;
+  t.classList.add('show');
+  positionTip();
+}
+function hideTip(){ if (_tipEl) _tipEl.classList.remove('show'); }
+
+function wireAvatar(itemId){
+  const link = result.querySelector('.avatar-link');
+  if (!link) return;
+  link.addEventListener('mouseenter', () => {
+    clearTimeout(_hoverTimer);
+    _hoverTimer = setTimeout(async () => {
+      try { showTip(await getAuthor(itemId)); } catch {}
+    }, 2000);                                    // 悬停满 2 秒才拉取
+  });
+  link.addEventListener('mousemove', (e) => { _mouse = {x:e.clientX, y:e.clientY};
+    if (_tipEl && _tipEl.classList.contains('show')) positionTip(); });
+  link.addEventListener('mouseleave', () => { clearTimeout(_hoverTimer); hideTip(); });
+}
+
+/* 浏览器直连下载：优先 fetch→blob 带文件名保存（走用户浏览器 IP），
+   跨域被拦则退回新窗口打开由浏览器接管，全程不经过本服务器 */
+async function browserDownload(url, filename, btn){
+  const old = btn ? btn.textContent : null;
+  if (btn){ btn.textContent = '下载中…'; btn.style.pointerEvents='none'; }
+  try {
+    const resp = await fetch(url, {mode:'cors'});
+    if(!resp.ok) throw new Error('bad');
+    const blob = await resp.blob();
+    const obju = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = obju; a.download = filename || 'download';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(obju), 5000);
+  } catch(e){
+    window.open(url, '_blank', 'noopener');   // 兜底：浏览器直连打开，可右键/长按保存
+  } finally {
+    if (btn){ btn.textContent = old; btn.style.pointerEvents=''; }
+  }
+}
+
+function useProxyFallback(el){
+  const v = document.querySelector('#player');
+  if (v && v.dataset.proxy){ v.src = v.dataset.proxy; v.load(); v.play?.(); el.remove(); }
 }
 
 function renderVideo(d){
@@ -322,22 +481,30 @@ function renderVideo(d){
   <div class="card">
     <div class="card-body">
       <div class="player-wrap">
-        <video controls playsinline preload="metadata"
-               src="${esc(d.video.stream)}" ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
+        <video id="player" controls playsinline preload="metadata"
+               src="${esc(d.video.url)}" data-proxy="${esc(d.video.proxy_url||'')}"
+               ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
+        <div class="fallback-hint" id="fbHint">
+          播放不出来？<a href="javascript:void(0)" onclick="useProxyFallback(document.getElementById('fbHint'))">改用服务器代理播放</a>
+        </div>
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印</span>
+        <span class="badge">视频 · 无水印 · 浏览器直连</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
           <div class="meta-item"><div class="k">时长</div><div class="v">${fmtDur(d.duration_ms)}</div></div>
-          <div class="meta-item"><div class="k">清晰度</div><div class="v">720P</div></div>
+          <div class="meta-item"><div class="k">分辨率</div><div class="v">${d.video.width&&d.video.height?`${d.video.width}×${d.video.height}`:'720P'}</div></div>
           <div class="meta-item"><div class="k">格式</div><div class="v">MP4</div></div>
+          ${d.create_time?`<div class="meta-item"><div class="k">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
         </div>
+        ${statsRow(d.stats)}
+        ${extrasBlock(d)}
         <div class="actions">
-          <a class="primary-btn" href="${esc(d.video.download)}" download>⬇ 下载视频</a>
-          <a class="ghost-btn" href="${esc(d.video.stream)}" target="_blank" rel="noopener">新窗口播放</a>
+          <button class="primary-btn" onclick="browserDownload('${esc(d.video.url)}','${esc(d.video.filename)}',this)">⬇ 下载视频</button>
+          <a class="ghost-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener">新窗口打开</a>
         </div>
+        <div class="tip">下载与播放均由你的浏览器直连抖音，不经过本站服务器</div>
       </div>
     </div>
   </div>`;
@@ -349,25 +516,34 @@ function renderAlbum(d){
   <div class="card">
     <div class="album-head">
       <div class="info" style="gap:10px">
-        <span class="badge">图集 · ${imgs.length} 张原图</span>
+        <span class="badge">图集 · ${imgs.length} 张原图 · 浏览器直连</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
+        ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
+        ${statsRow(d.stats)}
+        ${extrasBlock(d)}
       </div>
-      <a class="primary-btn" href="${esc(d.album_zip)}" download>⬇ 打包下载 ZIP</a>
+      <button class="primary-btn" onclick="downloadAll()">⬇ 下载全部</button>
     </div>
     <div class="album-grid">
       ${imgs.map((im, i) => `
         <figure class="album-item">
           <span class="idx">${i+1}</span>
-          <img src="${esc(im.view)}" alt="图集第 ${i+1} 张" loading="lazy">
-          <a href="${esc(im.download)}" download title="下载这张" aria-label="下载第 ${i+1} 张">
+          <img src="${esc(im.url)}" alt="图集第 ${i+1} 张" loading="lazy">
+          <button onclick="browserDownload('${esc(im.url)}','${esc(im.filename)}',this)" title="下载这张" aria-label="下载第 ${i+1} 张">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <path d="M7 1.5V9M7 9L4 6M7 9L10 6M2 12.5H12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-          </a>
+          </button>
         </figure>`).join('')}
     </div>
   </div>`;
+  window._albumImgs = imgs;
+}
+
+async function downloadAll(){
+  const imgs = window._albumImgs || [];
+  for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
 }
 </script>
 </body>

@@ -99,7 +99,7 @@ class ProxyManager:
         self._rr = 0
         self.proxies: list[dict] = []
         self.settings = dict(DEFAULT_SETTINGS)
-        self.stats = {"total": 0, "via_proxy": 0, "direct": 0, "retries": 0}
+        self.stats = {"total": 0, "via_proxy": 0, "direct": 0, "retries": 0, "banned": 0}
         self._load()
 
     # ---- 持久化 ----
@@ -195,6 +195,7 @@ class ProxyManager:
                     "auto_off": False, "note": note, "added_at": int(time.time()),
                     "ok": 0, "fail": 0, "last_used": None, "last_ok": None,
                     "latency_ms": None, "exit_ip": None, "douyin_ok": None,
+                    "banned": False, "banned_at": None, "banned_reason": None,
                 })
                 added.append(url)
             self._save()
@@ -215,9 +216,23 @@ class ProxyManager:
                     p["auto_off"] = False        # 手动操作，取消自动禁用标记
                     if p["enabled"]:
                         p["fail"] = 0
+                        p["banned"] = False      # 手动启用即解除封禁标记
+                        p["banned_reason"] = None
                     self._save()
                     return p["enabled"]
         return None
+
+    def mark_banned(self, p: dict, reason: str):
+        """代理 IP 被抖音封禁：落库标记、自动禁用、计数。"""
+        with self._lock:
+            p["banned"] = True
+            p["banned_at"] = int(time.time())
+            p["banned_reason"] = reason
+            p["enabled"] = False
+            p["auto_off"] = True
+            p["fail"] = p.get("fail", 0) + 1
+            self.stats["banned"] = self.stats.get("banned", 0) + 1
+            self._save()
 
     def get(self, pid: str) -> Optional[dict]:
         return next((p for p in self.proxies if p["id"] == pid), None)
@@ -298,6 +313,9 @@ class ProxyManager:
                     p["exit_ip"] = exit_ip
                 if douyin_ok is not None:
                     p["douyin_ok"] = douyin_ok
+                if p.get("banned"):              # 封禁的代理测通了 → 解封自愈
+                    p["banned"] = False
+                    p["banned_reason"] = None
                 if p.get("auto_off"):            # 自动禁用过的，恢复可用 → 自愈
                     p["enabled"] = True
                     p["auto_off"] = False
@@ -354,8 +372,10 @@ def _raw_open(url: str, follow: bool, headers: dict, timeout: int, proxy: Option
 
 def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
              timeout: int = 30):
-    """出站请求核心：按代理池顺序尝试，失败转移；区分代理故障与源站响应。
+    """出站请求核心：一律经代理，失败自动转移。
 
+    所有到抖音的服务器请求都走这里 —— **绝不服务器直连**，避免暴露服务器 IP。
+    仅当管理后台关闭「禁止直连」(force_proxy=False) 且无可用代理时，才退回直连。
     返回 (response, proxy_used_or_None)。
     """
     hdrs = {"User-Agent": pick_ua()}
@@ -363,8 +383,11 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
         hdrs.update(headers)
 
     cands = proxy_mgr.candidates()
-    if not cands:                                   # 未配置代理 → 直连
-        r = _raw_open(url, follow, hdrs, timeout, None)
+    if not cands:                                   # 无可用代理
+        if proxy_mgr.force_proxy:
+            raise ApiError(503, "没有可用代理，且已开启「禁止服务器直连」——为避免暴露服务器 IP，"
+                                "不会直连抖音。请在管理后台添加并启用代理。")
+        r = _raw_open(url, follow, hdrs, timeout, None)   # 仅在管理员显式允许时直连
         proxy_mgr.mark_ok(None)
         return r, None
 
@@ -378,19 +401,28 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             r = _raw_open(url, follow, hdrs, timeout, p)
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
             return r, p
-        except urlerr.HTTPError:
-            # 源站返回了 4xx/5xx —— 代理是通的，不惩罚代理，直接上抛
+        except urlerr.HTTPError as e:
+            if e.code in (403, 401):                # 抖音封禁该代理 IP → 落库+禁用+换代理
+                proxy_mgr.mark_banned(p, f"抖音返回 {e.code}，IP 被封禁")
+                errors.append(f"{p['url']} → 被封禁(HTTP {e.code})")
+                continue
+            # 其他 4xx/5xx 是源站问题，不怪代理，直接上抛
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
             raise
         except Exception as e:                      # 连接/超时 → 代理故障，自动转移
-            proxy_mgr.mark_fail(p)
-            errors.append(f"{p['url']} → {type(e).__name__}: {e}")
+            msg = str(e).lower()
+            if "403" in msg or "forbidden" in msg or "tunnel connection failed" in msg:
+                proxy_mgr.mark_banned(p, "代理无法连接抖音（403/被封禁）")
+                errors.append(f"{p['url']} → 被封禁(403)")
+            else:
+                proxy_mgr.mark_fail(p)
+                errors.append(f"{p['url']} → {type(e).__name__}: {e}")
 
     # 所有代理都连不通
     if proxy_mgr.force_proxy:
-        raise ApiError(502, "全部代理均不可用，且已开启强制代理（拒绝直连以防暴露真实 IP）。"
+        raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音（防止暴露服务器 IP）。"
                             "请在管理后台检查代理。明细：" + " | ".join(errors[:3]))
-    r = _raw_open(url, follow, hdrs, timeout, None)
+    r = _raw_open(url, follow, hdrs, timeout, None)   # 仅在管理员显式允许时直连
     proxy_mgr.mark_ok(None)
     return r, None
 
@@ -462,7 +494,19 @@ def _content_disposition(name: str) -> str:
 # ---------------------------------------------------------------- 核心解析
 
 _cache: dict = {}
+_author_cache: dict = {}          # item_id -> (ts, 作者结构化详情)
 CDN_HEADERS = {"Referer": "https://www.douyin.com/"}
+
+
+def _play_api(vid: str) -> str:
+    """无水印播放接口地址。交给用户浏览器直接请求：
+
+    浏览器 GET 该地址 → 302 → 跟随到 CDN 直链（按浏览器自身 IP/地区解析）→ 播放。
+    这样视频字节不经过本服务器（省带宽、不暴露服务器 IP），且 CDN 直链与浏览器
+    同 IP，避免"服务器/代理 IP 解析的直链换个 IP 打不开"的问题。
+    实测该接口对桌面 UA / 无 UA 均返回 200，浏览器可直连。
+    """
+    return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
 
 
 def _parse_share(text: str) -> dict:
@@ -488,7 +532,7 @@ def _parse_share(text: str) -> dict:
         kind = "note"
 
     try:
-        page, _ = open_url(f"https://www.iesdouyin.com/share/{kind}/{item_id}/")
+        page, used_proxy = open_url(f"https://www.iesdouyin.com/share/{kind}/{item_id}/")
         html = page.read().decode("utf-8", "ignore")
     except ApiError:
         raise
@@ -497,7 +541,12 @@ def _parse_share(text: str) -> dict:
 
     dm = re.search(r"window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*</script>", html, re.S)
     if not dm:
-        raise ApiError(502, "分享页结构已变更，未找到视频数据（需要更新解析逻辑）")
+        # 分享页正常必有 _ROUTER_DATA；没有 = 被返回验证/风控页。
+        # 若是经代理请求，判定该代理 IP 被封禁：落库、禁用、上抛。
+        if used_proxy:
+            proxy_mgr.mark_banned(used_proxy, "分享页返回验证/无数据，IP 被风控封禁")
+            raise ApiError(502, "代理 IP 被抖音风控（返回验证页），已自动封禁并禁用该代理，请重试")
+        raise ApiError(502, "分享页无数据，可能被风控或页面结构变更，请稍后重试")
     data = json.loads(dm.group(1))
 
     items = next((i for i in _find_key(data, "item_list") if i), None)
@@ -506,15 +555,58 @@ def _parse_share(text: str) -> dict:
     item = items[0]
 
     desc = item.get("desc", "") or ""
-    author = next(_find_key(item.get("author") or {}, "nickname"), "") or ""
-    avatar_list = next(_find_key(item.get("author") or {}, "url_list"), None) or []
+    au = item.get("author") or {}
+    author = au.get("nickname") or next(_find_key(au, "nickname"), "") or ""
+    avatar_list = next(_find_key(au, "url_list"), None) or []
+    avatar = avatar_list[0] if avatar_list else ""
     base = _safe_name(desc, item_id)
 
+    # 作者结构化详情：缓存到服务端，供前端悬停 2s 拉取做浮层
+    sec_uid = au.get("sec_uid") or ""
+    homepage = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else ""
+    author_detail = {
+        "nickname": author,
+        "avatar": avatar,
+        "sec_uid": sec_uid,
+        "douyin_id": au.get("unique_id") or au.get("short_id") or "",
+        "signature": (au.get("signature") or "").strip(),
+        "aweme_count": au.get("aweme_count"),
+        "following_count": au.get("following_count"),
+        "follower_count": au.get("mplatform_followers_count") or au.get("follower_count"),
+        "total_favorited": au.get("total_favorited"),      # 获赞总数（分享页多为空，浮层时富化）
+        "homepage": homepage,
+        "enriched": False,
+    }
+    _author_cache[item_id] = (time.time(), author_detail)
+
+    # 作品互动数据（点赞/评论/收藏/分享）—— 分享页直接给，无需额外请求
+    st = item.get("statistics") or {}
+    stats = {
+        "digg": st.get("digg_count"),        # 点赞
+        "comment": st.get("comment_count"),  # 评论
+        "collect": st.get("collect_count"),  # 收藏
+        "share": st.get("share_count"),      # 分享
+    }
+
+    # 更多可直接读取的元数据
+    tags = [t.get("hashtag_name") for t in (item.get("text_extra") or []) if t.get("hashtag_name")]
+    mu = item.get("music") or {}
+    music = {"title": mu.get("title"), "author": mu.get("author")} if mu.get("title") else None
+    poi = item.get("aweme_poi_info") or {}
+    location = poi.get("poi_name") or (item.get("anchor_info") or {}).get("name") or None
+
+    # 缩略图（封面/头像）直接给 CDN 直链，由浏览器直连加载
     result = {
         "kind": kind, "item_id": item_id, "title": desc or "（无标题）",
         "author": author,
-        "avatar": _proxy_url(avatar_list[0]) if avatar_list else "",
+        "avatar": avatar,
+        "author_url": homepage,
         "create_time": item.get("create_time"),
+        "stats": stats,
+        "tags": tags,
+        "music": music,
+        "location": location,
+        "base": base,
     }
 
     if kind == "note":
@@ -522,13 +614,9 @@ def _parse_share(text: str) -> dict:
         if not images:
             raise ApiError(404, "图集中未找到图片")
         urls = [img["url_list"][0] for img in images if img.get("url_list")]
-        result["images"] = [{
-            "view": _proxy_url(u),
-            "download": _proxy_url(u, name=f"{base}_{i:02d}.jpeg", download=True),
-        } for i, u in enumerate(urls, 1)]
-        result["album_zip"] = f"/api/album/{item_id}.zip"
-        result["_image_urls"] = urls
-        result["_base"] = base
+        # 直链交给浏览器直接查看 / 下载
+        result["images"] = [{"url": u, "filename": f"{base}_{i:02d}.jpeg"}
+                            for i, u in enumerate(urls, 1)]
         return result
 
     video = item.get("video") or {}
@@ -543,11 +631,13 @@ def _parse_share(text: str) -> dict:
 
     result.update({
         "duration_ms": video.get("duration") or 0,
-        "cover": _proxy_url(cover_list[0]) if cover_list else "",
+        "cover": cover_list[0] if cover_list else "",
         "video": {
-            "stream": f"/api/video/{vid}",
-            "download": f"/api/video/{vid}?dl=1&name={urlparse.quote(base + '.mp4')}",
+            "url": _play_api(vid),                    # 浏览器直连播放/下载（自行跟随 302）
+            "proxy_url": f"/api/video/{vid}",         # 兜底：直连失败时改走服务器代理
             "filename": f"{base}.mp4",
+            "width": video.get("width"),
+            "height": video.get("height"),
         },
     })
     return result
@@ -577,10 +667,49 @@ class ParseBody(BaseModel):
 
 @app.post("/api/parse")
 def api_parse(body: ParseBody):
-    data = dict(_parse_cached(body.text))
-    data.pop("_image_urls", None)
-    data.pop("_base", None)
-    return data
+    return _parse_cached(body.text)
+
+
+def _fetch_user_info(sec_uid: str) -> dict:
+    """经代理拉取作者主页统计（免签名 reflow 接口）：粉丝数、获赞数、作品数等。"""
+    url = f"https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid={sec_uid}"
+    # 浏览器无法跨域取（抖音接口无 CORS），只能服务器代拉 —— 走代理，不暴露服务器 IP
+    resp, _ = open_url(url, headers={"Referer": "https://www.iesdouyin.com/"})
+    ui = (json.loads(resp.read().decode("utf-8", "ignore")) or {}).get("user_info") or {}
+    return {
+        "follower_count": ui.get("mplatform_followers_count"),
+        "total_favorited": ui.get("total_favorited"),
+        "following_count": ui.get("following_count"),
+        "aweme_count": ui.get("aweme_count"),
+        "douyin_id": ui.get("unique_id") or "",
+        "signature": (ui.get("signature") or "").strip(),
+    }
+
+
+@app.get("/api/author")
+def api_author(item_id: str):
+    """作者结构化详情（供前端悬停浮层）。
+
+    基础字段来自解析时缓存的分享页 author 对象；首次请求时再直连（不走代理）拉一次
+    user/info 富化粉丝数/获赞数（分享页不给这两项），结果服务端缓存 10 分钟。
+    注：抖音该接口无 CORS/JSONP，浏览器无法跨域直取，故由服务器直连（非代理）代拉。
+    """
+    hit = _author_cache.get(item_id)
+    if not hit:
+        raise ApiError(404, "作者信息不存在或已过期，请重新解析该视频")
+    detail = hit[1]
+    if detail.get("enriched") and time.time() - hit[0] < 600:
+        return detail
+    sec = detail.get("sec_uid")
+    if sec:
+        try:
+            merged = {**detail, **{k: v for k, v in _fetch_user_info(sec).items() if v is not None},
+                      "enriched": True}
+            _author_cache[item_id] = (time.time(), merged)
+            return merged
+        except Exception:
+            pass                         # 富化失败就返回基础字段，不影响头像浮层
+    return detail
 
 
 class BatchBody(BaseModel):
@@ -601,10 +730,7 @@ def api_parse_batch(body: BatchBody):
     out = []
     for l in uniq[:20]:
         try:
-            d = dict(_parse_cached(l))
-            d.pop("_image_urls", None)
-            d.pop("_base", None)
-            out.append({"ok": True, "link": l, "data": d})
+            out.append({"ok": True, "link": l, "data": _parse_cached(l)})
         except ApiError as e:
             out.append({"ok": False, "link": l, "error": e.message})
         except Exception as e:
@@ -621,6 +747,7 @@ def api_video(vid: str, request: Request, dl: str = "", name: str = "video.mp4")
     if request.headers.get("range"):
         extra["Range"] = request.headers["range"]
     try:
+        # 播放兜底（浏览器直连失败时才走这里）：经代理，绝不暴露服务器 IP
         resp, _ = open_url(upstream, headers=extra)
     except ApiError:
         raise
@@ -646,7 +773,7 @@ def api_media(url: str, name: str = "", dl: str = ""):
     if not _host_allowed(url):
         raise ApiError(403, "该资源域名不在允许范围内")
     try:
-        resp, _ = open_url(url, headers=CDN_HEADERS)
+        resp, _ = open_url(url, headers=CDN_HEADERS)   # 图片兜底代理：经代理，不暴露服务器 IP
     except ApiError:
         raise
     except Exception:
@@ -660,27 +787,8 @@ def api_media(url: str, name: str = "", dl: str = ""):
     return StreamingResponse(_stream(resp), media_type=ctype, headers=headers)
 
 
-@app.get("/api/album/{item_id}.zip")
-def api_album_zip(item_id: str):
-    hit = _cache.get(item_id)
-    if not hit or time.time() - hit[0] > CACHE_TTL:
-        raise ApiError(410, "解析结果已过期，请重新粘贴链接解析后再打包下载")
-    data = hit[1]
-    urls = data.get("_image_urls") or []
-    if not urls:
-        raise ApiError(400, "该作品不是图集")
-    base = data.get("_base") or item_id
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
-        for i, u in enumerate(urls, 1):
-            try:
-                r, _ = open_url(u, headers=CDN_HEADERS)
-                zf.writestr(f"{base}_{i:02d}.jpeg", r.read())
-            except Exception:
-                continue
-    buf.seek(0)
-    return Response(buf.getvalue(), media_type="application/zip",
-                    headers={"Content-Disposition": _content_disposition(f"{base}.zip")})
+# 注：图集打包 ZIP 需服务器逐张下载再压缩，会走服务器 IP/带宽，
+# 与"下载走浏览器直连"的设计冲突，已改为前端逐张浏览器直连下载（downloadAll）。
 
 
 # ---------------------------------------------------------------- 管理后台
