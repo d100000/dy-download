@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "douyin-dl-server",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "3344"],
+      "port": 3344
+    }
+  ]
+}

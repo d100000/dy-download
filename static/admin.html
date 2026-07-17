@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代理管理 · 抖音下载器</title>
+<style>
+:root{
+  --bg:#0E1013; --surface:#16191E; --surface-2:#1C2026; --border:#272C34; --border-strong:#343B45;
+  --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#fff;
+  --ok:#25F4EE;
+  --green:#3DD68C; --green-bg:#12271E;
+  --warn:#F5C451; --warn-bg:#2A2412;
+  --danger:#FF5C7E; --danger-bg:#2A161B; --danger-border:#57222E;
+  --shadow:0 20px 50px -24px rgba(0,0,0,.6); --radius:14px;
+}
+:root[data-theme="light"]{
+  --bg:#F5F7FA; --surface:#fff; --surface-2:#F2F4F7; --border:#E4E7EC; --border-strong:#CBD2DB;
+  --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
+  --accent:#E0234E; --accent-hover:#C71D44;
+  --ok:#0FA8A0;
+  --green:#0E9F6E; --green-bg:#E3F5EC;
+  --warn:#B7791F; --warn-bg:#FBF3E2;
+  --danger:#B4173C; --danger-bg:#FDECEF; --danger-border:#F5C2CC;
+  --shadow:0 16px 40px -24px rgba(23,25,29,.18);
+}
+*{box-sizing:border-box; margin:0}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh;
+  font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC",system-ui,sans-serif;
+  font-size:14.5px; line-height:1.65; -webkit-font-smoothing:antialiased;
+}
+button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
+input,select,textarea{font:inherit; color:inherit}
+a{color:var(--accent); text-decoration:none}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:6px}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.tnum{font-variant-numeric:tabular-nums}
+.container{max-width:1040px; margin:0 auto; padding:0 20px 60px}
+
+nav{display:flex; align-items:center; justify-content:space-between; padding:20px 0; border-bottom:1px solid var(--border); margin-bottom:24px}
+.brand{display:flex; align-items:center; gap:10px; font-weight:700}
+.logo{width:30px; height:30px; border-radius:8px; background:#000; display:grid; place-items:center; color:#fff;
+  box-shadow:-2px 0 0 rgba(37,244,238,.85), 2px 0 0 rgba(254,44,85,.85)}
+.brand .tag{font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; background:var(--surface-2); color:var(--muted); border:1px solid var(--border)}
+.nav-actions{display:flex; gap:8px; align-items:center}
+.icon-btn{width:34px; height:34px; border-radius:9px; display:grid; place-items:center; border:1px solid var(--border); background:var(--surface)}
+.icon-btn:hover{border-color:var(--border-strong)}
+
+.btn{display:inline-flex; align-items:center; gap:7px; padding:9px 16px; border-radius:10px; font-weight:600; font-size:14px; border:1px solid transparent; transition:.15s; white-space:nowrap}
+.btn-primary{background:var(--accent); color:var(--accent-ink)}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-ghost{background:var(--surface); border-color:var(--border); color:var(--text)}
+.btn-ghost:hover{border-color:var(--border-strong)}
+.btn-sm{padding:5px 11px; font-size:12.5px; border-radius:8px}
+.btn:disabled{opacity:.5; cursor:not-allowed}
+
+.login-wrap{max-width:380px; margin:12vh auto 0; text-align:center}
+.login-card{background:var(--surface); border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow); padding:32px 28px; margin-top:22px}
+.login-card h2{font-size:19px; margin-bottom:6px}
+.login-card p{color:var(--muted); font-size:13px; margin-bottom:20px}
+.field{display:flex; flex-direction:column; gap:7px; text-align:left; margin-bottom:16px}
+.field label{font-size:12.5px; color:var(--muted); font-weight:600}
+input[type=password],input[type=text],input[type=number],select,textarea{
+  width:100%; background:var(--surface-2); border:1px solid var(--border); border-radius:10px;
+  padding:9px 12px; outline:none; transition:border-color .15s;
+}
+input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+textarea{resize:vertical; min-height:76px}
+select{cursor:pointer}
+
+.dash{display:none}
+.dash.show{display:block}
+.stat-row{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:22px}
+.stat{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:15px 18px}
+.stat .k{font-size:12px; color:var(--muted)}
+.stat .v{font-size:23px; font-weight:700; margin-top:3px}
+.stat .v small{font-size:13px; font-weight:500; color:var(--muted)}
+
+.panel{background:var(--surface); border:1px solid var(--border); border-radius:16px; box-shadow:var(--shadow); overflow:hidden; margin-bottom:20px}
+.panel-head{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:15px 20px; border-bottom:1px solid var(--border); flex-wrap:wrap}
+.panel-head h3{font-size:15px; font-weight:700}
+.panel-head .desc{font-size:12.5px; color:var(--muted); margin-top:2px}
+.panel-body{padding:18px 20px}
+
+.add-grid{display:flex; gap:12px; align-items:stretch; flex-wrap:wrap}
+.add-grid textarea{flex:1; min-width:260px}
+.add-side{display:flex; flex-direction:column; gap:8px; min-width:150px}
+.add-side label{font-size:12px; color:var(--muted); font-weight:600}
+.hint{font-size:12px; color:var(--faint); margin-top:10px; line-height:1.8}
+.hint code{background:var(--surface-2); padding:1px 5px; border-radius:4px}
+.preview{margin-top:12px; display:none}
+.preview.show{display:block}
+.preview .pv{font-size:12.5px; padding:4px 0; border-top:1px dashed var(--border); display:flex; gap:10px; align-items:center}
+.preview .pv:first-child{border-top:none}
+.pv .arrow{color:var(--faint)}
+
+.tbl-wrap{overflow-x:auto}
+table{border-collapse:collapse; width:100%; font-size:13.5px}
+th{text-align:left; font-size:11.5px; letter-spacing:.04em; color:var(--muted); font-weight:600; padding:10px 12px; border-bottom:1.5px solid var(--border); white-space:nowrap}
+td{padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.url-cell{max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.dot{display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:1px}
+.dot.on{background:var(--green)} .dot.off{background:var(--faint)}
+.badge{font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; white-space:nowrap}
+.badge.ok{background:var(--green-bg); color:var(--green)}
+.badge.bad{background:var(--danger-bg); color:var(--danger)}
+.badge.idle{background:var(--surface-2); color:var(--muted)}
+.badge.warn{background:var(--warn-bg); color:var(--warn)}
+.row-actions{display:flex; gap:6px; justify-content:flex-end}
+.empty{text-align:center; color:var(--muted); padding:34px 12px; font-size:13.5px}
+
+.switch{position:relative; display:inline-block; width:42px; height:24px; flex:none}
+.switch input{opacity:0; width:0; height:0}
+.slider{position:absolute; inset:0; background:var(--surface-2); border:1px solid var(--border); border-radius:99px; transition:.2s}
+.slider::before{content:""; position:absolute; height:16px; width:16px; left:3px; top:3px; background:var(--faint); border-radius:50%; transition:.2s}
+.switch input:checked + .slider{background:var(--accent); border-color:var(--accent)}
+.switch input:checked + .slider::before{transform:translateX(18px); background:#fff}
+
+.settings-grid{display:grid; grid-template-columns:1fr 1fr; gap:2px 40px}
+@media (max-width:640px){ .settings-grid{grid-template-columns:1fr} }
+.setting-row{display:flex; align-items:center; justify-content:space-between; gap:16px; padding:12px 0; border-bottom:1px solid var(--border)}
+.setting-row .label b{font-size:13.5px} .setting-row .label p{font-size:12px; color:var(--muted); margin-top:2px}
+.setting-row .ctl{flex:none}
+.setting-row select,.setting-row input[type=number]{width:120px}
+
+#toast{position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(20px); opacity:0;
+  background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow); color:var(--text);
+  padding:11px 18px; border-radius:11px; font-size:13.5px; transition:.25s; pointer-events:none; z-index:50; max-width:90vw}
+#toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+#toast.err{border-color:var(--danger-border); color:var(--danger)}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(128,128,128,.35);border-top-color:var(--accent);display:inline-block;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="container">
+  <nav>
+    <div class="brand"><span class="logo">♪</span> 代理管理 <span class="tag">抖音下载器</span></div>
+    <div class="nav-actions">
+      <a class="btn btn-ghost btn-sm" href="/">← 返回下载器</a>
+      <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换明暗主题">◐</button>
+      <button class="btn btn-ghost btn-sm" id="logoutBtn" style="display:none">退出登录</button>
+    </div>
+  </nav>
+
+  <!-- 登录 -->
+  <div class="login-wrap" id="loginView">
+    <div class="login-card">
+      <h2>管理员登录</h2>
+      <p>输入管理密码以配置代理池</p>
+      <form id="loginForm">
+        <div class="field"><label for="pw">管理密码</label>
+          <input type="password" id="pw" autocomplete="current-password" placeholder="ADMIN_PASSWORD"></div>
+        <button class="btn btn-primary" style="width:100%; justify-content:center" type="submit">登录</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 仪表盘 -->
+  <div class="dash" id="dashView">
+    <div class="stat-row" id="statRow"></div>
+
+    <!-- 添加 -->
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>添加代理</h3><div class="desc">一次可粘贴多个，换行 / 逗号 / 分号分隔，自动去重</div></div>
+      </div>
+      <div class="panel-body">
+        <div class="add-grid">
+          <textarea id="proxyInput" placeholder="socks5://user:pass@1.2.3.4:1080&#10;1.2.3.4:1080:user:pass&#10;user:pass@1.2.3.4:8080&#10;1.2.3.4:1080"></textarea>
+          <div class="add-side">
+            <label for="defProto">默认协议（无前缀时）</label>
+            <select id="defProto">
+              <option value="socks5">socks5</option>
+              <option value="socks5h">socks5h（远端 DNS）</option>
+              <option value="http">http</option>
+              <option value="https">https</option>
+              <option value="socks4">socks4</option>
+              <option value="socks4a">socks4a</option>
+            </select>
+            <button class="btn btn-ghost" id="previewBtn">预览解析</button>
+            <button class="btn btn-primary" id="addBtn">添加入库</button>
+          </div>
+        </div>
+        <div class="preview" id="previewBox"></div>
+        <div class="hint">
+          兼容格式：<code>scheme://user:pass@host:port</code>、<code>host:port:user:pass</code>、<code>user:pass@host:port</code>、<code>host:port</code>。
+          协议支持 <code>socks5</code> <code>socks5h</code> <code>socks4</code> <code>socks4a</code> <code>http</code> <code>https</code>。
+        </div>
+      </div>
+    </div>
+
+    <!-- 列表 -->
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>代理列表</h3><div class="desc">所有解析 / 封面 / 视频 / 图集请求都会按策略轮换走这些代理，失败自动转移</div></div>
+        <div style="display:flex; gap:8px">
+          <button class="btn btn-ghost btn-sm" id="testAllBtn">全部测速</button>
+          <button class="btn btn-ghost btn-sm" id="refreshBtn">刷新</button>
+        </div>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>状态</th><th>代理地址</th><th>协议</th><th>出口 IP</th><th>延迟</th><th>抖音</th><th>成功/失败</th><th>启用</th><th></th>
+        </tr></thead>
+        <tbody id="proxyBody"></tbody>
+      </table></div>
+      <div class="empty" id="emptyRow" style="display:none">还没有代理。添加后，所有出站请求将自动走代理。</div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="panel">
+      <div class="panel-head"><div><h3>代理策略与安全</h3></div></div>
+      <div class="panel-body">
+        <div class="settings-grid">
+          <div class="setting-row">
+            <div class="label"><b>强制走代理</b><p>代理全挂时报错而非用真实 IP 直连</p></div>
+            <label class="switch ctl"><input type="checkbox" id="s_force"><span class="slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>轮换策略</b><p>轮询 / 随机 / 最少失败优先</p></div>
+            <select class="ctl" id="s_rotation">
+              <option value="round_robin">轮询</option>
+              <option value="random">随机</option>
+              <option value="least_fail">最少失败</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>每请求重试代理数</b><p>失败自动换下一个，最多尝试几个</p></div>
+            <input class="ctl" type="number" id="s_retries" min="1" max="10">
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>默认协议</b><p>无协议前缀的代理按此解析</p></div>
+            <select class="ctl" id="s_defproto">
+              <option value="socks5">socks5</option>
+              <option value="socks5h">socks5h</option>
+              <option value="http">http</option>
+              <option value="https">https</option>
+              <option value="socks4">socks4</option>
+              <option value="socks4a">socks4a</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>自动健康检查</b><p>后台定时测速，失败自动禁用、恢复自愈</p></div>
+            <label class="switch ctl"><input type="checkbox" id="s_autohealth"><span class="slider"></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>检查间隔（分钟）</b><p>后台健康检查频率</p></div>
+            <input class="ctl" type="number" id="s_interval" min="1" max="1440">
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>连续失败自动禁用</b><p>达到次数自动停用（0 = 不自动禁用）</p></div>
+            <input class="ctl" type="number" id="s_autodisable" min="0" max="100">
+          </div>
+          <div class="setting-row">
+            <div class="label"><b>测速时检测抖音可达</b><p>额外确认代理能连上抖音</p></div>
+            <label class="switch ctl"><input type="checkbox" id="s_reach"><span class="slider"></span></label>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const root = document.documentElement;
+root.dataset.theme = localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+$('#themeBtn').onclick = () => { root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light'; localStorage.setItem('theme', root.dataset.theme); };
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let toastT;
+function toast(msg, err=false){ const t=$('#toast'); t.textContent=msg; t.className='show'+(err?' err':''); clearTimeout(toastT); toastT=setTimeout(()=>t.className='',2800); }
+async function api(path, opts={}){
+  const r = await fetch(path, {headers:{'Content-Type':'application/json'}, ...opts});
+  const d = await r.json().catch(()=>({}));
+  if(!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  return d;
+}
+
+/* 登录 */
+$('#loginForm').onsubmit = async e => { e.preventDefault();
+  try { await api('/api/admin/login', {method:'POST', body:JSON.stringify({password:$('#pw').value})}); enter(); }
+  catch(err){ toast(err.message, true); } };
+$('#logoutBtn').onclick = async () => { await api('/api/admin/logout', {method:'POST'}); location.reload(); };
+function enter(){ $('#loginView').style.display='none'; $('#dashView').classList.add('show'); $('#logoutBtn').style.display=''; load(); }
+
+/* 加载 */
+const proto = u => (u.match(/^(\w+):\/\//)||[])[1] || 'http';
+const stripCred = u => u.replace(/\/\/[^@/]+@/, '//••••@');
+const ago = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); if(s<60)return s+'秒前'; if(s<3600)return Math.floor(s/60)+'分前'; if(s<86400)return Math.floor(s/3600)+'时前'; return Math.floor(s/86400)+'天前'; };
+
+async function load(){
+  let s;
+  try { s = await api('/api/admin/state'); } catch(err){ return; }
+  const st = s.stats, en = s.proxies.filter(p=>p.enabled).length,
+        reach = s.proxies.filter(p=>p.douyin_ok===true).length;
+  $('#statRow').innerHTML = `
+    <div class="stat"><div class="k">代理总数</div><div class="v tnum">${s.proxies.length} <small>/ 启用 ${en}</small></div></div>
+    <div class="stat"><div class="k">抖音可达</div><div class="v tnum">${reach}</div></div>
+    <div class="stat"><div class="k">经代理 / 直连</div><div class="v tnum">${st.via_proxy}<small> / ${st.direct}</small></div></div>
+    <div class="stat"><div class="k">自动重试次数</div><div class="v tnum">${st.retries||0}</div></div>`;
+
+  // settings
+  const g = s.settings;
+  $('#s_force').checked = !!g.force_proxy;
+  $('#s_rotation').value = g.rotation || 'round_robin';
+  $('#s_retries').value = g.retries ?? 3;
+  $('#s_defproto').value = g.default_protocol || 'socks5';
+  $('#defProto').value = g.default_protocol || 'socks5';
+  $('#s_autohealth').checked = !!g.auto_health;
+  $('#s_interval').value = g.health_interval_min ?? 10;
+  $('#s_autodisable').value = g.auto_disable_fail ?? 5;
+  $('#s_reach').checked = !!g.test_reach_douyin;
+
+  // table
+  $('#emptyRow').style.display = s.proxies.length ? 'none' : '';
+  $('#proxyBody').innerHTML = s.proxies.map(p => {
+    const health = p.auto_off ? `<span class="badge warn">自动停用</span>`
+      : p.fail>=3 ? `<span class="badge bad">异常</span>`
+      : p.last_ok ? `<span class="badge ok">正常</span>` : `<span class="badge idle">未测</span>`;
+    const dy = p.douyin_ok===true ? `<span class="badge ok">可达</span>`
+      : p.douyin_ok===false ? `<span class="badge bad">不可达</span>` : '—';
+    return `<tr>
+      <td><span class="dot ${p.enabled?'on':'off'}"></span>${health}</td>
+      <td class="url-cell mono" title="${esc(p.url)}">${esc(stripCred(p.url))}</td>
+      <td><span class="badge idle">${proto(p.url)}</span></td>
+      <td class="mono tnum">${p.exit_ip?esc(p.exit_ip):'—'}</td>
+      <td class="tnum">${p.latency_ms!=null?p.latency_ms+' ms':'—'}</td>
+      <td>${dy}</td>
+      <td class="tnum" title="最近使用 ${ago(p.last_used)}">${p.ok} / ${p.fail}</td>
+      <td><label class="switch"><input type="checkbox" ${p.enabled?'checked':''} onchange="toggleProxy('${p.id}')"><span class="slider"></span></label></td>
+      <td><div class="row-actions">
+        <button class="btn btn-ghost btn-sm" onclick="testProxy('${p.id}', this)">测速</button>
+        <button class="btn btn-ghost btn-sm" onclick="delProxy('${p.id}')" style="color:var(--danger)">删除</button>
+      </div></td></tr>`;
+  }).join('');
+}
+
+/* 预览解析 */
+$('#previewBtn').onclick = async () => {
+  const urls = $('#proxyInput').value.trim();
+  if(!urls){ toast('请先粘贴代理', true); return; }
+  try {
+    const r = await api('/api/admin/proxies/validate', {method:'POST', body:JSON.stringify({urls})});
+    const box = $('#previewBox');
+    box.innerHTML = r.results.map(x => `<div class="pv">
+      ${x.ok?'<span class="badge ok">✓</span>':'<span class="badge bad">✗</span>'}
+      <span class="mono" style="color:var(--muted)">${esc(x.raw)}</span>
+      <span class="arrow">→</span>
+      <span class="mono">${x.ok?esc(x.parsed):'无法解析'}</span></div>`).join('');
+    box.classList.add('show');
+  } catch(err){ toast(err.message, true); }
+};
+
+/* 操作 */
+$('#addBtn').onclick = async () => {
+  const urls = $('#proxyInput').value.trim();
+  if(!urls){ toast('请先粘贴代理', true); return; }
+  // 临时把默认协议写入设置（与选择器一致）
+  const proto = $('#defProto').value;
+  try {
+    await api('/api/admin/settings', {method:'POST', body:JSON.stringify({default_protocol:proto})});
+    const r = await api('/api/admin/proxies', {method:'POST', body:JSON.stringify({urls})});
+    $('#proxyInput').value=''; $('#previewBox').classList.remove('show');
+    toast(`已添加 ${r.added} 个${r.skipped.length?`，跳过 ${r.skipped.length} 个（重复/格式错误）`:''}`);
+    load();
+  } catch(err){ toast(err.message, true); }
+};
+window.delProxy = async id => { if(!confirm('确定删除该代理？')) return;
+  try { await api('/api/admin/proxies/'+id, {method:'DELETE'}); toast('已删除'); load(); } catch(err){ toast(err.message, true); } };
+window.toggleProxy = async id => { try { await api('/api/admin/proxies/'+id+'/toggle', {method:'POST'}); load(); } catch(err){ toast(err.message, true); } };
+window.testProxy = async (id, btn) => {
+  const old=btn.innerHTML; btn.innerHTML='<span class="spin"></span>'; btn.disabled=true;
+  try { const r = await api('/api/admin/proxies/'+id+'/test', {method:'POST'});
+    toast(r.ok ? `出口 IP ${r.exit_ip} · ${r.latency_ms}ms${r.douyin_ok===true?' · 抖音可达':r.douyin_ok===false?' · 抖音不可达':''}` : `不可用：${r.error}`, !r.ok);
+  } catch(err){ toast(err.message, true); } finally { btn.innerHTML=old; btn.disabled=false; load(); }
+};
+$('#testAllBtn').onclick = async e => {
+  const btn=e.currentTarget, old=btn.innerHTML; btn.innerHTML='<span class="spin"></span> 测速中'; btn.disabled=true;
+  try { const r = await api('/api/admin/proxies/test-all', {method:'POST'}); toast(`完成：${r.ok}/${r.total} 个可用`); }
+  catch(err){ toast(err.message, true); } finally { btn.innerHTML=old; btn.disabled=false; load(); }
+};
+$('#refreshBtn').onclick = load;
+
+/* 设置项即时保存 */
+async function saveSetting(payload, revert){
+  try { await api('/api/admin/settings', {method:'POST', body:JSON.stringify(payload)}); toast('已保存'); }
+  catch(err){ toast(err.message, true); if(revert) revert(); }
+}
+$('#s_force').onchange = e => saveSetting({force_proxy:e.target.checked}, ()=>e.target.checked=!e.target.checked);
+$('#s_rotation').onchange = e => saveSetting({rotation:e.target.value});
+$('#s_retries').onchange = e => saveSetting({retries:+e.target.value});
+$('#s_defproto').onchange = e => { $('#defProto').value=e.target.value; saveSetting({default_protocol:e.target.value}); };
+$('#s_autohealth').onchange = e => saveSetting({auto_health:e.target.checked}, ()=>e.target.checked=!e.target.checked);
+$('#s_interval').onchange = e => saveSetting({health_interval_min:+e.target.value});
+$('#s_autodisable').onchange = e => saveSetting({auto_disable_fail:+e.target.value});
+$('#s_reach').onchange = e => saveSetting({test_reach_douyin:e.target.checked}, ()=>e.target.checked=!e.target.checked);
+
+/* 启动 */
+(async () => { try { await api('/api/admin/state'); enter(); } catch {} })();
+</script>
+</body>
+</html>

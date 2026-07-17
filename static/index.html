@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>抖音无水印下载器 · 粘贴链接即下</title>
+<meta name="description" content="免登录、免签名的抖音视频/图集无水印下载工具，粘贴分享链接即可在线预览与下载。">
+<style>
+:root{
+  --bg:#0E1013; --bg-glow-a:rgba(254,44,85,.10); --bg-glow-b:rgba(37,244,238,.06);
+  --surface:#16191E; --surface-2:#1C2026; --border:#272C34; --border-strong:#343B45;
+  --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#FFFFFF;
+  --ok:#25F4EE; --ok-ink:#062B29; --danger-bg:#2A161B; --danger-border:#57222E; --danger-text:#FF97AC;
+  --shadow:0 24px 60px -24px rgba(0,0,0,.6);
+  --radius:16px;
+}
+:root[data-theme="light"]{
+  --bg:#F7F8FA; --bg-glow-a:rgba(224,35,78,.07); --bg-glow-b:rgba(15,168,160,.06);
+  --surface:#FFFFFF; --surface-2:#F2F4F7; --border:#E4E7EC; --border-strong:#CBD2DB;
+  --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
+  --accent:#E0234E; --accent-hover:#C71D44; --accent-ink:#FFFFFF;
+  --ok:#0FA8A0; --ok-ink:#FFFFFF; --danger-bg:#FDECEF; --danger-border:#F5C2CC; --danger-text:#B4173C;
+  --shadow:0 20px 50px -24px rgba(23,25,29,.18);
+}
+*{box-sizing:border-box; margin:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh;
+  font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px; line-height:1.7; -webkit-font-smoothing:antialiased;
+  background-image:radial-gradient(720px 400px at 50% -80px, var(--bg-glow-a), transparent 70%),
+                   radial-gradient(600px 360px at 82% 8%, var(--bg-glow-b), transparent 70%);
+  background-repeat:no-repeat;
+}
+button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:6px}
+::selection{background:var(--accent); color:#fff}
+
+.container{max-width:880px; margin:0 auto; padding:0 20px}
+
+/* ---------- nav ---------- */
+nav{display:flex; align-items:center; justify-content:space-between; padding:20px 0}
+.brand{display:flex; align-items:center; gap:10px; font-weight:700; font-size:16px}
+.logo{
+  width:32px; height:32px; border-radius:9px; background:#000;
+  display:grid; place-items:center; color:#fff; font-size:14px;
+  box-shadow:-2px 0 0 rgba(37,244,238,.85), 2px 0 0 rgba(254,44,85,.85);
+}
+:root[data-theme="light"] .logo{box-shadow:-2px 0 0 rgba(15,168,160,.7), 2px 0 0 rgba(224,35,78,.75)}
+.brand small{font-weight:500; color:var(--muted); font-size:12px; margin-left:2px}
+.icon-btn{
+  width:36px; height:36px; border-radius:10px; display:grid; place-items:center;
+  border:1px solid var(--border); background:var(--surface); font-size:15px;
+  transition:border-color .15s;
+}
+.icon-btn:hover{border-color:var(--border-strong)}
+
+/* ---------- hero ---------- */
+.hero{text-align:center; padding:52px 0 36px}
+h1{font-size:clamp(28px,5.4vw,42px); font-weight:700; line-height:1.25; letter-spacing:-.01em; text-wrap:balance}
+h1 .hl{color:var(--accent)}
+.hero p{color:var(--muted); margin-top:12px; font-size:16px}
+
+/* ---------- composer ---------- */
+.composer{
+  background:var(--surface); border:1px solid var(--border); border-radius:20px;
+  box-shadow:var(--shadow); padding:16px 16px 12px; margin-top:30px;
+  transition:border-color .15s;
+}
+.composer:focus-within{border-color:var(--accent)}
+.composer textarea{
+  width:100%; min-height:74px; max-height:200px; resize:none; border:none; background:none;
+  color:var(--text); font:inherit; font-size:15px; outline:none; padding:4px 6px;
+}
+.composer textarea::placeholder{color:var(--faint)}
+.composer-bar{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; flex-wrap:wrap}
+.ghost-btn{
+  display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:10px;
+  border:1px solid var(--border); color:var(--muted); font-size:13.5px; background:var(--surface-2);
+  transition:all .15s;
+}
+.ghost-btn:hover{color:var(--text); border-color:var(--border-strong)}
+.primary-btn{
+  display:inline-flex; align-items:center; gap:8px; padding:10px 26px; border-radius:12px;
+  background:var(--accent); color:var(--accent-ink); font-weight:600; font-size:15px;
+  transition:background .15s, transform .1s;
+}
+.primary-btn:hover{background:var(--accent-hover)}
+.primary-btn:active{transform:scale(.98)}
+.primary-btn:disabled{opacity:.55; cursor:not-allowed}
+.spinner{
+  width:15px; height:15px; border-radius:50%;
+  border:2px solid rgba(255,255,255,.35); border-top-color:#fff;
+  animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){ .spinner{animation-duration:1.6s} }
+
+/* ---------- steps ---------- */
+.steps{display:flex; justify-content:center; gap:10px; margin-top:22px; flex-wrap:wrap}
+.step-chip{
+  display:flex; align-items:center; gap:8px; padding:7px 15px; border-radius:99px;
+  border:1px solid var(--border); background:var(--surface); color:var(--muted); font-size:13px;
+}
+.step-chip b{
+  width:18px; height:18px; border-radius:50%; background:var(--surface-2); color:var(--text);
+  display:grid; place-items:center; font-size:11px; font-weight:600;
+  font-variant-numeric:tabular-nums;
+}
+
+/* ---------- alert ---------- */
+.alert{
+  display:none; margin-top:20px; padding:14px 18px; border-radius:14px;
+  background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger-text);
+  font-size:14px; gap:10px; align-items:flex-start;
+}
+.alert.show{display:flex}
+.alert svg{flex:none; margin-top:3px}
+
+/* ---------- result ---------- */
+.result{display:none; margin-top:34px}
+.result.show{display:block; animation:rise .35s ease}
+@keyframes rise{from{opacity:0; transform:translateY(10px)} to{opacity:1}}
+@media (prefers-reduced-motion: reduce){ .result.show{animation:none} }
+.card{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow); overflow:hidden;
+}
+.card-body{display:flex; gap:26px; padding:24px}
+@media (max-width:680px){ .card-body{flex-direction:column} }
+.player-wrap{flex:none; width:min(300px,100%); margin:0 auto}
+.player-wrap video{
+  width:100%; aspect-ratio:9/16; max-height:480px; border-radius:12px;
+  background:#000; display:block; object-fit:contain;
+}
+.info{flex:1; min-width:0; display:flex; flex-direction:column; gap:14px}
+.badge{
+  align-self:flex-start; font-size:12px; font-weight:600; letter-spacing:.06em;
+  padding:3px 11px; border-radius:99px; background:var(--surface-2);
+  border:1px solid var(--border); color:var(--muted);
+}
+.v-title{font-size:18px; font-weight:600; line-height:1.55; word-break:break-word}
+.author-row{display:flex; align-items:center; gap:10px}
+.author-row img{width:34px; height:34px; border-radius:50%; background:var(--surface-2); object-fit:cover}
+.author-row .name{font-size:14px; font-weight:500}
+.author-row .sub{font-size:12.5px; color:var(--muted)}
+.meta-row{display:flex; gap:22px; flex-wrap:wrap; padding:12px 0; border-top:1px solid var(--border); border-bottom:1px solid var(--border)}
+.meta-item .k{font-size:12px; color:var(--muted); letter-spacing:.04em}
+.meta-item .v{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums}
+.actions{display:flex; gap:10px; flex-wrap:wrap; margin-top:auto}
+.actions .primary-btn{text-decoration:none}
+a.ghost-btn{text-decoration:none}
+
+/* ---------- album ---------- */
+.album-head{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:20px 24px 0; flex-wrap:wrap}
+.album-grid{
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  gap:12px; padding:18px 24px 24px;
+}
+.album-item{position:relative; border-radius:10px; overflow:hidden; background:var(--surface-2); aspect-ratio:3/4}
+.album-item img{width:100%; height:100%; object-fit:cover; display:block}
+.album-item a{
+  position:absolute; right:8px; bottom:8px; width:32px; height:32px; border-radius:9px;
+  background:rgba(0,0,0,.55); color:#fff; display:grid; place-items:center;
+  backdrop-filter:blur(4px); text-decoration:none; opacity:0; transition:opacity .15s;
+}
+.album-item:hover a, .album-item a:focus-visible{opacity:1}
+.album-item .idx{
+  position:absolute; left:8px; top:8px; font-size:11px; font-weight:600;
+  background:rgba(0,0,0,.5); color:#fff; padding:1px 8px; border-radius:99px;
+  backdrop-filter:blur(4px); font-variant-numeric:tabular-nums;
+}
+
+/* ---------- footer ---------- */
+footer{
+  margin-top:70px; padding:26px 0 40px; border-top:1px solid var(--border);
+  color:var(--faint); font-size:12.5px; text-align:center; line-height:1.9;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<nav>
+  <div class="brand">
+    <span class="logo">♪</span>
+    抖音下载器 <small>无水印 · 免登录</small>
+  </div>
+  <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换明暗主题">◐</button>
+</nav>
+
+<section class="hero">
+  <h1>粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
+  <p>支持视频与图集作品 · 在线预览 · 一键下载 · 不需要登录抖音</p>
+
+  <div class="composer">
+    <textarea id="input" rows="3" placeholder="粘贴抖音分享文案或链接，例如：3.89 复制打开抖音，看看……https://v.douyin.com/xxxx/"></textarea>
+    <div class="composer-bar">
+      <div style="display:flex; gap:8px">
+        <button class="ghost-btn" id="pasteBtn">📋 粘贴</button>
+        <button class="ghost-btn" id="clearBtn">清空</button>
+      </div>
+      <button class="primary-btn" id="parseBtn">
+        <span id="btnSpin" class="spinner" style="display:none"></span>
+        <span id="btnText">解析</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="steps">
+    <span class="step-chip"><b>1</b>App 内复制分享链接</span>
+    <span class="step-chip"><b>2</b>粘贴到上方并解析</span>
+    <span class="step-chip"><b>3</b>在线预览 · 下载原片</span>
+  </div>
+
+  <div class="alert" id="alert" role="alert">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M8 4.5V8.5M8 11.2V11.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <span id="alertText"></span>
+  </div>
+</section>
+
+<section class="result" id="result"></section>
+
+<footer>
+  仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有<br>
+  未经授权请勿二次发布或商用 · 本工具不存储任何视频与账号数据<br>
+  <a href="/admin" style="color:var(--faint)">管理后台</a>
+</footer>
+
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const input = $('#input'), parseBtn = $('#parseBtn'), alertBox = $('#alert'),
+      alertText = $('#alertText'), result = $('#result'),
+      btnSpin = $('#btnSpin'), btnText = $('#btnText');
+
+/* ---------- 主题 ---------- */
+const root = document.documentElement;
+const savedTheme = localStorage.getItem('theme');
+if (savedTheme) root.dataset.theme = savedTheme;
+else root.dataset.theme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+$('#themeBtn').onclick = () => {
+  root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+  localStorage.setItem('theme', root.dataset.theme);
+};
+
+/* ---------- 输入区 ---------- */
+$('#pasteBtn').onclick = async () => {
+  try {
+    input.value = await navigator.clipboard.readText();
+    input.focus();
+  } catch { showError('浏览器未授权读取剪贴板，请手动粘贴（Cmd/Ctrl+V）'); }
+};
+$('#clearBtn').onclick = () => { input.value = ''; hideError(); result.classList.remove('show'); input.focus(); };
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); parse(); }
+});
+
+/* ---------- 报错 ---------- */
+function showError(msg){ alertText.textContent = msg; alertBox.classList.add('show'); }
+function hideError(){ alertBox.classList.remove('show'); }
+
+/* ---------- 解析 ---------- */
+parseBtn.onclick = parse;
+async function parse(){
+  const text = input.value.trim();
+  hideError();
+  if (!text) { showError('请先粘贴抖音分享文案或链接'); return; }
+  setLoading(true);
+  result.classList.remove('show');
+  try {
+    const resp = await fetch('/api/parse', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({text})
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
+    render(data);
+  } catch (e) {
+    showError(e.message || '网络异常，请检查连接后重试');
+  } finally {
+    setLoading(false);
+  }
+}
+function setLoading(on){
+  parseBtn.disabled = on;
+  btnSpin.style.display = on ? '' : 'none';
+  btnText.textContent = on ? '解析中…' : '解析';
+}
+
+/* ---------- 渲染 ---------- */
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtDur = (ms) => {
+  const s = Math.round((ms||0)/1000);
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+};
+
+function render(d){
+  if (d.kind === 'note') renderAlbum(d); else renderVideo(d);
+  result.classList.add('show');
+  result.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+function authorRow(d){
+  return `<div class="author-row">
+    ${d.avatar ? `<img src="${esc(d.avatar)}" alt="">` : ''}
+    <div>
+      <div class="name">${esc(d.author) || '未知作者'}</div>
+      <div class="sub">作品 ID ${esc(d.item_id)}</div>
+    </div>
+  </div>`;
+}
+
+function renderVideo(d){
+  result.innerHTML = `
+  <div class="card">
+    <div class="card-body">
+      <div class="player-wrap">
+        <video controls playsinline preload="metadata"
+               src="${esc(d.video.stream)}" ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
+      </div>
+      <div class="info">
+        <span class="badge">视频 · 无水印</span>
+        <div class="v-title">${esc(d.title)}</div>
+        ${authorRow(d)}
+        <div class="meta-row">
+          <div class="meta-item"><div class="k">时长</div><div class="v">${fmtDur(d.duration_ms)}</div></div>
+          <div class="meta-item"><div class="k">清晰度</div><div class="v">720P</div></div>
+          <div class="meta-item"><div class="k">格式</div><div class="v">MP4</div></div>
+        </div>
+        <div class="actions">
+          <a class="primary-btn" href="${esc(d.video.download)}" download>⬇ 下载视频</a>
+          <a class="ghost-btn" href="${esc(d.video.stream)}" target="_blank" rel="noopener">新窗口播放</a>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderAlbum(d){
+  const imgs = d.images || [];
+  result.innerHTML = `
+  <div class="card">
+    <div class="album-head">
+      <div class="info" style="gap:10px">
+        <span class="badge">图集 · ${imgs.length} 张原图</span>
+        <div class="v-title">${esc(d.title)}</div>
+        ${authorRow(d)}
+      </div>
+      <a class="primary-btn" href="${esc(d.album_zip)}" download>⬇ 打包下载 ZIP</a>
+    </div>
+    <div class="album-grid">
+      ${imgs.map((im, i) => `
+        <figure class="album-item">
+          <span class="idx">${i+1}</span>
+          <img src="${esc(im.view)}" alt="图集第 ${i+1} 张" loading="lazy">
+          <a href="${esc(im.download)}" download title="下载这张" aria-label="下载第 ${i+1} 张">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M7 1.5V9M7 9L4 6M7 9L10 6M2 12.5H12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </a>
+        </figure>`).join('')}
+    </div>
+  </div>`;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 运行时数据（代理池配置、会话）
+data/
+
+# 下载产物
+downloads/
+*.mp4
+*.zip
+
+# 系统
+.DS_Store
+*.log
