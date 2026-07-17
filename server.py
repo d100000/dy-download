@@ -328,6 +328,87 @@ class ProxyManager:
 proxy_mgr = ProxyManager()
 
 
+# ---------------------------------------------------------------- 开放 API 密钥
+
+API_KEYS_FILE = DATA_DIR / "apikeys.json"
+
+
+class APIKeyStore:
+    """开放 API 的密钥 + 每日配额 + 用量统计（商业化底座）。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.keys: list[dict] = []
+        self._load()
+
+    def _load(self):
+        if API_KEYS_FILE.exists():
+            try:
+                self.keys = json.loads(API_KEYS_FILE.read_text("utf-8")).get("keys", [])
+            except Exception:
+                pass
+
+    def _save(self):
+        API_KEYS_FILE.write_text(json.dumps({"keys": self.keys}, ensure_ascii=False, indent=2), "utf-8")
+
+    def create(self, name: str, plan: str = "free", quota: int = 100) -> dict:
+        rec = {
+            "key": "dy_" + secrets.token_urlsafe(24),
+            "name": name or "未命名", "plan": plan, "quota": int(quota),
+            "used_today": 0, "used_total": 0, "day": int(time.time() // 86400),
+            "created": int(time.time()), "last_used": None, "enabled": True,
+        }
+        with self._lock:
+            self.keys.append(rec)
+            self._save()
+        return rec
+
+    def revoke(self, key: str) -> bool:
+        with self._lock:
+            n = len(self.keys)
+            self.keys = [k for k in self.keys if k["key"] != key]
+            self._save()
+            return len(self.keys) < n
+
+    def check_and_count(self, key: str):
+        """校验 key 并计一次用量。返回 (ok, error_message)。"""
+        if not key:
+            return False, "缺少 API Key（请在 X-API-Key 头或 ?key= 传入）"
+        with self._lock:
+            rec = next((k for k in self.keys if k["key"] == key), None)
+            if not rec or not rec["enabled"]:
+                return False, "无效或已禁用的 API Key"
+            day = int(time.time() // 86400)
+            if rec.get("day") != day:
+                rec["day"], rec["used_today"] = day, 0
+            if rec["quota"] > 0 and rec["used_today"] >= rec["quota"]:
+                return False, f"今日调用已达上限（{rec['quota']} 次/天），请升级套餐或明日再试"
+            rec["used_today"] += 1
+            rec["used_total"] += 1
+            rec["last_used"] = int(time.time())
+            self._save()
+            return True, None
+
+
+apikeys = APIKeyStore()
+
+# 免费网页端按 IP 的每日限额（防滥用，支撑 freemium）
+_ip_hits: dict = {}
+FREE_IP_DAILY = int(os.environ.get("FREE_IP_DAILY", "300"))
+
+
+def _ip_rate_ok(ip: str) -> bool:
+    if FREE_IP_DAILY <= 0:
+        return True
+    day = int(time.time() // 86400)
+    d, n = _ip_hits.get(ip, (day, 0))
+    if d != day:
+        d, n = day, 0
+    n += 1
+    _ip_hits[ip] = (d, n)
+    return n <= FREE_IP_DAILY
+
+
 # ---------------------------------------------------------------- HTTP 出站层
 
 class NoRedirect(urlreq.HTTPRedirectHandler):
@@ -666,7 +747,20 @@ class ParseBody(BaseModel):
 
 
 @app.post("/api/parse")
-def api_parse(body: ParseBody):
+def api_parse(body: ParseBody, request: Request):
+    ip = (request.client.host if request.client else "") or "?"
+    if not _ip_rate_ok(ip):
+        raise ApiError(429, f"免费额度已用完（{FREE_IP_DAILY} 次/天/IP）。如需更高额度，请使用开放 API。")
+    return _parse_cached(body.text)
+
+
+@app.post("/api/v1/parse")
+def api_v1_parse(body: ParseBody, request: Request):
+    """开放 API（需 API Key）。付费商业化入口——按 Key 计量、限额、统计。"""
+    key = request.headers.get("X-API-Key") or request.query_params.get("key", "")
+    ok, err = apikeys.check_and_count(key)
+    if not ok:
+        raise ApiError(401, err)
     return _parse_cached(body.text)
 
 
@@ -990,6 +1084,34 @@ def admin_settings(body: SettingBody, request: Request):
     return {"ok": True, "settings": proxy_mgr.settings}
 
 
+# ---- 开放 API 密钥管理 ----
+
+@app.get("/api/admin/apikeys")
+def admin_list_keys(request: Request):
+    _require_admin(request)
+    return {"keys": apikeys.keys, "free_ip_daily": FREE_IP_DAILY}
+
+
+class NewKeyBody(BaseModel):
+    name: str = ""
+    plan: str = "free"
+    quota: int = 100
+
+
+@app.post("/api/admin/apikeys")
+def admin_create_key(body: NewKeyBody, request: Request):
+    _require_admin(request)
+    return apikeys.create(body.name, body.plan, body.quota)
+
+
+@app.delete("/api/admin/apikeys/{key}")
+def admin_revoke_key(key: str, request: Request):
+    _require_admin(request)
+    if not apikeys.revoke(key):
+        raise ApiError(404, "API Key 不存在")
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- 后台健康检查
 
 def _health_loop():
@@ -1017,7 +1139,7 @@ def index():
     return FileResponse("static/index.html")
 
 
-@app.get("/admin")
+@app.get("/admin_d")
 def admin_page():
     return FileResponse("static/admin.html")
 

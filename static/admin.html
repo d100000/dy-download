@@ -262,6 +262,31 @@ tr:last-child td{border-bottom:none}
         </div>
       </div>
     </div>
+
+    <!-- 开放 API 密钥 -->
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>开放 API 密钥</h3><div class="desc">付费/配额调用 <code>POST /api/v1/parse</code>，请求头带 <code>X-API-Key</code>。免费网页端每 IP 每日 <b id="freeLimit">—</b> 次</div></div>
+      </div>
+      <div class="panel-body">
+        <div class="add-grid">
+          <input type="text" id="keyName" placeholder="密钥备注（如：客户A / 内部测试）" style="flex:1; min-width:200px">
+          <select id="keyPlan" style="width:120px">
+            <option value="free">free</option>
+            <option value="pro">pro</option>
+            <option value="unlimited">unlimited</option>
+          </select>
+          <input type="number" id="keyQuota" value="100" min="0" title="每日调用上限，0=不限" style="width:120px" placeholder="每日上限">
+          <button class="btn btn-primary" id="createKeyBtn">生成密钥</button>
+        </div>
+        <div class="hint">配额 = 每日调用上限（0 表示不限）。生成后请立即复制保存，密钥只在这里可见。</div>
+        <div class="tbl-wrap" style="margin-top:14px"><table>
+          <thead><tr><th>备注</th><th>套餐</th><th>密钥</th><th>今日/上限</th><th>累计</th><th>最近调用</th><th></th></tr></thead>
+          <tbody id="keyBody"></tbody>
+        </table></div>
+        <div class="empty" id="keyEmpty" style="display:none">还没有 API 密钥。生成后即可对外提供付费/配额调用。</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -298,6 +323,7 @@ const ago = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); i
 async function load(){
   let s;
   try { s = await api('/api/admin/state'); } catch(err){ return; }
+  loadKeys();
   const st = s.stats, en = s.proxies.filter(p=>p.enabled).length,
         banned = s.proxies.filter(p=>p.banned).length;
   $('#statRow').innerHTML = `
@@ -388,6 +414,36 @@ $('#testAllBtn').onclick = async e => {
   catch(err){ toast(err.message, true); } finally { btn.innerHTML=old; btn.disabled=false; load(); }
 };
 $('#refreshBtn').onclick = load;
+
+/* 开放 API 密钥 */
+const ago2 = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); if(s<60)return s+'秒前'; if(s<3600)return Math.floor(s/60)+'分前'; if(s<86400)return Math.floor(s/3600)+'时前'; return Math.floor(s/86400)+'天前'; };
+async function loadKeys(){
+  let d; try { d = await api('/api/admin/apikeys'); } catch { return; }
+  $('#freeLimit').textContent = d.free_ip_daily;
+  $('#keyEmpty').style.display = d.keys.length ? 'none' : '';
+  $('#keyBody').innerHTML = d.keys.map(k => `<tr>
+    <td>${esc(k.name)}</td>
+    <td><span class="badge idle">${esc(k.plan)}</span></td>
+    <td class="mono" style="max-width:230px"><span style="cursor:pointer" title="点击复制" onclick="navigator.clipboard.writeText('${esc(k.key)}').then(()=>toast('已复制密钥'))">${esc(k.key.slice(0,14))}…📋</span></td>
+    <td class="tnum">${k.used_today} / ${k.quota||'∞'}</td>
+    <td class="tnum">${k.used_total}</td>
+    <td>${ago2(k.last_used)}</td>
+    <td><button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="revokeKey('${esc(k.key)}')">吊销</button></td>
+  </tr>`).join('');
+}
+$('#createKeyBtn').onclick = async () => {
+  try {
+    const r = await api('/api/admin/apikeys', {method:'POST', body:JSON.stringify({
+      name: $('#keyName').value.trim(), plan: $('#keyPlan').value, quota: +$('#keyQuota').value })});
+    $('#keyName').value='';
+    try { await navigator.clipboard.writeText(r.key); toast('密钥已生成并复制到剪贴板'); }
+    catch { toast('密钥已生成：' + r.key); }
+    loadKeys();
+  } catch(err){ toast(err.message, true); }
+};
+window.revokeKey = async key => { if(!confirm('吊销后该密钥立即失效，确定？')) return;
+  try { await api('/api/admin/apikeys/'+encodeURIComponent(key), {method:'DELETE'}); toast('已吊销'); loadKeys(); }
+  catch(err){ toast(err.message, true); } };
 
 /* 设置项即时保存 */
 async function saveSetting(payload, revert){

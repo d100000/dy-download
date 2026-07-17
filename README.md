@@ -23,7 +23,7 @@
 ./run.sh                       # 默认端口 3344，首次自动建 venv + 装依赖
 PORT=8010 ./run.sh             # 换端口
 ADMIN_PASSWORD=your-secret ./run.sh
-# 下载器：http://localhost:3344     管理后台：http://localhost:3344/admin
+# 下载器：http://localhost:3344     管理后台（隐藏入口）：http://localhost:3344/admin_d
 ```
 
 手动方式：
@@ -51,7 +51,7 @@ python3 douyin_dl.py "分享文案或短链" [输出目录]
 
 ## 代理后台
 
-1. 打开 `/admin`，用 `ADMIN_PASSWORD` 登录。
+1. 打开隐藏入口 `/admin_d`，用 `ADMIN_PASSWORD` 登录（首页不再暴露该入口）。
 2. 「添加代理」粘贴一个或多个代理（换行/逗号/分号分隔，自动去重），兼容多种格式：
    ```
    socks5://user:pass@1.2.3.4:1080     # 完整写法
