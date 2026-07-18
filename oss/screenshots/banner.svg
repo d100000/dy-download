@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360">
+<defs>
+<radialGradient id="a" cx="15%" cy="20%" r="60%"><stop offset="0" stop-color="#FE2C55" stop-opacity=".55"/><stop offset="1" stop-color="#FE2C55" stop-opacity="0"/></radialGradient>
+<radialGradient id="b" cx="88%" cy="15%" r="55%"><stop offset="0" stop-color="#25F4EE" stop-opacity=".4"/><stop offset="1" stop-color="#25F4EE" stop-opacity="0"/></radialGradient>
+<linearGradient id="t" x1="0" x2="1"><stop offset="0" stop-color="#FE2C55"/><stop offset="1" stop-color="#25F4EE"/></linearGradient>
+</defs>
+<rect width="1280" height="360" fill="#0E1013"/><rect width="1280" height="360" fill="url(#a)"/><rect width="1280" height="360" fill="url(#b)"/>
+<g transform="translate(90,120)" fill="none" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+<path d="M34 0 V60 M7 38 l27 27 27-27" stroke="#25F4EE" transform="translate(-4 0)"/>
+<path d="M34 0 V60 M7 38 l27 27 27-27" stroke="#FE2C55" transform="translate(4 0)"/>
+<path d="M34 0 V60 M7 38 l27 27 27-27" stroke="#fff"/><path d="M0 80 h68" stroke="#fff"/>
+</g>
+<text x="210" y="150" font-family="PingFang SC,Noto Sans SC,sans-serif" font-size="62" font-weight="800" fill="#fff">抖音无水印下载器 · 开源版</text>
+<text x="212" y="212" font-family="Arial,sans-serif" font-size="30" font-weight="700" fill="url(#t)">Douyin / TikTok Video Downloader — No Watermark, Open Source</text>
+<text x="212" y="264" font-family="PingFang SC,sans-serif" font-size="24" fill="#8A93A0">粘贴链接 · 浏览器直连 · 无水印下载 · 免登录 · 无广告</text>
+</svg>

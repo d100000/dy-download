@@ -83,6 +83,16 @@ select{cursor:pointer}
 .panel-head h3{font-size:15px; font-weight:700}
 .panel-head .desc{font-size:12.5px; color:var(--muted); margin-top:2px}
 .panel-body{padding:18px 20px}
+.admin-tabs{display:flex; gap:6px; margin-bottom:20px; border-bottom:1px solid var(--border); flex-wrap:wrap}
+.admin-tab{padding:10px 16px; font-size:14px; font-weight:600; color:var(--muted); border:none; background:none; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px}
+.admin-tab.active{color:var(--text); border-bottom-color:var(--accent)}
+.charts-grid{display:grid; grid-template-columns:repeat(auto-ffit,minmax(240px,1fr)); grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px}
+.chart{background:var(--surface-2); border:1px solid var(--border); border-radius:12px; padding:14px}
+.chart .ct{font-size:12.5px; color:var(--muted); display:flex; justify-content:space-between; margin-bottom:8px}
+.chart .ct b{color:var(--text); font-size:15px; font-variant-numeric:tabular-nums}
+.chart .bars{display:flex; align-items:flex-end; gap:3px; height:46px}
+.chart .bar{flex:1; background:linear-gradient(180deg,var(--accent),var(--accent-soft)); border-radius:3px 3px 0 0; min-height:2px}
+.chart .bar.teal{background:linear-gradient(180deg,var(--ok),transparent)}
 
 .add-grid{display:flex; gap:12px; align-items:stretch; flex-wrap:wrap}
 .add-grid textarea{flex:1; min-width:260px}
@@ -161,6 +171,25 @@ tr:last-child td{border-bottom:none}
 
   <!-- 仪表盘 -->
   <div class="dash" id="dashView">
+    <div class="admin-tabs">
+      <button class="admin-tab active" data-view="overview">数据概览</button>
+      <button class="admin-tab" data-view="proxy">代理池</button>
+      <button class="admin-tab" data-view="users">用户</button>
+      <button class="admin-tab" data-view="logs">请求日志</button>
+    </div>
+
+    <!-- 数据概览 -->
+    <div class="view" id="v-overview">
+      <div class="stat-row" id="anaCards"></div>
+      <div class="panel">
+        <div class="panel-head"><div><h3>近 14 天趋势</h3><div class="desc">新增用户 · 浏览 · 独立访客 · 使用 · API 调用 · 营收</div></div>
+          <button class="btn btn-ghost btn-sm" id="anaRefresh">刷新</button></div>
+        <div class="panel-body"><div class="charts-grid" id="anaCharts"></div></div>
+      </div>
+    </div>
+
+    <!-- 代理池 + API -->
+    <div class="view" id="v-proxy" style="display:none">
     <div class="stat-row" id="statRow"></div>
 
     <!-- 添加 -->
@@ -263,28 +292,58 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
 
-    <!-- 开放 API 密钥 -->
+    <!-- 开放 API 密钥 + 计费 -->
     <div class="panel">
       <div class="panel-head">
-        <div><h3>开放 API 密钥</h3><div class="desc">付费/配额调用 <code>POST /api/v1/parse</code>，请求头带 <code>X-API-Key</code>。免费网页端每 IP 每日 <b id="freeLimit">—</b> 次</div></div>
+        <div><h3>开放 API 密钥 & 计费</h3><div class="desc">异步调用 <code>POST /api/v1/jobs</code>，请求头带 <code>X-API-Key</code>；免费网页端每指纹/IP 每日 <b id="freeLimit">—</b> 次</div></div>
+        <div style="display:flex; align-items:center; gap:8px">
+          <span style="font-size:12.5px; color:var(--muted)">单价(分/次)</span>
+          <input type="number" id="priceEdit" min="0" style="width:80px" onblur="savePrice()">
+        </div>
       </div>
       <div class="panel-body">
         <div class="add-grid">
           <input type="text" id="keyName" placeholder="密钥备注（如：客户A / 内部测试）" style="flex:1; min-width:200px">
-          <select id="keyPlan" style="width:120px">
-            <option value="free">free</option>
-            <option value="pro">pro</option>
-            <option value="unlimited">unlimited</option>
-          </select>
-          <input type="number" id="keyQuota" value="100" min="0" title="每日调用上限，0=不限" style="width:120px" placeholder="每日上限">
           <button class="btn btn-primary" id="createKeyBtn">生成密钥</button>
         </div>
-        <div class="hint">配额 = 每日调用上限（0 表示不限）。生成后请立即复制保存，密钥只在这里可见。</div>
+        <div class="hint">生成后请立即复制保存；新密钥自带试用余额，可点「充值」增加余额。失败解析不计费。</div>
         <div class="tbl-wrap" style="margin-top:14px"><table>
-          <thead><tr><th>备注</th><th>套餐</th><th>密钥</th><th>今日/上限</th><th>累计</th><th>最近调用</th><th></th></tr></thead>
+          <thead><tr><th>备注</th><th>密钥</th><th>余额</th><th>已消费</th><th>调用</th><th>最近</th><th></th></tr></thead>
           <tbody id="keyBody"></tbody>
         </table></div>
-        <div class="empty" id="keyEmpty" style="display:none">还没有 API 密钥。生成后即可对外提供付费/配额调用。</div>
+        <div class="empty" id="keyEmpty" style="display:none">还没有 API 密钥。生成后即可对外提供付费调用。</div>
+      </div>
+    </div>
+    </div><!-- /v-proxy -->
+
+    <!-- 用户 -->
+    <div class="view" id="v-users" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><div><h3>用户列表</h3><div class="desc">注册用户、使用与消费</div></div>
+          <button class="btn btn-ghost btn-sm" id="usersRefresh">刷新</button></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>ID</th><th>邮箱</th><th>注册时间</th><th>最近登录</th><th>解析</th><th>密钥</th><th>消费</th><th>状态</th><th></th></tr></thead>
+          <tbody id="usersBody"></tbody>
+        </table></div>
+        <div class="empty" id="usersEmpty" style="display:none">还没有注册用户。</div>
+      </div>
+    </div>
+
+    <!-- 请求日志 -->
+    <div class="view" id="v-logs" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><div><h3>API 请求记录</h3><div class="desc">最近 100 条计费调用</div></div></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>时间</th><th>用户</th><th>链接</th><th>结果</th><th>计费</th><th>任务</th></tr></thead>
+          <tbody id="apiLogBody"></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><div><h3>网页请求记录</h3><div class="desc">最近 100 条网页端解析</div></div></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>时间</th><th>IP</th><th>链接</th><th>结果</th><th>登录用户</th></tr></thead>
+          <tbody id="webLogBody"></tbody>
+        </table></div>
       </div>
     </div>
   </div>
@@ -313,7 +372,71 @@ $('#loginForm').onsubmit = async e => { e.preventDefault();
   try { await api('/api/admin/login', {method:'POST', body:JSON.stringify({password:$('#pw').value})}); enter(); }
   catch(err){ toast(err.message, true); } };
 $('#logoutBtn').onclick = async () => { await api('/api/admin/logout', {method:'POST'}); location.reload(); };
-function enter(){ $('#loginView').style.display='none'; $('#dashView').classList.add('show'); $('#logoutBtn').style.display=''; load(); }
+function enter(){ $('#loginView').style.display='none'; $('#dashView').classList.add('show'); $('#logoutBtn').style.display=''; load(); loadAnalytics(); }
+
+/* 标签页切换 */
+document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.admin-tab').forEach(x=>x.classList.toggle('active', x===t));
+  document.querySelectorAll('.view').forEach(v=>v.style.display='none');
+  const v = t.dataset.view; $('#v-'+v).style.display='';
+  if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers(); else if(v==='logs') loadLogs();
+});
+
+/* 数据概览 */
+const yuan = c => '¥'+((c||0)/100).toFixed(2);
+const dstr = d => { const dt=new Date(d*86400000); return (dt.getMonth()+1)+'/'+dt.getDate(); };
+function chart(title, series, teal, fmt){
+  const vals=series.map(p=>p.v); const mx=Math.max(1,...vals); const tot=vals.reduce((a,b)=>a+b,0);
+  const last=vals[vals.length-1]||0;
+  return `<div class="chart"><div class="ct"><span>${title}</span><b>${fmt?fmt(last):last}</b></div>
+    <div class="bars">${series.map(p=>`<div class="bar${teal?' teal':''}" style="height:${Math.round(p.v/mx*100)}%" title="${dstr(p.day)}: ${fmt?fmt(p.v):p.v}"></div>`).join('')}</div></div>`;
+}
+async function loadAnalytics(){
+  let d; try{ d=await api('/api/admin/analytics'); }catch{ return; }
+  const c=d.cards;
+  $('#anaCards').innerHTML=`
+    <div class="stat"><div class="k">总用户</div><div class="v tnum">${c.total_users}<small> / 今日+${c.new_users_today}</small></div></div>
+    <div class="stat"><div class="k">今日浏览 PV / UV</div><div class="v tnum">${c.pv_today}<small> / ${c.uv_today}</small></div></div>
+    <div class="stat"><div class="k">今日使用 / API</div><div class="v tnum">${c.usage_today}<small> / ${c.api_today}</small></div></div>
+    <div class="stat"><div class="k">今日营收 / 累计</div><div class="v tnum">${yuan(c.revenue_today_cents)}<small> / ${yuan(c.revenue_total_cents)}</small></div></div>
+    <div class="stat"><div class="k">回访率</div><div class="v tnum">${c.retention_pct}%</div></div>`;
+  const s=d.series;
+  $('#anaCharts').innerHTML=
+    chart('新增用户', s.new_users)+chart('页面浏览 PV', s.pv, true)+chart('独立访客 UV', s.uv, true)+
+    chart('解析使用', s.parses)+chart('API 调用', s.api_calls)+chart('营收', s.revenue, false, yuan);
+}
+$('#anaRefresh').onclick = loadAnalytics;
+
+/* 用户列表 */
+async function loadUsers(){
+  let d; try{ d=await api('/api/admin/users'); }catch{ return; }
+  $('#usersEmpty').style.display=d.users.length?'none':'';
+  $('#usersBody').innerHTML=d.users.map(u=>`<tr>
+    <td class="tnum">${u.id}</td><td>${esc(u.email)}</td>
+    <td class="tnum">${ago2(u.created_at)}</td><td class="tnum">${ago2(u.last_login)}</td>
+    <td class="tnum">${u.parses}</td><td class="tnum">${u.keys}</td><td class="tnum">${yuan(u.spent)}</td>
+    <td>${u.disabled?'<span class="badge bad">停用</span>':'<span class="badge ok">正常</span>'}</td>
+    <td><button class="btn btn-ghost btn-sm" onclick="toggleUser(${u.id},${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button></td>
+  </tr>`).join('');
+}
+window.toggleUser = async (uid, dis) => { try{ await api('/api/admin/users/'+uid+'/toggle',{method:'POST',body:JSON.stringify({disabled:!!dis})}); toast('已更新'); loadUsers(); }catch(e){toast(e.message,true);} };
+$('#usersRefresh').onclick = loadUsers;
+
+/* 日志 */
+async function loadLogs(){
+  try{ const a=await api('/api/admin/logs/api');
+    $('#apiLogBody').innerHTML=a.logs.map(l=>`<tr><td class="tnum">${ago2(l.ts)}</td><td>${esc(l.email||('#'+(l.user_id||'-')))}</td>
+      <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${esc(l.link||'')}</td>
+      <td>${l.ok?'<span class="badge ok">成功</span>':'<span class="badge bad">失败</span>'}</td>
+      <td class="tnum">${yuan(l.cost_cents)}</td><td class="mono" style="font-size:11px">${esc((l.job_id||'').slice(0,10))}</td></tr>`).join('')
+      || '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">暂无</td></tr>'; }catch{}
+  try{ const w=await api('/api/admin/logs/web');
+    $('#webLogBody').innerHTML=w.logs.map(l=>`<tr><td class="tnum">${ago2(l.ts)}</td><td class="mono tnum">${esc(l.ip||'')}</td>
+      <td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis">${esc(l.link||'')}</td>
+      <td>${l.ok?'<span class="badge ok">成功</span>':'<span class="badge bad">失败</span>'}</td>
+      <td>${l.user_id?('#'+l.user_id):'匿名'}</td></tr>`).join('')
+      || '<tr><td colspan="5" style="text-align:center;color:var(--muted);padding:20px">暂无</td></tr>'; }catch{}
+}
 
 /* 加载 */
 const proto = u => (u.match(/^(\w+):\/\//)||[])[1] || 'http';
@@ -417,24 +540,28 @@ $('#refreshBtn').onclick = load;
 
 /* 开放 API 密钥 */
 const ago2 = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); if(s<60)return s+'秒前'; if(s<3600)return Math.floor(s/60)+'分前'; if(s<86400)return Math.floor(s/3600)+'时前'; return Math.floor(s/86400)+'天前'; };
+const yuanK = c => '¥'+((c||0)/100).toFixed(2);
 async function loadKeys(){
   let d; try { d = await api('/api/admin/apikeys'); } catch { return; }
   $('#freeLimit').textContent = d.free_ip_daily;
+  const pe = $('#priceEdit'); if(pe && document.activeElement!==pe) pe.value = d.price_cents;
   $('#keyEmpty').style.display = d.keys.length ? 'none' : '';
   $('#keyBody').innerHTML = d.keys.map(k => `<tr>
-    <td>${esc(k.name)}</td>
-    <td><span class="badge idle">${esc(k.plan)}</span></td>
-    <td class="mono" style="max-width:230px"><span style="cursor:pointer" title="点击复制" onclick="navigator.clipboard.writeText('${esc(k.key)}').then(()=>toast('已复制密钥'))">${esc(k.key.slice(0,14))}…📋</span></td>
-    <td class="tnum">${k.used_today} / ${k.quota||'∞'}</td>
-    <td class="tnum">${k.used_total}</td>
+    <td>${esc(k.name)}${k.user_id?` <span class="badge idle">#${k.user_id}</span>`:''}</td>
+    <td class="mono" style="max-width:200px"><span style="cursor:pointer" title="点击复制" onclick="navigator.clipboard.writeText('${esc(k.key)}').then(()=>toast('已复制密钥'))">${esc(k.key.slice(0,14))}…📋</span></td>
+    <td class="tnum">${yuanK(k.balance_cents)}</td>
+    <td class="tnum">${yuanK(k.spent_cents)}</td>
+    <td class="tnum">${k.calls}</td>
     <td>${ago2(k.last_used)}</td>
-    <td><button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="revokeKey('${esc(k.key)}')">吊销</button></td>
+    <td><div class="row-actions">
+      <button class="btn btn-ghost btn-sm" onclick="rechargeKey('${esc(k.key)}')">充值</button>
+      <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="revokeKey('${esc(k.key)}')">吊销</button>
+    </div></td>
   </tr>`).join('');
 }
 $('#createKeyBtn').onclick = async () => {
   try {
-    const r = await api('/api/admin/apikeys', {method:'POST', body:JSON.stringify({
-      name: $('#keyName').value.trim(), plan: $('#keyPlan').value, quota: +$('#keyQuota').value })});
+    const r = await api('/api/admin/apikeys', {method:'POST', body:JSON.stringify({name: $('#keyName').value.trim()})});
     $('#keyName').value='';
     try { await navigator.clipboard.writeText(r.key); toast('密钥已生成并复制到剪贴板'); }
     catch { toast('密钥已生成：' + r.key); }
@@ -444,6 +571,13 @@ $('#createKeyBtn').onclick = async () => {
 window.revokeKey = async key => { if(!confirm('吊销后该密钥立即失效，确定？')) return;
   try { await api('/api/admin/apikeys/'+encodeURIComponent(key), {method:'DELETE'}); toast('已吊销'); loadKeys(); }
   catch(err){ toast(err.message, true); } };
+window.rechargeKey = async key => {
+  const yuan = prompt('充值金额（元）：', '10'); if(yuan===null) return;
+  const cents = Math.round(parseFloat(yuan)*100); if(!(cents>0)){ toast('金额无效',true); return; }
+  try { await api('/api/admin/apikeys/'+encodeURIComponent(key)+'/recharge',{method:'POST',body:JSON.stringify({cents})}); toast('充值成功'); loadKeys(); }
+  catch(err){ toast(err.message,true); } };
+window.savePrice = async () => {
+  const c = +$('#priceEdit').value; try{ await api('/api/admin/api-price',{method:'POST',body:JSON.stringify({price_cents:c})}); toast('单价已保存'); }catch(e){toast(e.message,true);} };
 
 /* 设置项即时保存 */
 async function saveSetting(payload, revert){

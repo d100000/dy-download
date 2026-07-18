@@ -1,11 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="{{HTMLLANG}}">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>抖音无水印下载器 · 粘贴链接即下</title>
-<meta name="description" content="免登录、免签名的抖音视频/图集无水印下载工具，粘贴分享链接即可在线预览与下载。开源可信、零隐私、永不接广告。">
-<meta name="theme-color" content="#0E1013">
+{{SEO_HEAD}}
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230E1013'/%3E%3Cg fill='none' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%2325F4EE' transform='translate(-2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23FE2C55' transform='translate(2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23fff'/%3E%3C/g%3E%3Cpath d='M20 46 h24' stroke='%23fff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
 :root{
@@ -110,6 +108,9 @@ h1 .hl{
 }
 .composer textarea::placeholder{color:var(--faint)}
 .composer-bar{display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:8px; flex-wrap:wrap}
+.composer-hint{margin-top:10px; padding-top:10px; border-top:1px dashed var(--border); font-size:12.5px; color:var(--faint); line-height:1.6}
+.composer-hint b{color:var(--accent); font-weight:600}
+.quota-hint{display:block; margin-top:4px; color:var(--muted)}
 .ghost-btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:10px;
   border:1px solid var(--border); color:var(--muted); font-size:13.5px; background:var(--surface-2);
@@ -159,6 +160,8 @@ h1 .hl{
 }
 .alert.show{display:flex}
 .alert svg{flex:none; margin-top:3px}
+.alert.ok{background:var(--ok-bg,rgba(37,244,238,.08)); border-color:var(--ok); color:var(--ok)}
+.alert.ok svg{display:none}
 
 /* ---------- result ---------- */
 .result{display:none; margin-top:34px}
@@ -227,12 +230,101 @@ h1 .hl{
 .actions .primary-btn{text-decoration:none}
 a.ghost-btn{text-decoration:none}
 .tip{font-size:12px; color:var(--faint); margin-top:10px}
-.batch-head{font-size:14px; font-weight:600; color:var(--muted); margin-bottom:14px; text-align:center}
-#batchList{display:flex; flex-direction:column; gap:18px}
 .batch-err{background:var(--danger-bg); border:1px solid var(--danger-border); color:var(--danger-text);
-  padding:12px 16px; border-radius:12px; font-size:13px; word-break:break-all}
-.fallback-hint{font-size:12px; color:var(--muted); text-align:center; margin-top:8px}
-.fallback-hint a{color:var(--accent)}
+  padding:10px 14px; border-radius:10px; font-size:13px; word-break:break-all}
+.batch-fails{display:flex; flex-direction:column; gap:8px; margin-top:14px}
+
+/* ---------- 批量表格 ---------- */
+.batch-bar{display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px}
+.batch-stat{font-size:14px; color:var(--muted)}
+.batch-stat b{color:var(--text); font-variant-numeric:tabular-nums}
+.batch-actions{display:flex; gap:8px}
+.batch-tblwrap{border:1px solid var(--border); border-radius:14px; background:var(--surface); box-shadow:var(--shadow); overflow-x:auto}
+.batch-table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:640px}
+.batch-table th{text-align:left; font-size:11.5px; letter-spacing:.04em; color:var(--muted); font-weight:600;
+  padding:11px 14px; border-bottom:1.5px solid var(--border); white-space:nowrap; background:var(--surface-2)}
+.batch-table td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:middle}
+.batch-table tr:last-child td{border-bottom:none}
+.bt-idx{color:var(--faint); width:32px}
+.bt-thumb{width:46px; height:60px; border-radius:8px; object-fit:cover; background:var(--surface-2); display:block; cursor:pointer}
+.bt-title{max-width:280px}
+.bt-t{font-weight:500; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+.bt-a{font-size:12px; color:var(--muted); margin-top:2px}
+.bt-tag{font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:99px; background:var(--surface-2); color:var(--muted); white-space:nowrap}
+.bt-nums{color:var(--muted); white-space:nowrap}
+.bt-ops{white-space:nowrap}
+.mini-btn{font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:8px; background:var(--accent); color:var(--accent-ink); margin-right:6px; transition:opacity .15s}
+.mini-btn:hover{opacity:.88}
+.mini-btn.ghost{background:var(--surface-2); color:var(--text); border:1px solid var(--border)}
+
+/* ---------- 播放弹窗 ---------- */
+.pm{position:fixed; inset:0; z-index:200; display:none; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.72); padding:20px}
+.pm.show{display:flex}
+.pm-box{position:relative; background:var(--surface); border:1px solid var(--border); border-radius:16px;
+  max-width:420px; width:100%; max-height:90vh; overflow:auto; box-shadow:var(--shadow)}
+.pm-close{position:absolute; top:10px; right:10px; z-index:2; width:32px; height:32px; border-radius:9px;
+  background:rgba(0,0,0,.5); color:#fff; display:grid; place-items:center; font-size:15px}
+.pm-body video{width:100%; max-height:70vh; background:#000; display:block; border-radius:16px 16px 0 0}
+.pm-title{padding:14px 16px 4px; font-size:14.5px; font-weight:600; line-height:1.5}
+.pm-act{padding:8px 16px 16px}
+.pm-act .primary-btn{width:100%; justify-content:center}
+.pm-imgs{display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; padding:12px 16px 16px}
+.pm-imgs img{width:100%; border-radius:8px; display:block}
+
+/* ---------- 导航右侧 / 用户 ---------- */
+.nav-right{display:flex; align-items:center; gap:10px}
+.nav-link{font-size:13.5px; color:var(--muted); background:none; border:none; cursor:pointer; text-decoration:none}
+.nav-link:hover{color:var(--text)}
+.nav-user{font-size:13.5px; font-weight:600; color:var(--accent-ink); background:var(--accent); border-radius:10px; padding:8px 15px; cursor:pointer}
+.nav-user:hover{background:var(--accent-hover)}
+.lang-switch{font-size:12.5px; font-weight:600; color:var(--muted); border:1px solid var(--border); border-radius:10px; padding:7px 11px; cursor:pointer; background:var(--surface)}
+.lang-switch:hover{color:var(--text); border-color:var(--border-strong)}
+@media(max-width:600px){.nav-right{gap:7px}.nav-link{font-size:12.5px}.nav-user{padding:7px 11px; font-size:12.5px}}
+.user-menu{display:flex; align-items:center; gap:10px}
+.user-email{font-size:13px; color:var(--text); font-weight:500; max-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+
+/* ---------- 登录/注册弹窗 ---------- */
+.auth-box{max-width:380px}
+.auth-tabs{display:flex; border-bottom:1px solid var(--border)}
+.auth-tab{flex:1; padding:16px; font-size:15px; font-weight:600; color:var(--muted); background:none; border:none; cursor:pointer; border-bottom:2px solid transparent}
+.auth-tab.active{color:var(--text); border-bottom-color:var(--accent)}
+.auth-body{padding:20px 22px 24px; display:flex; flex-direction:column; gap:14px}
+.auth-field{display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted)}
+.auth-field input{background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:11px 13px; color:var(--text); font-size:15px; outline:none}
+.auth-field input:focus{border-color:var(--accent)}
+.hp-field{position:absolute; left:-9999px; width:1px; height:1px; opacity:0}
+.auth-submit{width:100%; justify-content:center; margin-top:2px}
+.auth-err{font-size:13px; color:var(--danger-text); min-height:18px; text-align:center}
+.auth-cap-head{display:flex; align-items:center; gap:10px; padding:16px 18px; border-bottom:1px solid var(--border); font-weight:600}
+.auth-back{color:var(--muted); font-size:14px; background:none; border:none; cursor:pointer}
+.auth-back:hover{color:var(--text)}
+
+/* ---------- 滑块验证码（PNG 拼图，服务端出图）---------- */
+.slider-cap{display:flex; flex-direction:column; gap:14px}
+.sc-stage{position:relative; width:100%; aspect-ratio:300/170; border-radius:12px; overflow:hidden;
+  background:var(--surface-2); user-select:none; box-shadow:inset 0 0 0 1px var(--border)}
+.sc-bg{width:100%; height:100%; display:block; pointer-events:none; -webkit-user-drag:none}
+.sc-piece{position:absolute; top:0; left:0; width:16.6%; will-change:transform; pointer-events:none;
+  -webkit-user-drag:none; filter:drop-shadow(0 3px 8px rgba(0,0,0,.4)); transition:filter .15s}
+.sc-loading{position:absolute; inset:0; display:grid; place-items:center; background:var(--surface-2)}
+.sc-loading .spinner{width:22px; height:22px; border-width:3px}
+.sc-stage.ok .sc-piece{filter:drop-shadow(0 0 0 rgba(0,0,0,0))}
+.sc-track{position:relative; height:44px; background:var(--surface-2); border:1px solid var(--border);
+  border-radius:99px; overflow:hidden}
+.sc-fill{position:absolute; left:0; top:0; bottom:0; width:0; background:linear-gradient(90deg,var(--accent),#FF6AC2);
+  border-radius:99px; opacity:.9}
+.sc-label{position:absolute; inset:0; display:grid; place-items:center; font-size:13px; color:var(--muted);
+  pointer-events:none; user-select:none}
+.sc-handle{position:absolute; top:-1px; left:0; width:46px; height:44px; border-radius:99px;
+  background:var(--surface); border:1px solid var(--border-strong,var(--border)); color:var(--accent);
+  display:grid; place-items:center; cursor:grab; touch-action:none; box-shadow:0 2px 8px rgba(0,0,0,.25); z-index:2}
+.sc-handle:active{cursor:grabbing}
+.sc-track.ok .sc-fill{background:linear-gradient(90deg,var(--good,#3DD68C),#25F4EE)}
+.sc-track.ok .sc-handle{background:var(--good,#3DD68C); color:#fff; border-color:transparent}
+.sc-track.ok .sc-label{color:#fff}
+.sc-track.err{animation:shake .4s}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-7px)}40%,80%{transform:translateX(7px)}}
 
 /* ---------- album ---------- */
 .album-head{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:20px 24px 0; flex-wrap:wrap}
@@ -299,6 +391,76 @@ a.ghost-btn{text-decoration:none}
 .trust-card p{font-size:14px; color:var(--muted); line-height:1.75}
 .trust-card strong{color:var(--text); font-weight:600}
 
+/* ---------- FAQ ---------- */
+.faq{margin-top:72px; content-visibility:auto; contain-intrinsic-size:auto 520px}
+.faq-title{text-align:center; font-size:21px; font-weight:800; letter-spacing:-.01em; margin-bottom:12px}
+.faq-lead{text-align:center; color:var(--muted); font-size:14.5px; max-width:60ch; margin:0 auto 22px; line-height:1.75}
+.faq-list{display:flex; flex-direction:column; gap:10px; max-width:720px; margin:0 auto}
+.faq-item{background:color-mix(in srgb,var(--surface) 90%,transparent); border:1px solid var(--border); border-radius:14px; overflow:hidden}
+.faq-item summary{list-style:none; cursor:pointer; padding:16px 18px; font-weight:600; font-size:15px;
+  display:flex; justify-content:space-between; align-items:center; gap:12px}
+.faq-item summary::-webkit-details-marker{display:none}
+.faq-item summary::after{content:"+"; color:var(--accent); font-size:22px; font-weight:400; line-height:1; transition:transform .2s; flex:none}
+.faq-item[open] summary::after{transform:rotate(45deg)}
+.faq-item p{padding:0 18px 18px; color:var(--muted); font-size:14px; line-height:1.8; margin:0}
+.faq-item strong{color:var(--text); font-weight:600}
+
+/* ---------- 开发者 API 介绍 ---------- */
+.api-band{margin-top:72px}
+.api-band-inner{display:grid; grid-template-columns:1.1fr .9fr; gap:28px; align-items:center;
+  background:linear-gradient(135deg, color-mix(in srgb,var(--accent) 12%,var(--surface)), var(--surface));
+  border:1px solid var(--border); border-radius:20px; padding:32px; box-shadow:var(--shadow)}
+.api-tag{display:inline-block; font-size:12px; font-weight:600; color:var(--accent); background:var(--accent-soft);
+  padding:4px 12px; border-radius:99px; margin-bottom:12px}
+.api-band-text h2{font-size:23px; font-weight:800; letter-spacing:-.01em; line-height:1.3}
+.api-band-text p{color:var(--muted); font-size:14.5px; margin-top:12px; line-height:1.75}
+.api-feats{display:flex; flex-direction:column; gap:6px; margin:16px 0; font-size:13.5px; color:var(--text)}
+.api-cta{display:flex; gap:10px; flex-wrap:wrap; margin-top:18px}
+.api-cta .primary-btn, .api-cta .ghost-btn{text-decoration:none}
+.api-code{background:#0b0d10; border:1px solid var(--border); border-radius:14px; padding:18px 20px;
+  overflow-x:auto; font-size:12.5px; line-height:1.7; color:#c7d0da; margin:0;
+  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+:root[data-theme="light"] .api-code{background:#16191E; color:#d7dee6}
+@media(max-width:720px){.api-band-inner{grid-template-columns:1fr; padding:24px}}
+
+/* ---------- 手机端适配 ---------- */
+@media (max-width:600px){
+  body{font-size:14.5px}
+  .container{padding:0 15px}
+  nav{padding:15px 0}
+  .brand{font-size:15px; gap:9px}
+  .logo{width:36px; height:36px; border-radius:11px}
+  .logo svg{width:30px; height:30px}
+  .brand small{font-size:10.5px}
+  .icon-btn{width:40px; height:40px}
+  .hero{padding:30px 0 26px}
+  .hero p{font-size:14px; margin-top:11px}
+  .trust-badges{gap:6px; margin-top:16px}
+  .tb{font-size:11.5px; padding:5px 11px}
+  .composer{padding:13px 12px 10px; border-radius:16px; margin-top:22px}
+  .composer textarea{font-size:16px; min-height:66px}         /* 16px 防止 iOS 聚焦自动缩放 */
+  .composer-bar .primary-btn{padding:11px 22px}
+  .steps{gap:7px; margin-top:18px}
+  .step-chip{font-size:12px; padding:6px 12px}
+  .card-body{padding:16px; gap:18px}
+  .player-wrap{width:100%}
+  .meta-row{gap:16px; padding:12px 0}
+  .actions{width:100%}
+  .actions>*{flex:1 1 auto; justify-content:center; min-height:44px}
+  .album-head{padding:16px 16px 0}
+  .album-grid{padding:14px 16px 16px; grid-template-columns:repeat(2,1fr); gap:10px}
+  .stats-row{gap:6px}
+  .stat-chip{min-width:0; padding:8px 2px}
+  .stat-chip b{font-size:15px}
+  .trust{margin-top:52px}
+  .trust-title{font-size:19px}
+  .trust-card{padding:20px 18px 22px}
+  .ghost-btn{padding:9px 14px}
+  .faq{margin-top:52px}
+  .faq-item summary{padding:14px 15px; font-size:14.5px}
+  .faq-item p{padding:0 15px 15px}
+}
+
 /* ---------- footer ---------- */
 footer{
   margin-top:70px; padding:26px 0 40px; border-top:1px solid var(--border);
@@ -328,38 +490,96 @@ footer{
     </span>
     <span class="brand-name">抖音下载器 <small>无水印 · 开源 · 无广告</small></span>
   </div>
-  <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换明暗主题">◐</button>
+  <div class="nav-right">
+    <a class="nav-link" href="/api-docs" data-i18n="nav_api">API 接入</a>
+    <button class="nav-user" id="authBtn" data-i18n="nav_login">登录 / 注册</button>
+    <div class="user-menu" id="userMenu" style="display:none">
+      <a class="nav-link" href="/api-console" data-i18n="nav_console">API 控制台</a>
+      <span class="user-email" id="userEmail"></span>
+      <button class="nav-link" id="logoutBtn" data-i18n="nav_logout">退出</button>
+    </div>
+    <button class="lang-switch" id="langBtn" title="Language / 语言"><span id="langLabel">EN</span></button>
+    <button class="icon-btn" id="themeBtn" title="切换主题 / Theme" aria-label="切换明暗主题">◐</button>
+  </div>
 </nav>
 
+<!-- 登录 / 注册弹窗 -->
+<div class="pm" id="authModal">
+  <div class="pm-box auth-box">
+    <button class="pm-close" id="authClose" aria-label="关闭">✕</button>
+    <!-- 步骤 1：表单 -->
+    <div id="authStep1">
+      <div class="auth-tabs">
+        <button class="auth-tab active" data-mode="login" data-i18n="auth_login">登录</button>
+        <button class="auth-tab" data-mode="register" data-i18n="auth_register">注册</button>
+      </div>
+      <div class="auth-body">
+        <label class="auth-field"><span data-i18n="auth_email">邮箱</span><input type="email" id="authEmail" autocomplete="username" placeholder="you@example.com"></label>
+        <label class="auth-field"><span data-i18n="auth_pw">密码</span><input type="password" id="authPw" autocomplete="current-password" data-i18n-ph="auth_pw_ph" placeholder="至少 6 位"></label>
+        <input type="text" id="authHp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <button class="primary-btn auth-submit" id="authNext" data-i18n="auth_next">下一步</button>
+        <div class="auth-err" id="authErr"></div>
+      </div>
+    </div>
+    <!-- 步骤 2：滑块验证 -->
+    <div id="authStep2" style="display:none">
+      <div class="auth-cap-head">
+        <button class="auth-back" id="authBack" data-i18n="auth_back">‹ 返回</button>
+        <span id="authCapTitle" data-i18n="auth_verify">安全验证</span>
+      </div>
+      <div class="auth-body">
+        <div class="slider-cap">
+          <div class="sc-stage" id="scStage">
+            <img class="sc-bg" id="scBg" alt="" draggable="false">
+            <img class="sc-piece" id="scPiece" alt="" draggable="false">
+            <div class="sc-loading" id="scLoading"><span class="spinner"></span></div>
+          </div>
+          <div class="sc-track" id="scTrack">
+            <div class="sc-fill" id="scFill"></div>
+            <div class="sc-label" id="scLabel" data-i18n="sc_drag">向右拖动滑块完成拼图</div>
+            <div class="sc-handle" id="scHandle"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
+        <div class="auth-err" id="authErr2"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main>
 <section class="hero">
-  <h1>粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
-  <p>开源可信 · 零隐私采集 · 承诺永不接广告 · 稳定下载</p>
+  <h1 data-i18n-html="hero_h1">粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
+  <p data-i18n="hero_sub">开源可信 · 零隐私采集 · 承诺永不接广告 · 稳定下载</p>
   <div class="trust-badges">
-    <span class="tb">🔓 完全开源</span>
-    <span class="tb">🔒 不碰你的隐私</span>
-    <span class="tb">🚫 永不接广告</span>
-    <span class="tb">🛡 稳定可靠</span>
-    <span class="tb">👤 无需登录</span>
+    <span class="tb" data-i18n="b_opensource">🔓 完全开源</span>
+    <span class="tb" data-i18n="b_privacy">🔒 不碰你的隐私</span>
+    <span class="tb" data-i18n="b_noads">🚫 永不接广告</span>
+    <span class="tb" data-i18n="b_stable">🛡 稳定可靠</span>
+    <span class="tb" data-i18n="b_nologin">👤 无需登录</span>
   </div>
 
   <div class="composer">
-    <textarea id="input" rows="3" placeholder="粘贴抖音分享文案或链接，例如：3.89 复制打开抖音，看看……https://v.douyin.com/xxxx/"></textarea>
+    <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴一条或多条抖音分享文案 / 链接——支持一次粘贴多条，系统会自动拆分出全部链接批量解析。&#10;例如：&#10;3.89 复制打开抖音…… https://v.douyin.com/xxxx/&#10;7.65 复制打开抖音…… https://v.douyin.com/yyyy/"></textarea>
     <div class="composer-bar">
-      <div style="display:flex; gap:8px">
-        <button class="ghost-btn" id="pasteBtn">📋 粘贴</button>
-        <button class="ghost-btn" id="clearBtn">清空</button>
+      <div style="display:flex; gap:8px; flex-wrap:wrap">
+        <button class="ghost-btn" id="pasteBtn" data-i18n="btn_paste">📋 粘贴</button>
+        <button class="ghost-btn" id="uploadBtn" data-i18n="btn_upload">📎 上传链接文件</button>
+        <button class="ghost-btn" id="clearBtn" data-i18n="btn_clear">清空</button>
+        <input type="file" id="fileInput" accept=".txt,.csv,text/plain" hidden>
       </div>
       <button class="primary-btn" id="parseBtn">
         <span id="btnSpin" class="spinner" style="display:none"></span>
-        <span id="btnText">解析</span>
+        <span id="btnText" data-i18n="btn_parse">解析</span>
       </button>
     </div>
+    <div class="composer-hint" data-i18n-html="hint">💡 可一次粘贴 <b>多条</b>分享文案或链接（每行一条或直接连续粘贴均可），系统自动识别拆分、批量解析并支持导出 Excel。</div>
+    <div class="quota-hint" id="quotaHint"></div>
   </div>
 
   <div class="steps">
-    <span class="step-chip"><b>1</b>App 内复制分享链接</span>
-    <span class="step-chip"><b>2</b>粘贴到上方并解析</span>
-    <span class="step-chip"><b>3</b>在线预览 · 下载原片</span>
+    <span class="step-chip"><b>1</b><span data-i18n="step1">粘贴 / 上传单条或多条链接</span></span>
+    <span class="step-chip"><b>2</b><span data-i18n="step2">点击解析（多条自动批量）</span></span>
+    <span class="step-chip"><b>3</b><span data-i18n="step3">表格查看 · 下载 · 导出 Excel</span></span>
   </div>
 
   <div class="alert" id="alert" role="alert">
@@ -374,29 +594,87 @@ footer{
 <section class="result" id="result"></section>
 
 <section class="trust">
-  <h2 class="trust-title reveal">为什么可以放心用</h2>
+  <h2 class="trust-title reveal" data-i18n="trust_title">为什么可以放心用</h2>
   <div class="trust-grid">
     <div class="trust-card reveal">
       <div class="tc-icon">🔓</div>
-      <h3>完全开源 · 零隐私</h3>
-      <p>前端代码完全开源，任何人都能审查——<strong>不嵌入任何危险代码、不采集、不上传你的任何隐私</strong>。无需登录、不记录你的账号，视频由你的浏览器直连获取，我们不存储任何内容。</p>
+      <h3 data-i18n="tc1_h">完全开源 · 零隐私</h3>
+      <p data-i18n-html="tc1_p">前端代码完全开源，任何人都能审查——<strong>不嵌入任何危险代码、不采集、不上传你的任何隐私</strong>。无需登录、不记录你的账号，视频由你的浏览器直连获取，我们不存储任何内容。</p>
     </div>
     <div class="trust-card reveal">
       <div class="tc-icon">🛡</div>
-      <h3>稳定可靠 · 持续可用</h3>
-      <p>我们做了大量工程来<strong>保证下载稳定</strong>：多线路智能容灾、失败自动重试切换、实时监测与持续维护。别的工具"说失效就失效"，我们让它一直能用。</p>
+      <h3 data-i18n="tc2_h">稳定可靠 · 持续可用</h3>
+      <p data-i18n-html="tc2_p">我们做了大量工程来<strong>保证下载稳定</strong>：多线路智能容灾、失败自动重试切换、实时监测与持续维护。别的工具"说失效就失效"，我们让它一直能用。</p>
     </div>
     <div class="trust-card reveal">
       <div class="tc-icon">🚫</div>
-      <h3>永不接广告</h3>
-      <p>我们的承诺很简单——<strong>永远不会接入任何广告</strong>。没有弹窗、没有 15 秒插播、不给你的下载加二次水印。干净，就是干净。</p>
+      <h3 data-i18n="tc3_h">永不接广告</h3>
+      <p data-i18n-html="tc3_p">我们的承诺很简单——<strong>永远不会接入任何广告</strong>。没有弹窗、没有 15 秒插播、不给你的下载加二次水印。干净，就是干净。</p>
     </div>
   </div>
 </section>
 
+<!-- 开发者 API 介绍 -->
+<section class="api-band">
+  <div class="api-band-inner reveal">
+    <div class="api-band-text">
+      <span class="api-tag" data-i18n="api_tag">开发者 API</span>
+      <h2 data-i18n="api_h">需要批量 / 自动化？用开放 API</h2>
+      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交抖音链接、查询解析结果——标题、作者、无水印视频地址、图集图片、互动数据一次拿全。按次计费、稳定可靠，适合采集、备份与二次开发。</p>
+      <div class="api-feats">
+        <span data-i18n="api_f1">✓ 异步批量：提交即返回任务号</span>
+        <span data-i18n="api_f2">✓ 规范 JSON：结构化字段</span>
+        <span data-i18n="api_f3">✓ 按次计费 · 余额可查</span>
+      </div>
+      <div class="api-cta">
+        <a class="primary-btn" href="/api-docs" data-i18n="api_cta1">查看接口文档</a>
+        <a class="ghost-btn" href="/api-console" data-i18n="api_cta2">前往 API 控制台</a>
+      </div>
+    </div>
+    <pre class="api-code"><code>POST /api/v1/jobs
+X-API-Key: dy_xxx
+
+{ "links": ["https://v.douyin.com/xxx/"] }
+→ { "code":0, "data":{
+     "job_id":"job_xxx", "status":"pending" } }
+
+GET /api/v1/jobs/job_xxx
+→ { "data":{ "status":"done",
+     "results":[{ "ok":true, "data":{…} }] } }</code></pre>
+  </div>
+</section>
+
+<section class="faq" aria-labelledby="faq-title">
+  <h2 class="faq-title reveal" id="faq-title" data-i18n="faq_title">常见问题</h2>
+  <p class="faq-lead reveal" data-i18n="faq_lead">抖音无水印下载：在抖音 App 复制作品分享链接，粘贴到本站点击解析，即可在线预览并下载无水印原片。全程免登录、免安装、由你的浏览器直连下载。</p>
+  <div class="faq-list">
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q1">这个抖音下载器安全吗？会收集我的隐私吗？</summary>
+      <p data-i18n-html="faq_a1">安全。前端代码<strong>完全开源</strong>、任何人都能审查，<strong>不嵌入任何危险代码、不采集、不上传你的任何隐私</strong>。无需登录、不记录账号，视频由你的浏览器直连获取，我们不存储任何内容。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q2">需要登录或安装软件吗？</summary>
+      <p data-i18n="faq_a2">不需要。纯网页工具，无需登录抖音账号、无需安装任何 App 或浏览器插件，粘贴分享链接即可使用。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q3">下载的抖音视频有水印吗？</summary>
+      <p data-i18n-html="faq_a3">没有水印。下载的是<strong>无水印原片</strong>，也不会加入本站自己的二次水印。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q4">支持图集（图片作品）下载吗？</summary>
+      <p data-i18n="faq_a4">支持。图集作品会自动识别，可逐张下载原图，也可批量解析下载。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q5">有没有 API 可以批量调用？</summary>
+      <p data-i18n="faq_a5">有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。</p>
+    </details>
+  </div>
+</section>
+</main>
+
 <footer>
-  仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有<br>
-  未经授权请勿二次发布或商用 · 本工具不存储任何视频与账号数据
+  <span data-i18n="footer1">仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有</span><br>
+  <span data-i18n="footer2">未经授权请勿二次发布或商用 · 本工具不存储任何视频与账号数据</span>
 </footer>
 
 </div>
@@ -406,6 +684,56 @@ const $ = (s) => document.querySelector(s);
 const input = $('#input'), parseBtn = $('#parseBtn'), alertBox = $('#alert'),
       alertText = $('#alertText'), result = $('#result'),
       btnSpin = $('#btnSpin'), btnText = $('#btnText');
+
+/* ---------- 多语言 i18n ---------- */
+const LANG = window.__LANG || 'zh';
+const I18N = {
+  en: {
+    nav_api:"API", nav_login:"Sign in", nav_console:"API Console", nav_logout:"Log out",
+    hero_h1:'Paste a link,<br>get the <span class="hl">watermark-free</span> original',
+    hero_sub:"Open-source · Privacy-first · No ads, ever · Reliable",
+    b_opensource:"🔓 Open source", b_privacy:"🔒 Privacy-first", b_noads:"🚫 No ads", b_stable:"🛡 Reliable", b_nologin:"👤 No login",
+    ph_input:"Paste one or more Douyin share texts / links — paste many at once and they're auto-split for batch parsing.\ne.g.\n3.89 ... https://v.douyin.com/xxxx/\n7.65 ... https://v.douyin.com/yyyy/",
+    btn_paste:"📋 Paste", btn_upload:"📎 Upload file", btn_clear:"Clear", btn_parse:"Parse",
+    hint:"💡 Paste <b>multiple</b> links at once (one per line or run-on) — auto-split, batch-parsed, and exportable to Excel.",
+    step1:"Paste / upload one or many links", step2:"Click Parse (multi = auto batch)", step3:"Table view · download · export Excel",
+    trust_title:"Why you can trust it",
+    tc1_h:"Open source · Zero privacy", tc1_p:"The front-end is fully open-source and auditable — <strong>no malicious code, no collection, nothing uploaded</strong>. No login, no account logging; videos are fetched directly by your browser and we store nothing.",
+    tc2_h:"Reliable · Always up", tc2_p:"We put real engineering into <strong>keeping downloads working</strong>: multi-route failover, automatic retries, live monitoring and ongoing maintenance. Other tools break and stay broken — ours keeps working.",
+    tc3_h:"No ads, ever", tc3_p:"Our promise is simple — <strong>we will never run ads</strong>. No popups, no 15-second pre-rolls, no second watermark on your downloads. Clean, just clean.",
+    api_tag:"Developer API", api_h:"Need bulk / automation? Use the open API",
+    api_p:"Sign in, create an API key in the console, and submit Douyin links in bulk via the async API — title, author, no-watermark video URL, gallery images and stats in one call. Billed per request, reliable, built for scraping, backup and integration.",
+    api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance查询",
+    api_cta1:"View API docs", api_cta2:"Open API console",
+    faq_title:"FAQ", faq_lead:"Douyin no-watermark download: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — no login, no install, fetched directly by your browser.",
+    faq_q1:"Is this downloader safe? Does it collect my data?", faq_a1:"Yes. The front-end is <strong>fully open-source</strong> and auditable — <strong>no malicious code, no collection, nothing uploaded</strong>. No login, no account logging; your browser fetches the video and we store nothing.",
+    faq_q2:"Do I need to log in or install anything?", faq_a2:"No. It's a pure web tool — no Douyin login, no app or browser extension. Just paste a share link.",
+    faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
+    faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
+    faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
+    footer1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
+    footer2:"Do not re-publish or use commercially without permission · This tool stores no video or account data",
+    auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
+    auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
+    quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
+  },
+  zh: { quota_tpl:(r,l,u)=>`今日免费剩余 ${r}/${l} 次 · 登录后每天 ${u} 次` }
+};
+function t(key){ const d=I18N[LANG]; return d && d[key]!==undefined ? d[key] : null; }
+function applyI18n(root2){
+  if(LANG==='zh') return;
+  (root2||document).querySelectorAll('[data-i18n]').forEach(el=>{ const v=t(el.dataset.i18n); if(v!=null) el.textContent=v; });
+  (root2||document).querySelectorAll('[data-i18n-html]').forEach(el=>{ const v=t(el.dataset.i18nHtml); if(v!=null) el.innerHTML=v; });
+  (root2||document).querySelectorAll('[data-i18n-ph]').forEach(el=>{ const v=t(el.dataset.i18nPh); if(v!=null) el.placeholder=v; });
+}
+/* 语言切换：跳到 ?lang= 让服务端渲染对应 SEO/JSON-LD */
+$('#langLabel').textContent = LANG==='zh' ? 'EN' : '中';
+$('#langBtn').onclick = () => {
+  const to = LANG==='zh' ? 'en' : 'zh';
+  document.cookie = 'lang='+to+';path=/;max-age=31536000';
+  const u = new URL(location.href); u.searchParams.set('lang', to); location.href = u.toString();
+};
+applyI18n();
 
 /* ---------- 主题 ---------- */
 const root = document.documentElement;
@@ -423,6 +751,28 @@ const _io = new IntersectionObserver((entries) => {
 }, { threshold: 0.15 });
 document.querySelectorAll('.reveal').forEach(el => _io.observe(el));
 
+/* ---------- 浏览器指纹（配合 IP 做防薅羊毛限频）---------- */
+let _fp = localStorage.getItem('dyfp') || '';
+async function computeFP(){
+  const parts = [navigator.userAgent, navigator.language,
+    screen.width+'x'+screen.height+'x'+screen.colorDepth, new Date().getTimezoneOffset(),
+    navigator.hardwareConcurrency||0, navigator.platform||'', navigator.deviceMemory||0];
+  try { const c=document.createElement('canvas'), x=c.getContext('2d');
+    x.textBaseline='top'; x.font='14px Arial'; x.fillText('抖音下载器·fp🎬',2,2);
+    parts.push(c.toDataURL().slice(-80)); } catch {}
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(parts.join('|')));
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,32);
+}
+(async () => { if(!_fp){ try{ _fp = await computeFP(); localStorage.setItem('dyfp',_fp); }catch{} } refreshQuota(); })();
+function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_fp) h['X-FP']=_fp; return h; }
+
+async function refreshQuota(){
+  try { const q = await (await fetch('/api/quota', {headers: _fp?{'X-FP':_fp}:{}})).json();
+    const el = $('#quotaHint');
+    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily);
+  } catch {}
+}
+
 /* ---------- 输入区 ---------- */
 $('#pasteBtn').onclick = async () => {
   try {
@@ -430,14 +780,26 @@ $('#pasteBtn').onclick = async () => {
     input.focus();
   } catch { showError('浏览器未授权读取剪贴板，请手动粘贴（Cmd/Ctrl+V）'); }
 };
+$('#uploadBtn').onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = async (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const txt = await f.text();
+    input.value = (input.value ? input.value + '\n' : '') + txt;
+    const n = (input.value.match(/https:\/\/v\.douyin\.com\/[\w-]+/g)||[]).length;
+    showOk(`已读取文件，共识别 ${n} 个链接，点「解析」开始`);
+  } catch { showError('读取文件失败，请确认是文本文件（.txt/.csv）'); }
+  e.target.value = '';
+};
 $('#clearBtn').onclick = () => { input.value = ''; hideError(); result.classList.remove('show'); input.focus(); };
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); parse(); }
 });
 
-/* ---------- 报错 ---------- */
-function showError(msg){ alertText.textContent = msg; alertBox.classList.add('show'); }
-function hideError(){ alertBox.classList.remove('show'); }
+/* ---------- 提示 ---------- */
+function showError(msg){ alertText.textContent = msg; alertBox.classList.remove('ok'); alertBox.classList.add('show'); }
+function showOk(msg){ alertText.textContent = msg; alertBox.classList.add('ok','show'); }
+function hideError(){ alertBox.classList.remove('show','ok'); }
 
 /* ---------- 解析 ---------- */
 parseBtn.onclick = parse;
@@ -452,13 +814,14 @@ async function parse(){
   try {
     if (multi) { await parseBatch(text); return; }
     const resp = await fetch('/api/parse', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers: jsonHeaders(),
       body: JSON.stringify({text})
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
     render(data);
     saveHistory(data);
+    refreshQuota();
   } catch (e) {
     showError(e.message || '网络异常，请检查连接后重试');
   } finally {
@@ -466,31 +829,114 @@ async function parse(){
   }
 }
 
-/* ---------- 批量解析 ---------- */
+/* ---------- 批量解析：表格视图 ---------- */
+let _batch = [];   // 成功项：data + _link，供表格/导出/下载引用
+
 async function parseBatch(text){
   const resp = await fetch('/api/parse/batch', {
-    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})
+    method:'POST', headers: jsonHeaders(), body: JSON.stringify({text})
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) throw new Error(data.error || '批量解析失败');
-  const ok = data.results.filter(r=>r.ok);
-  result.innerHTML = `<div class="batch-head">批量解析 ${data.count} 条 · 成功 ${ok.length} · 失败 ${data.count-ok.length}</div>
-    <div id="batchList"></div>`;
+  refreshQuota();
+  _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
+  const fails = data.results.filter(r=>!r.ok);
+  _batch.forEach(d => { saveHistory(d); if (d.kind==='note') _albums[d.item_id]=d.images; });
+  renderBatch(data.count, fails);
+}
+
+function renderBatch(count, fails){
+  const rows = _batch.map((d, i) => {
+    const isNote = d.kind === 'note';
+    const cover = isNote ? (d.images?.[0]?.url || '') : (d.cover || '');
+    const st = d.stats || {};
+    return `<tr>
+      <td class="bt-idx tnum">${i+1}</td>
+      <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
+      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">@${esc(d.author||'未知')}</div></td>
+      <td><span class="bt-tag">${isNote?'图集':'视频'}</span></td>
+      <td class="tnum">${isNote?('· '+(d.images?.length||0)+'图'):fmtDur(d.duration_ms)}</td>
+      <td class="bt-nums tnum">❤${fmtNum(st.digg)} · 💬${fmtNum(st.comment)} · ★${fmtNum(st.collect)}</td>
+      <td class="bt-ops">
+        ${isNote?`<button class="mini-btn" onclick="downloadAll('${esc(d.item_id)}')">下载图集</button>`
+                :`<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>
+                  <button class="mini-btn ghost" onclick="openPlayer(${i})">播放</button>`}
+      </td>
+    </tr>`;
+  }).join('');
+
+  const failHtml = fails.length ? `<div class="batch-fails">${fails.map(f=>
+    `<div class="batch-err">✗ ${esc(f.link)} — ${esc(f.error)}</div>`).join('')}</div>` : '';
+
+  result.innerHTML = `
+    <div class="batch-bar">
+      <div class="batch-stat">共 <b>${count}</b> 条 · 成功 <b style="color:var(--ok)">${_batch.length}</b>${fails.length?` · 失败 <b style="color:var(--accent)">${fails.length}</b>`:''}</div>
+      <div class="batch-actions">
+        <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note')?'':'style="display:none"'}>⬇ 下载全部视频</button>
+        <button class="primary-btn" id="exportBtn" ${_batch.length?'':'disabled'}>📊 导出 Excel</button>
+      </div>
+    </div>
+    <div class="tblwrap batch-tblwrap"><table class="batch-table">
+      <thead><tr><th>#</th><th>封面</th><th>标题 / 作者</th><th>类型</th><th>时长</th><th>互动数据</th><th>操作</th></tr></thead>
+      <tbody>${rows || ''}</tbody>
+    </table></div>
+    ${failHtml}`;
   result.classList.add('show');
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
-  const list = result.querySelector('#batchList');
-  data.results.forEach((r, i) => {
-    const box = document.createElement('div');
-    list.appendChild(box);
-    if (r.ok){ renderInto(box, r.data); saveHistory(r.data); }
-    else box.innerHTML = `<div class="batch-err">✗ ${esc(r.link)} — ${esc(r.error)}</div>`;
-  });
+  $('#exportBtn').onclick = exportBatch;
+  const dlAll = $('#dlAllBtn'); if (dlAll) dlAll.onclick = downloadAllVideos;
 }
-function renderInto(el, d){
-  el.innerHTML = d.kind === 'note' ? albumHTML(d) : videoHTML(d);
-  wireAvatar(el, d.item_id);
-  if (d.kind === 'note') _albums[d.item_id] = d.images;
+
+async function dlBatchOne(i, btn){
+  const d = _batch[i]; if (!d) return;
+  await browserDownload(d.video.url, d.video.filename, btn);
 }
+async function downloadAllVideos(){
+  const vids = _batch.filter(d => d.kind !== 'note');
+  const btn = $('#dlAllBtn'); const old = btn.textContent;
+  for (let i=0; i<vids.length; i++){
+    btn.textContent = `下载中 ${i+1}/${vids.length}…`;
+    await browserDownload(vids[i].video.url, vids[i].video.filename);
+    await new Promise(r=>setTimeout(r,500));
+  }
+  btn.textContent = old;
+}
+async function exportBatch(){
+  const btn = $('#exportBtn'); const old = btn.textContent; btn.textContent='导出中…'; btn.disabled=true;
+  try {
+    const resp = await fetch('/api/export/xlsx', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({items:_batch})});
+    if (!resp.ok) throw new Error('导出失败');
+    const blob = await resp.blob();
+    const a = document.createElement('a'); const u = URL.createObjectURL(blob);
+    a.href = u; a.download = '抖音批量解析.xlsx'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u), 4000);
+  } catch(e){ showError(e.message); }
+  finally { btn.textContent=old; btn.disabled=false; }
+}
+
+/* ---------- 播放弹窗 ---------- */
+function openPlayer(i){
+  const d = _batch[i]; if (!d) return;
+  let m = $('#playerModal');
+  if (!m){ m = document.createElement('div'); m.id='playerModal'; m.className='pm';
+    m.innerHTML = `<div class="pm-box"><button class="pm-close" aria-label="关闭">✕</button><div class="pm-body"></div></div>`;
+    document.body.appendChild(m);
+    m.addEventListener('click', e => { if (e.target===m || e.target.classList.contains('pm-close')) closePlayer(); });
+    document.addEventListener('keydown', e => { if (e.key==='Escape') closePlayer(); });
+  }
+  const body = m.querySelector('.pm-body');
+  if (d.kind === 'note'){
+    body.innerHTML = `<div class="pm-title">${esc(d.title)}</div><div class="pm-imgs">${
+      (d.images||[]).map(im=>`<img src="${esc(im.url)}" alt="">`).join('')}</div>`;
+  } else {
+    body.innerHTML = `<video controls autoplay playsinline src="${esc(d.video.url)}" data-proxy="${esc(d.video.proxy_url||'')}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
+      <div class="pm-title">${esc(d.title)}</div>
+      <div class="pm-act"><button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button></div>`;
+  }
+  m.classList.add('show'); document.body.style.overflow='hidden';
+}
+function closePlayer(){ const m=$('#playerModal'); if(m){ m.classList.remove('show'); m.querySelector('video')?.pause(); document.body.style.overflow=''; } }
 function setLoading(on){
   parseBtn.disabled = on;
   btnSpin.style.display = on ? '' : 'none';
@@ -738,6 +1184,155 @@ function saveHistory(d){
     localStorage.setItem(k, JSON.stringify(list.slice(0, 50)));
   } catch {}
 }
+
+/* ================= 登录 / 注册（表单 → 弹出滑块 → 通过后继续）================= */
+let _authMode = 'login', _cap = null, _capX = -1, _traj = [], _dragOK = false, _pending = null;
+const authModal = $('#authModal');
+
+async function refreshUser(){
+  try {
+    const d = await (await fetch('/api/auth/me')).json();
+    const logged = !!d.user;
+    $('#authBtn').style.display = logged ? 'none' : '';
+    $('#userMenu').style.display = logged ? 'flex' : 'none';
+    $('#apiTabBtn').style.display = logged ? '' : 'none';
+    if (logged) $('#userEmail').textContent = d.user.email;
+    refreshQuota();
+  } catch {}
+}
+$('#authBtn').onclick = () => openAuth('login');
+$('#logoutBtn').onclick = async () => { await fetch('/api/auth/logout',{method:'POST'}); refreshUser(); };
+$('#authClose').onclick = closeAuth;
+authModal.addEventListener('click', e => { if (e.target===authModal) closeAuth(); });
+document.querySelectorAll('.auth-tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
+
+function setMode(mode){
+  _authMode = mode;
+  document.querySelectorAll('.auth-tab').forEach(t => t.classList.toggle('active', t.dataset.mode===mode));
+  $('#authNext').textContent = '下一步';
+}
+function openAuth(mode){
+  setMode(mode);
+  $('#authErr').textContent=''; $('#authErr2').textContent=''; $('#authHp').value='';
+  showStep(1);
+  authModal.classList.add('show'); document.body.style.overflow='hidden';
+}
+function closeAuth(){ authModal.classList.remove('show'); document.body.style.overflow=''; }
+function showStep(n){ $('#authStep1').style.display=n===1?'':'none'; $('#authStep2').style.display=n===2?'':'none'; }
+$('#authBack').onclick = () => showStep(1);
+
+/* 步骤1：点「下一步/登录/注册」→ 校验表单 → 弹出滑块 */
+$('#authNext').onclick = () => {
+  const email=$('#authEmail').value.trim(), pw=$('#authPw').value;
+  const err=$('#authErr'); err.textContent='';
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ err.textContent=LANG==='en'?'Please enter a valid email':'请输入正确的邮箱'; return; }
+  if(pw.length<6){ err.textContent=LANG==='en'?'Password must be at least 6 characters':'密码至少 6 位'; return; }
+  _pending = {email, password:pw, hp:$('#authHp').value};
+  const act = t(_authMode==='login'?'auth_login':'auth_register') || (_authMode==='login'?'登录':'注册');
+  $('#authCapTitle').textContent = act + (LANG==='en'?' · Security check':' · 安全验证');
+  showStep(2);
+  loadCaptcha();
+};
+
+async function loadCaptcha(){
+  _dragOK=false; _capX=-1; _traj=[]; _cap=null;
+  const track=$('#scTrack'); track.classList.remove('ok','err');
+  $('#scHandle').style.left='0px'; $('#scFill').style.width='0px';
+  $('#scPiece').style.transform='translateX(0px)'; $('#scPiece').style.visibility='hidden';
+  $('#scLabel').textContent = t('sc_drag') || '向右拖动滑块完成拼图'; $('#authErr2').textContent='';
+  $('#scLoading').style.display='grid';
+  try {
+    _cap = await (await fetch('/api/auth/captcha')).json();
+    const bg=$('#scBg'), pc=$('#scPiece');
+    bg.onload = () => $('#scLoading').style.display='none';
+    bg.src=_cap.bg; pc.src=_cap.piece;
+    pc.style.top = (_cap.y/_cap.h*100)+'%';
+    pc.style.visibility='visible';
+    setTimeout(()=>$('#scLoading').style.display='none', 600);
+  } catch { $('#authErr2').textContent='验证码加载失败，请返回重试'; }
+}
+
+/* 滑块拖动 */
+(function(){
+  const handle=$('#scHandle');
+  const trackR=()=>$('#scTrack').getBoundingClientRect(), stageR=()=>$('#scStage').getBoundingClientRect();
+  let dragging=false, startX=0, hx0=0, t0=0;
+  function down(e){ if(!_cap||_dragOK) return; dragging=true;
+    startX=(e.touches?e.touches[0].clientX:e.clientX); hx0=parseFloat(handle.style.left)||0;
+    t0=performance.now(); _traj=[]; e.preventDefault(); }
+  function move(e){
+    if(!dragging) return;
+    const cx=(e.touches?e.touches[0].clientX:e.clientX);
+    const maxH=trackR().width-46;
+    const hx=Math.max(0, Math.min(maxH, hx0+cx-startX));
+    handle.style.left=hx+'px'; $('#scFill').style.width=(hx+23)+'px';
+    const frac=maxH? hx/maxH : 0;
+    const stW=stageR().width, pieceW=stW*0.166;
+    $('#scPiece').style.transform=`translateX(${frac*(stW-pieceW)}px)`;
+    _capX = frac*(_cap.w - _cap.piece_size);           // 映射到服务端 300 宽坐标
+    _traj.push({t: Math.round(performance.now()-t0), x: Math.round(_capX*10)/10});
+  }
+  function up(){ if(!dragging) return; dragging=false;
+    if(_cap && !_dragOK && _traj.length>=5) verifyCaptcha(); }
+  handle.addEventListener('mousedown',down); window.addEventListener('mousemove',move); window.addEventListener('mouseup',up);
+  handle.addEventListener('touchstart',down,{passive:false}); window.addEventListener('touchmove',move,{passive:false}); window.addEventListener('touchend',up);
+})();
+
+/* PoW（同步 SHA-256，避免 crypto.subtle 每次 await 拖慢；14 位约 10ms 内解出）*/
+const _POW_K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+const _rr=(x,n)=>(x>>>n)|(x<<(32-n));
+function sha256sync(bytes){
+  const l=bytes.length, total=Math.ceil((l+9)/64)*64;
+  const m=new Uint8Array(total); m.set(bytes); m[l]=0x80;
+  const dv=new DataView(m.buffer); dv.setUint32(total-4, (l*8)>>>0);
+  const H=new Int32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const w=new Int32Array(64);
+  for(let off=0;off<total;off+=64){
+    for(let i=0;i<16;i++) w[i]=dv.getInt32(off+i*4);
+    for(let i=16;i<64;i++){ const a=w[i-15],b=w[i-2];
+      w[i]=(w[i-16]+((_rr(a,7)^_rr(a,18)^(a>>>3))|0)+w[i-7]+((_rr(b,17)^_rr(b,19)^(b>>>10))|0))|0; }
+    let a=H[0],b=H[1],c=H[2],d=H[3],e=H[4],f=H[5],g=H[6],h=H[7];
+    for(let i=0;i<64;i++){
+      const t1=(h+((_rr(e,6)^_rr(e,11)^_rr(e,25))|0)+((e&f)^(~e&g))+_POW_K[i]+w[i])|0;
+      const t2=(((_rr(a,2)^_rr(a,13)^_rr(a,22))|0)+((a&b)^(a&c)^(b&c)))|0;
+      h=g;g=f;f=e;e=(d+t1)|0;d=c;c=b;b=a;a=(t1+t2)|0;
+    }
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+b)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;H[5]=(H[5]+f)|0;H[6]=(H[6]+g)|0;H[7]=(H[7]+h)|0;
+  }
+  const out=new Uint8Array(32), odv=new DataView(out.buffer);
+  for(let i=0;i<8;i++) odv.setInt32(i*4,H[i]);
+  return out;
+}
+function leadZeroBits(b){ let n=0; for(const x of b){ if(x===0){n+=8;continue;} let v=x; while((v&0x80)===0){n++;v=(v<<1)&0xff;} break;} return n; }
+function solvePoW(cid, need){ const enc=new TextEncoder();
+  for(let n=0;n<5000000;n++){ if(leadZeroBits(sha256sync(enc.encode(cid+':'+n)))>=need) return String(n); } return '0'; }
+
+/* 松手即校验滑块 → 成功换令牌 → 直接继续登录/注册 */
+async function verifyCaptcha(){
+  _dragOK=true;
+  const track=$('#scTrack'); $('#scLabel').textContent=LANG==='en'?'Verifying…':'验证中…';
+  try {
+    const nonce = await solvePoW(_cap.cid, _cap.pow_bits);
+    const vr = await fetch('/api/auth/captcha/verify', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cid:_cap.cid, x:_capX, trajectory:_traj, nonce})});
+    const vd = await vr.json().catch(()=>({}));
+    if(!vr.ok) throw new Error(vd.error || '验证失败');
+    track.classList.add('ok'); $('#scLabel').textContent=LANG==='en'?'Verified ✓':'验证通过 ✓';
+    // 拿到一次性令牌，立即继续登录/注册
+    const r = await fetch('/api/auth/'+(_authMode==='register'?'register':'login'), {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({..._pending, pass_token:vd.pass_token})});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error || '操作失败');
+    setTimeout(()=>{ closeAuth(); refreshUser(); }, 350);
+  } catch(e){
+    track.classList.add('err'); $('#authErr2').textContent=e.message;
+    setTimeout(loadCaptcha, 700);                       // 失败自动换一张
+  }
+}
+
+$('#apiTabBtn').onclick = (e) => { e.preventDefault(); location.href='/api-console'; };
+
+refreshUser();
 </script>
 </body>
 </html>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="560" viewBox="0 0 1000 560" font-family="PingFang SC,Noto Sans SC,sans-serif">
+<rect width="1000" height="560" rx="16" fill="#121419"/>
+<text x="32" y="46" font-size="18" font-weight="700" fill="#ECEEF2">完整版 · 管理后台数据概览</text>
+<text x="32" y="70" font-size="12" fill="#6D7480">Pro Edition — Admin Analytics Dashboard (not in this repo)</text>
+<!-- tabs -->
+<g font-size="13" font-weight="600"><text x="32" y="108" fill="#ECEEF2">数据概览</text><text x="120" y="108" fill="#6D7480">代理池</text><text x="185" y="108" fill="#6D7480">用户</text><text x="240" y="108" fill="#6D7480">请求日志</text></g>
+<rect x="30" y="118" width="66" height="2" fill="#FF5C82"/>
+<!-- cards -->
+<g>
+<rect x="32" y="140" width="176" height="80" rx="12" fill="#191C22" stroke="#262A31"/><text x="48" y="168" font-size="11" fill="#A2A9B4">总用户</text><text x="48" y="198" font-size="24" font-weight="800" fill="#ECEEF2">1,284</text>
+<rect x="220" y="140" width="176" height="80" rx="12" fill="#191C22" stroke="#262A31"/><text x="236" y="168" font-size="11" fill="#A2A9B4">今日 PV / UV</text><text x="236" y="198" font-size="24" font-weight="800" fill="#ECEEF2">9.7k / 3.1k</text>
+<rect x="408" y="140" width="176" height="80" rx="12" fill="#191C22" stroke="#262A31"/><text x="424" y="168" font-size="11" fill="#A2A9B4">今日 API 调用</text><text x="424" y="198" font-size="24" font-weight="800" fill="#ECEEF2">6,420</text>
+<rect x="596" y="140" width="176" height="80" rx="12" fill="#191C22" stroke="#262A31"/><text x="612" y="168" font-size="11" fill="#A2A9B4">今日营收</text><text x="612" y="198" font-size="24" font-weight="800" fill="#2EC9B8">¥64.20</text>
+<rect x="784" y="140" width="184" height="80" rx="12" fill="#191C22" stroke="#262A31"/><text x="800" y="168" font-size="11" fill="#A2A9B4">回访率</text><text x="800" y="198" font-size="24" font-weight="800" fill="#ECEEF2">42.1%</text>
+</g>
+<!-- chart -->
+<rect x="32" y="238" width="936" height="290" rx="14" fill="#191C22" stroke="#262A31"/>
+<text x="52" y="272" font-size="14" font-weight="700" fill="#ECEEF2">近 14 天趋势 · 新增用户 / 浏览 / 使用 / API / 营收</text>
+<g transform="translate(52,300)">
+<!-- bars group 1 -->
+<g fill="#FE2C55"><rect x="0" y="130" width="18" height="70" rx="3"/><rect x="34" y="100" width="18" height="100" rx="3"/><rect x="68" y="115" width="18" height="85" rx="3"/><rect x="102" y="70" width="18" height="130" rx="3"/><rect x="136" y="55" width="18" height="145" rx="3"/><rect x="170" y="40" width="18" height="160" rx="3"/><rect x="204" y="60" width="18" height="140" rx="3"/></g>
+<g fill="#25F4EE" opacity="0.8"><rect x="300" y="150" width="18" height="50" rx="3"/><rect x="334" y="120" width="18" height="80" rx="3"/><rect x="368" y="90" width="18" height="110" rx="3"/><rect x="402" y="100" width="18" height="100" rx="3"/><rect x="436" y="60" width="18" height="140" rx="3"/><rect x="470" y="45" width="18" height="155" rx="3"/><rect x="504" y="30" width="18" height="170" rx="3"/></g>
+<g fill="#2EC9B8" opacity="0.85"><rect x="600" y="160" width="18" height="40" rx="3"/><rect x="634" y="130" width="18" height="70" rx="3"/><rect x="668" y="110" width="18" height="90" rx="3"/><rect x="702" y="80" width="18" height="120" rx="3"/><rect x="736" y="70" width="18" height="130" rx="3"/><rect x="770" y="40" width="18" height="160" rx="3"/><rect x="804" y="20" width="18" height="180" rx="3"/></g>
+</g>
+<text x="500" y="548" font-size="11" fill="#6D7480" text-anchor="middle">用户体系 · 代理池 · 异步计费 API · 数据分析 —— 完整版功能，联系作者获取</text>
+</svg>

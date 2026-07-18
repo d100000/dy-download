@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="{{HTMLLANG}}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{{SEO_HEAD}}
+<style>
+:root{--bg:#0E1013;--surface:#16191E;--surface-2:#1C2026;--border:#272C34;--border-strong:#343B45;--text:#EDEFF2;--muted:#8A93A0;--faint:#5B6470;--accent:#FE2C55;--accent-hover:#FF4D6F;--accent-ink:#fff;--accent-soft:#33161E;--ok:#25F4EE;--good:#3DD68C;--code-bg:#0b0d10;--shadow:0 20px 50px -24px rgba(0,0,0,.6)}
+:root[data-theme=light]{--bg:#F7F8FA;--surface:#fff;--surface-2:#F2F4F7;--border:#E4E7EC;--border-strong:#CBD2DB;--text:#17191D;--muted:#6B7280;--faint:#9AA1AC;--accent:#E0234E;--accent-hover:#C71D44;--accent-soft:#FDEDF1;--ok:#0FA8A0;--good:#0E9F6E;--code-bg:#16191E;--shadow:0 16px 40px -24px rgba(23,25,29,.18)}
+*{box-sizing:border-box;margin:0}
+body{background:var(--bg);color:var(--text);min-height:100vh;font-size:15px;line-height:1.7;font-family:"PingFang SC","Noto Sans SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+a{color:var(--accent);text-decoration:none}
+code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.wrap{max-width:940px;margin:0 auto;padding:0 20px 90px}
+nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0;border-bottom:1px solid var(--border);position:sticky;top:0;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(8px);z-index:10}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700}
+.logo{width:32px;height:32px;border-radius:9px;background:#000;display:grid;place-items:center;color:#fff;box-shadow:-2px 0 0 rgba(37,244,238,.85),2px 0 0 rgba(254,44,85,.85)}
+.nav-right{display:flex;align-items:center;gap:10px}
+.nav-link{font-size:13.5px;color:var(--muted);cursor:pointer}.nav-link:hover{color:var(--text)}
+.nav-user{font-size:13.5px;font-weight:600;color:var(--accent-ink);background:var(--accent);border-radius:10px;padding:8px 15px;cursor:pointer}
+.lang-switch,.icon-btn{font-size:12.5px;font-weight:600;color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:7px 11px;cursor:pointer;background:var(--surface)}
+.icon-btn{width:36px;height:36px;padding:0;display:grid;place-items:center}
+.hero{padding:46px 0 20px}
+h1{font-size:clamp(26px,4vw,38px);font-weight:800;letter-spacing:-.02em;line-height:1.2}
+h1 .hl{background:linear-gradient(100deg,#FE2C55,#25F4EE);-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{color:var(--muted);margin-top:14px;font-size:16px;max-width:70ch}
+.cta{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+.btn{display:inline-flex;align-items:center;gap:7px;padding:11px 22px;border-radius:12px;font-weight:600;font-size:14.5px}
+.btn-primary{background:var(--accent);color:var(--accent-ink)}.btn-primary:hover{background:var(--accent-hover)}
+.btn-ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
+h2{font-size:21px;font-weight:800;margin:44px 0 6px;letter-spacing:-.01em}
+h2 .num{color:var(--accent);margin-right:8px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:16px}
+.steps3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
+.step{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow)}
+.step .n{width:26px;height:26px;border-radius:8px;background:var(--accent-soft);color:var(--accent);font-weight:700;display:grid;place-items:center;font-size:13px;margin-bottom:10px}
+.step h3{font-size:15px;margin-bottom:5px}.step p{font-size:13.5px;color:var(--muted)}
+.endpoint{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;margin:14px 0;box-shadow:var(--shadow)}
+.ep-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.method{font-size:11.5px;font-weight:700;padding:3px 9px;border-radius:7px;background:var(--good);color:#04150e}
+.method.get{background:var(--ok);color:#052b29}
+.path{font-family:ui-monospace,Menlo,monospace;font-size:14px;font-weight:600}
+.ep-desc{font-size:13.5px;color:var(--muted);margin:4px 0 10px}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.65;color:#c7d0da;margin:8px 0}
+:root[data-theme=light] pre{color:#d7dee6}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border)}
+th{font-size:11.5px;letter-spacing:.04em;color:var(--muted);background:var(--surface-2)}
+.tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px}
+.note{background:var(--accent-soft);border:1px solid var(--border);border-radius:12px;padding:14px 18px;font-size:13.5px;color:var(--text);margin:18px 0}
+kbd{font-family:ui-monospace,Menlo,monospace;background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:.9em}
+footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color:var(--faint);font-size:12.5px;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <a class="brand" href="/" style="color:inherit"><span class="logo">♪</span> <span data-i18n="brand">抖音下载器 · API</span></a>
+  <div class="nav-right">
+    <a class="nav-link" href="/" data-i18n="nav_home">首页</a>
+    <a class="nav-link" id="consoleLink" href="/api-console" style="display:none" data-i18n="nav_console">控制台</a>
+    <button class="nav-user" id="authBtn" data-i18n="nav_login">登录 / 注册</button>
+    <span class="nav-link" id="userEmail" style="display:none"></span>
+    <button class="lang-switch" id="langBtn"><span id="langLabel">EN</span></button>
+    <button class="icon-btn" id="themeBtn">◐</button>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1 data-i18n-html="h1">抖音解析 <span class="hl">开放 API</span></h1>
+  <p class="lead" data-i18n="lead">通过异步接口批量提交抖音链接，拿到无水印视频地址、图集图片、标题作者与互动数据。规范 JSON、按次计费、稳定可靠——适合数据采集、内容备份与二次开发。</p>
+  <div class="cta">
+    <a class="btn btn-primary" id="startBtn" href="/api-console" data-i18n="get_key">登录后生成密钥</a>
+    <a class="btn btn-ghost" href="#endpoints" data-i18n="see_ep">查看接口</a>
+  </div>
+</section>
+
+<h2><span class="num">1</span><span data-i18n="s1">快速开始</span></h2>
+<div class="steps3">
+  <div class="step"><div class="n">1</div><h3 data-i18n="s1a_h">注册 / 登录</h3><p data-i18n="s1a_p">在首页右上角点「登录 / 注册」，完成滑块验证即可。</p></div>
+  <div class="step"><div class="n">2</div><h3 data-i18n="s1b_h">生成 API Key</h3><p data-i18n="s1b_p">进入 API 控制台点「生成密钥」，新密钥自带试用余额。</p></div>
+  <div class="step"><div class="n">3</div><h3 data-i18n="s1c_h">发起调用</h3><p data-i18n-html="s1c_p">在请求头带 <code>X-API-Key</code> 调用下方接口即可。</p></div>
+</div>
+
+<h2><span class="num">2</span><span data-i18n="s2">鉴权</span></h2>
+<p class="sub" data-i18n-html="s2_p">所有接口通过请求头 <code>X-API-Key: 你的密钥</code> 鉴权（也支持 <code>?key=</code> 查询参数）。密钥在 API 控制台生成与管理。</p>
+<pre>X-API-Key: dy_xxxxxxxxxxxxxxxxxxxx</pre>
+
+<h2 id="endpoints"><span class="num">3</span><span data-i18n="s3">接口</span></h2>
+
+<div class="endpoint">
+  <div class="ep-head"><span class="method">POST</span><span class="path">/api/v1/jobs</span></div>
+  <div class="ep-desc" data-i18n="ep1">提交批量解析任务（异步）。传 links 数组或整段 text，立即返回 job_id。</div>
+  <pre data-i18n-html="ep1_code"># 请求体（二选一）
+{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }
+{ "text":  "整段分享文案，自动提取其中所有链接" }
+
+# 返回
+{ "code": 0, "message": "accepted",
+  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",
+            "price_cents": 1, "estimated_cost_cents": 2,
+            "query_url": "/api/v1/jobs/job_xxx" } }</pre>
+</div>
+
+<div class="endpoint">
+  <div class="ep-head"><span class="method get">GET</span><span class="path">/api/v1/jobs/{job_id}</span></div>
+  <div class="ep-desc" data-i18n="ep2">查询任务状态与结果。status 为 done 时 results 为逐条解析结果。</div>
+  <pre data-i18n-html="ep2_code"># 返回
+{ "code": 0, "data": {
+    "status": "done", "total": 2, "done": 2, "ok": 1, "cost_cents": 1,
+    "results": [
+      { "link": "...", "ok": true,  "data": { "title": "...", "author": "...",
+          "video": { "url": "无水印视频直链", "width": 1080, "height": 1920 },
+          "stats": { "digg": 12000, "comment": 340 } } },
+      { "link": "...", "ok": false, "error": "链接已失效" }
+    ] } }</pre>
+</div>
+
+<div class="endpoint">
+  <div class="ep-head"><span class="method get">GET</span><span class="path">/api/v1/balance</span></div>
+  <div class="ep-desc" data-i18n="ep3">查询当前密钥余额与用量。</div>
+  <pre>{ "code": 0, "data": { "balance_cents": 980, "spent_cents": 20, "calls": 20, "price_cents": 1 } }</pre>
+</div>
+
+<h2><span class="num">4</span><span data-i18n="s4">计费</span></h2>
+<p class="sub" data-i18n="s4_p">每成功解析一条链接计费一次（默认 ¥0.01/条，可能调整）；解析失败不计费；余额不足会拒绝提交。余额可在控制台或 balance 接口查询，充值请联系作者。</p>
+
+<h2><span class="num">5</span><span data-i18n="s5">错误码</span></h2>
+<div class="tbl-wrap"><table>
+  <thead><tr><th data-i18n="th_http">HTTP</th><th data-i18n="th_mean">含义</th></tr></thead>
+  <tbody>
+    <tr><td>400</td><td data-i18n="e400">请求体错误 / 无合法链接</td></tr>
+    <tr><td>401</td><td data-i18n="e401">缺少或无效的 API Key</td></tr>
+    <tr><td>402</td><td data-i18n="e402">余额不足</td></tr>
+    <tr><td>404</td><td data-i18n="e404">任务不存在或无权访问</td></tr>
+  </tbody>
+</table></div>
+
+<div class="note" data-i18n-html="volume">需要更高并发 / 更低单价 / 私有部署？<a href="https://github.com/d100000/dy-download">联系作者</a>获取企业方案。</div>
+
+<footer><span data-i18n="foot">仅供个人学习与获得授权的素材备份使用 · 内容版权归原作者所有</span></footer>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const LANG=window.__LANG||'zh';
+const root=document.documentElement;root.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+$('#themeBtn').onclick=()=>{root.dataset.theme=root.dataset.theme==='light'?'dark':'light';localStorage.setItem('theme',root.dataset.theme)};
+$('#langLabel').textContent=LANG==='zh'?'EN':'中';
+$('#langBtn').onclick=()=>{const to=LANG==='zh'?'en':'zh';document.cookie='lang='+to+';path=/;max-age=31536000';const u=new URL(location.href);u.searchParams.set('lang',to);location.href=u.toString()};
+
+const I18N={en:{
+  brand:"Douyin Downloader · API", nav_home:"Home", nav_console:"Console", nav_login:"Sign in",
+  h1:'Douyin parsing <span class="hl">Open API</span>',
+  lead:"Submit Douyin links in bulk via the async API and get no-watermark video URLs, gallery images, title/author and engagement stats. Clean JSON, pay-per-request, reliable — built for scraping, backup and integration.",
+  get_key:"Sign in to create a key", see_ep:"See endpoints",
+  s1:"Quick start", s1a_h:"Sign up / in", s1a_p:"Click “Sign in” at the top-right of the home page and pass the slider check.",
+  s1b_h:"Create an API key", s1b_p:"Open the API console and click “Create key”. New keys include trial balance.",
+  s1c_h:"Make a call", s1c_p:"Call the endpoints below with the <code>X-API-Key</code> header.",
+  s2:"Authentication", s2_p:"Every endpoint authenticates via the header <code>X-API-Key: your_key</code> (or a <code>?key=</code> query param). Keys are managed in the API console.",
+  s3:"Endpoints",
+  ep1:"Submit a batch parse job (async). Pass a links array or raw text; returns a job_id immediately.",
+  ep1_code:'# Body (either)\n{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }\n{ "text":  "any share text — all links are extracted automatically" }\n\n# Response\n{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
+  ep2:"Poll job status and results. When status is done, results holds per-link outcomes.",
+  ep2_code:'# Response\n{ "code": 0, "data": {\n    "status": "done", "total": 2, "done": 2, "ok": 1, "cost_cents": 1,\n    "results": [\n      { "link": "...", "ok": true,  "data": { "title": "...", "author": "...",\n          "video": { "url": "no-watermark video URL", "width": 1080, "height": 1920 },\n          "stats": { "digg": 12000, "comment": 340 } } },\n      { "link": "...", "ok": false, "error": "link expired" }\n    ] } }',
+  ep3:"Check the current key's balance and usage.",
+  s4:"Billing", s4_p:"Each successfully parsed link is billed once (default ¥0.01/link, subject to change); failed parses aren't billed; submissions are rejected when balance is insufficient. Check balance in the console or via the balance endpoint; contact the author to top up.",
+  s5:"Error codes", th_http:"HTTP", th_mean:"Meaning",
+  e400:"Bad body / no valid links", e401:"Missing or invalid API key", e402:"Insufficient balance", e404:"Job not found or not yours",
+  volume:'Need higher concurrency / lower unit price / self-hosting? <a href="https://github.com/d100000/dy-download">Contact the author</a> for an enterprise plan.',
+  foot:"For personal, authorized backup use only · All content copyright belongs to its original creators",
+}};
+function t(k){const d=I18N[LANG];return d&&d[k]!==undefined?d[k]:null}
+if(LANG!=='zh'){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{const v=t(el.dataset.i18n);if(v!=null)el.textContent=v});
+  document.querySelectorAll('[data-i18n-html]').forEach(el=>{const v=t(el.dataset.i18nHtml);if(v!=null)el.innerHTML=v});
+}
+/* 登录状态 */
+(async()=>{try{const d=await(await fetch('/api/auth/me')).json();if(d.user){$('#authBtn').style.display='none';$('#userEmail').style.display='';$('#userEmail').textContent=d.user.email;$('#consoleLink').style.display='';$('#startBtn').textContent=(LANG==='en'?'Open console':'前往控制台');}else{$('#authBtn').onclick=()=>location.href='/';}}catch{}})();
+</script>
+</body>
+</html>

@@ -1,3 +1,4 @@
 fastapi>=0.100
 uvicorn>=0.23
 PySocks>=1.7          # SOCKS5/4 代理支持（http/https 代理无需额外依赖）
+openpyxl>=3.1         # 批量结果导出 Excel(.xlsx)

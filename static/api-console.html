@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API 控制台 · 抖音下载器</title>
+<meta name="robots" content="noindex">
+<style>
+:root{
+  --bg:#0E1013; --surface:#16191E; --surface-2:#1C2026; --border:#272C34; --border-strong:#343B45;
+  --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#fff; --accent-soft:#33161E;
+  --ok:#25F4EE; --good:#3DD68C; --good-bg:#12271E; --danger:#FF5C7E; --danger-bg:#2A161B; --danger-border:#57222E;
+  --shadow:0 20px 50px -24px rgba(0,0,0,.6); --radius:14px;
+}
+:root[data-theme="light"]{
+  --bg:#F5F7FA; --surface:#fff; --surface-2:#F2F4F7; --border:#E4E7EC; --border-strong:#CBD2DB;
+  --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
+  --accent:#E0234E; --accent-hover:#C71D44; --accent-soft:#FDEDF1;
+  --ok:#0FA8A0; --good:#0E9F6E; --good-bg:#E3F5EC; --danger:#B4173C; --danger-bg:#FDECEF; --danger-border:#F5C2CC;
+  --shadow:0 16px 40px -24px rgba(23,25,29,.18);
+}
+*{box-sizing:border-box; margin:0}
+body{background:var(--bg); color:var(--text); min-height:100vh; font-size:14.5px; line-height:1.65;
+  font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC",system-ui,sans-serif; -webkit-font-smoothing:antialiased}
+button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
+input,textarea{font:inherit; color:inherit}
+a{color:var(--accent); text-decoration:none}
+.mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.tnum{font-variant-numeric:tabular-nums}
+.container{max-width:1000px; margin:0 auto; padding:0 20px 80px}
+nav{display:flex; align-items:center; justify-content:space-between; padding:20px 0; border-bottom:1px solid var(--border); margin-bottom:26px}
+.brand{display:flex; align-items:center; gap:10px; font-weight:700}
+.logo{width:30px; height:30px; border-radius:8px; background:#000; display:grid; place-items:center; color:#fff;
+  box-shadow:-2px 0 0 rgba(37,244,238,.85), 2px 0 0 rgba(254,44,85,.85); font-size:13px}
+.nav-actions{display:flex; gap:10px; align-items:center; font-size:13.5px; color:var(--muted)}
+.btn{display:inline-flex; align-items:center; gap:7px; padding:9px 16px; border-radius:10px; font-weight:600; font-size:14px; border:1px solid transparent}
+.btn-primary{background:var(--accent); color:var(--accent-ink)}
+.btn-primary:hover{background:var(--accent-hover)}
+.btn-ghost{background:var(--surface); border-color:var(--border); color:var(--text)}
+.btn-sm{padding:5px 11px; font-size:12.5px; border-radius:8px}
+.panel{background:var(--surface); border:1px solid var(--border); border-radius:16px; box-shadow:var(--shadow); margin-bottom:20px; overflow:hidden}
+.panel-head{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 20px; border-bottom:1px solid var(--border); flex-wrap:wrap}
+.panel-head h2{font-size:16px; font-weight:700}
+.panel-head .desc{font-size:12.5px; color:var(--muted); margin-top:2px}
+.panel-body{padding:18px 20px}
+.stat-row{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px}
+.stat{background:var(--surface); border:1px solid var(--border); border-radius:14px; padding:15px 18px}
+.stat .k{font-size:12px; color:var(--muted)}
+.stat .v{font-size:23px; font-weight:700; margin-top:3px}
+.stat .v small{font-size:13px; color:var(--muted); font-weight:500}
+.tbl-wrap{overflow-x:auto}
+table{border-collapse:collapse; width:100%; font-size:13px}
+th{text-align:left; font-size:11.5px; letter-spacing:.04em; color:var(--muted); font-weight:600; padding:10px 12px; border-bottom:1.5px solid var(--border); white-space:nowrap; background:var(--surface-2)}
+td{padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.empty{text-align:center; color:var(--muted); padding:26px; font-size:13px}
+textarea{width:100%; min-height:90px; background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:11px 13px; outline:none; resize:vertical}
+textarea:focus{border-color:var(--accent)}
+pre{background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:14px 16px; overflow-x:auto; font-size:12.5px; line-height:1.6; margin:10px 0}
+code{font-family:ui-monospace,Menlo,monospace}
+.doc code{background:var(--surface-2); padding:1px 6px; border-radius:5px; font-size:.9em}
+.doc h3{font-size:14px; margin:16px 0 6px}
+.doc p{color:var(--muted); font-size:13px; margin:4px 0}
+.badge{font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; white-space:nowrap}
+.b-ok{background:var(--good-bg); color:var(--good)} .b-idle{background:var(--surface-2); color:var(--muted)}
+#toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(18px); opacity:0; background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow); padding:11px 18px; border-radius:11px; font-size:13.5px; transition:.25s; z-index:50; pointer-events:none}
+#toast.show{opacity:1; transform:translateX(-50%)}
+.gate{max-width:400px; margin:14vh auto; text-align:center}
+.gate h1{font-size:22px; margin-bottom:10px}
+.gate p{color:var(--muted); margin-bottom:20px}
+.spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(128,128,128,.35);border-top-color:var(--accent);display:inline-block;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.result-line{font-size:12.5px; padding:5px 0; border-bottom:1px dashed var(--border)}
+</style>
+</head>
+<body>
+<div class="container">
+  <nav>
+    <div class="brand"><span class="logo">♪</span> API 控制台</div>
+    <div class="nav-actions">
+      <a href="/">← 返回首页</a>
+      <span id="navEmail"></span>
+      <button class="btn btn-ghost btn-sm" id="themeBtn">◐</button>
+    </div>
+  </nav>
+
+  <div id="gate" class="gate" style="display:none">
+    <h1>请先登录</h1>
+    <p>API 控制台需要登录后使用。</p>
+    <a class="btn btn-primary" href="/">去首页登录</a>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="stat-row" id="statRow"></div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><h2>我的 API 密钥</h2><div class="desc">用请求头 <code class="mono">X-API-Key</code> 调用。单价 <b id="priceLabel">—</b>，新密钥赠送试用余额。</div></div>
+        <div style="display:flex; gap:8px">
+          <input id="keyName" placeholder="密钥备注" style="background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:8px 12px; outline:none">
+          <button class="btn btn-primary btn-sm" id="createKeyBtn">生成密钥</button>
+        </div>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>备注</th><th>密钥</th><th>余额</th><th>已消费</th><th>调用</th><th></th></tr></thead>
+        <tbody id="keyBody"></tbody>
+      </table></div>
+      <div class="empty" id="keyEmpty" style="display:none">还没有密钥，点「生成密钥」创建第一个。</div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><div><h2>在线测试</h2><div class="desc">提交任务 → 异步解析 → 自动轮询结果</div></div></div>
+      <div class="panel-body">
+        <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap">
+          <select id="testKey" style="background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:8px 12px; outline:none; min-width:200px"></select>
+          <button class="btn btn-primary btn-sm" id="submitJobBtn">提交任务</button>
+        </div>
+        <textarea id="testLinks" placeholder="每行一个 v.douyin.com 链接（最多 100 条）"></textarea>
+        <div id="jobResult" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <div class="panel doc">
+      <div class="panel-head"><div><h2>接口文档</h2></div></div>
+      <div class="panel-body">
+        <h3>1. 提交任务（异步）</h3>
+        <p><code>POST /api/v1/jobs</code> · 请求头 <code>X-API-Key: 你的密钥</code></p>
+        <pre id="docReq">请求体：{ "links": ["https://v.douyin.com/xxxx/", ...] }
+或    ：{ "text": "整段分享文案，自动提取链接" }</pre>
+        <pre id="docResp">返回：{
+  "code": 0, "message": "accepted",
+  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",
+            "price_cents": 1, "estimated_cost_cents": 2,
+            "query_url": "/api/v1/jobs/job_xxx" }
+}</pre>
+        <h3>2. 查询结果</h3>
+        <p><code>GET /api/v1/jobs/{job_id}</code> · 请求头 <code>X-API-Key</code></p>
+        <pre>返回：{ "code":0, "data":{ "status":"done", "done":2, "ok":1, "cost_cents":1,
+        "results":[ {"link":"...","ok":true,"data":{标题/作者/视频地址/统计...}},
+                    {"link":"...","ok":false,"error":"..."} ] } }</pre>
+        <h3>3. 查询余额</h3>
+        <p><code>GET /api/v1/balance</code> · 请求头 <code>X-API-Key</code></p>
+        <h3>计费规则</h3>
+        <p>每成功解析 <b>一条链接</b>计费 <b id="priceLabel2">—</b>；解析失败不计费；余额不足会拒绝提交。充值请联系管理员。</p>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const root=document.documentElement;
+root.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+$('#themeBtn').onclick=()=>{root.dataset.theme=root.dataset.theme==='light'?'dark':'light';localStorage.setItem('theme',root.dataset.theme);};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let toastT; function toast(m,e){const t=$('#toast');t.textContent=m;t.className='show'+(e?' err':'');clearTimeout(toastT);toastT=setTimeout(()=>t.className='',2400);}
+async function api(path,opts={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;}
+const yuan=c=>'¥'+(c/100).toFixed(2);
+
+(async()=>{
+  let me; try{ me=(await (await fetch('/api/auth/me')).json()).user; }catch{}
+  if(!me){ $('#gate').style.display='block'; return; }
+  $('#app').style.display='block'; $('#navEmail').textContent=me.email;
+  load();
+})();
+
+async function load(){
+  const d=await api('/api/keys');
+  const price=d.price_cents;
+  $('#priceLabel').textContent=yuan(price)+'/条'; $('#priceLabel2').textContent=yuan(price)+'/条';
+  const totBal=d.keys.reduce((a,k)=>a+k.balance_cents,0), totSpent=d.keys.reduce((a,k)=>a+k.spent_cents,0), totCalls=d.keys.reduce((a,k)=>a+k.calls,0);
+  $('#statRow').innerHTML=`
+    <div class="stat"><div class="k">密钥数</div><div class="v tnum">${d.keys.length}</div></div>
+    <div class="stat"><div class="k">可用余额</div><div class="v tnum">${yuan(totBal)}</div></div>
+    <div class="stat"><div class="k">累计消费</div><div class="v tnum">${yuan(totSpent)}</div></div>
+    <div class="stat"><div class="k">累计调用</div><div class="v tnum">${totCalls}</div></div>`;
+  $('#keyEmpty').style.display=d.keys.length?'none':'';
+  $('#keyBody').innerHTML=d.keys.map(k=>`<tr>
+    <td>${esc(k.name)}</td>
+    <td class="mono" style="max-width:230px"><span style="cursor:pointer" title="点击复制" onclick="navigator.clipboard.writeText('${esc(k.key)}').then(()=>toast('已复制'))">${esc(k.key.slice(0,16))}…📋</span></td>
+    <td class="tnum">${yuan(k.balance_cents)}</td><td class="tnum">${yuan(k.spent_cents)}</td><td class="tnum">${k.calls}</td>
+    <td><button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="delKey('${esc(k.key)}')">删除</button></td>
+  </tr>`).join('');
+  $('#testKey').innerHTML=d.keys.map(k=>`<option value="${esc(k.key)}">${esc(k.name)} · ${yuan(k.balance_cents)}</option>`).join('')||'<option value="">先生成一个密钥</option>';
+}
+
+$('#createKeyBtn').onclick=async()=>{
+  try{ const k=await api('/api/keys',{method:'POST',body:JSON.stringify({name:$('#keyName').value.trim()})});
+    $('#keyName').value=''; try{await navigator.clipboard.writeText(k.key); toast('密钥已生成并复制');}catch{toast('密钥已生成');} load();
+  }catch(e){toast(e.message,true);}
+};
+window.delKey=async key=>{ if(!confirm('删除后立即失效，确定？'))return;
+  try{ await api('/api/keys/'+encodeURIComponent(key),{method:'DELETE'}); toast('已删除'); load(); }catch(e){toast(e.message,true);} };
+
+$('#submitJobBtn').onclick=async()=>{
+  const key=$('#testKey').value; const text=$('#testLinks').value.trim();
+  if(!key){toast('请先生成密钥',true);return;}
+  if(!text){toast('请粘贴链接',true);return;}
+  const box=$('#jobResult'); box.innerHTML='<span class="spin"></span> 提交中…';
+  try{
+    const sub=await api('/api/v1/jobs',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':key},body:JSON.stringify({text})});
+    const jid=sub.data.job_id;
+    box.innerHTML=`<div class="badge b-idle">任务 ${jid} · 预估 ${yuan(sub.data.estimated_cost_cents)}</div><div id="jobPoll" style="margin-top:10px"></div>`;
+    poll(key,jid);
+  }catch(e){ box.innerHTML=`<span style="color:var(--danger)">${esc(e.message)}</span>`; }
+};
+async function poll(key,jid){
+  for(let i=0;i<40;i++){
+    await new Promise(r=>setTimeout(r,1500));
+    let d; try{ d=(await api('/api/v1/jobs/'+jid,{headers:{'X-API-Key':key}})).data; }catch(e){ break; }
+    $('#jobPoll').innerHTML=`<div style="font-size:13px;color:var(--muted);margin-bottom:6px">状态 ${d.status} · ${d.done}/${d.total} · 成功 ${d.ok} · 计费 ${yuan(d.cost_cents)}</div>`+
+      d.results.map(r=>`<div class="result-line">${r.ok?'✅':'❌'} <span class="mono" style="color:var(--muted)">${esc(r.link)}</span> ${r.ok?'→ '+esc(r.data.title||'').slice(0,30):'· '+esc(r.error)}</div>`).join('');
+    if(d.status==='done'){ load(); break; }
+  }
+}
+</script>
+</body>
+</html>
