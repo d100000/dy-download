@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="{{HTMLLANG}}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+{{SHARE_HEAD}}
+<meta name="format-detection" content="telephone=no">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230E1013'/%3E%3Cg fill='none' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%2325F4EE' transform='translate(-2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23FE2C55' transform='translate(2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23fff'/%3E%3C/g%3E%3Cpath d='M20 46 h24' stroke='%23fff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+/* 分享页刻意做得比首页轻：无极光动画、无大量装饰，微信里首屏要 1 秒内出内容 */
+:root{
+  --bg:#0E1013; --surface:#16191E; --surface-2:#1C2026; --border:#272C34;
+  --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --ok:#25F4EE;
+  --radius:16px; --shadow:0 20px 50px -28px rgba(0,0,0,.7);
+}
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#F7F8FA; --surface:#FFFFFF; --surface-2:#F2F4F7; --border:#E4E7EC;
+    --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
+    --accent:#E0234E; --accent-hover:#C71D44; --ok:#0FA8A0;
+    --shadow:0 16px 40px -26px rgba(23,25,29,.28);
+  }
+}
+*{box-sizing:border-box; margin:0; -webkit-tap-highlight-color:transparent}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh; font-size:15px; line-height:1.65;
+  font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased; padding-bottom:calc(84px + env(safe-area-inset-bottom));
+}
+button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
+a{color:inherit; text-decoration:none}
+img{max-width:100%; display:block}
+.wrap{max-width:540px; margin:0 auto; padding:14px 14px 0}
+
+/* ---------- 头 ---------- */
+.top{display:flex; align-items:center; justify-content:space-between; margin-bottom:12px}
+.brand{display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--muted)}
+.brand b{color:var(--text); font-weight:600}
+.logo{width:24px; height:24px; border-radius:7px; background:linear-gradient(135deg,var(--accent),#8B5CF6);
+  display:grid; place-items:center; color:#fff; font-size:12px; font-weight:700}
+.top .mini{font-size:12.5px; color:var(--faint); border:1px solid var(--border);
+  padding:5px 10px; border-radius:999px}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
+  overflow:hidden; box-shadow:var(--shadow)}
+.player{position:relative; background:#000; aspect-ratio:9/16; max-height:70vh; display:grid; place-items:center}
+.player.wide{aspect-ratio:16/9}
+.player video{width:100%; height:100%; object-fit:contain; background:#000}
+.poster{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; filter:brightness(.82)}
+.playbtn{position:absolute; inset:0; display:grid; place-items:center; z-index:2}
+.playbtn i{width:66px; height:66px; border-radius:50%; background:rgba(255,255,255,.94);
+  display:grid; place-items:center; box-shadow:0 8px 30px rgba(0,0,0,.45)}
+.playbtn i::after{content:""; border-left:20px solid #14161a; border-top:12px solid transparent;
+  border-bottom:12px solid transparent; margin-left:5px}
+.loading{position:absolute; z-index:3; color:#fff; font-size:13px; background:rgba(0,0,0,.55);
+  padding:7px 14px; border-radius:999px; display:none}
+
+.body{padding:15px 15px 17px}
+.badge{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--ok);
+  background:color-mix(in srgb, var(--ok) 12%, transparent); border-radius:999px;
+  padding:4px 10px; margin-bottom:9px}
+.title{font-size:17px; font-weight:650; line-height:1.45; letter-spacing:-.01em;
+  display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden}
+.author{display:flex; align-items:center; gap:10px; margin-top:13px; padding-top:13px; border-top:1px solid var(--border)}
+.author img,.author .ph{width:40px; height:40px; border-radius:50%; object-fit:cover; background:var(--surface-2); flex:0 0 auto}
+.author .n{font-weight:600; font-size:14.5px}
+.author .s{font-size:12px; color:var(--faint)}
+.author .go{margin-left:auto; font-size:12.5px; color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  padding:5px 11px; border-radius:999px; white-space:nowrap}
+.stats{display:grid; grid-template-columns:repeat(4,1fr); gap:7px; margin-top:13px}
+.stat{background:var(--surface-2); border-radius:11px; padding:8px 4px; text-align:center}
+.stat b{display:block; font-size:14.5px; font-variant-numeric:tabular-nums}
+.stat span{font-size:11px; color:var(--faint)}
+.extra{margin-top:11px; font-size:12.5px; color:var(--muted); display:flex; flex-direction:column; gap:5px}
+.tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:9px}
+.tag{font-size:11.5px; color:var(--muted); background:var(--surface-2); padding:3px 9px; border-radius:999px}
+
+/* ---------- 图集 ---------- */
+.album{display:grid; grid-template-columns:repeat(2,1fr); gap:6px; padding:6px}
+.album figure{position:relative; border-radius:10px; overflow:hidden; background:var(--surface-2)}
+.album img{width:100%; aspect-ratio:3/4; object-fit:cover}
+.album .idx{position:absolute; top:6px; left:6px; font-size:11px; background:rgba(0,0,0,.6);
+  color:#fff; padding:2px 7px; border-radius:999px}
+.album .save{position:absolute; right:6px; bottom:6px; background:rgba(0,0,0,.62); color:#fff;
+  font-size:11.5px; padding:5px 10px; border-radius:999px}
+
+/* ---------- 底部操作条 ---------- */
+.bar{position:fixed; left:0; right:0; bottom:0; z-index:40; display:flex; gap:9px;
+  padding:10px 14px calc(10px + env(safe-area-inset-bottom));
+  background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(14px);
+  border-top:1px solid var(--border)}
+.bar .in{max-width:540px; margin:0 auto; display:flex; gap:9px; width:100%}
+.btn{flex:1; border-radius:13px; padding:13px 10px; font-size:15px; font-weight:600; text-align:center}
+.btn.p{background:var(--accent); color:#fff}
+.btn.p:active{background:var(--accent-hover)}
+.btn.g{background:var(--surface-2); border:1px solid var(--border); flex:0 0 auto; padding:13px 17px}
+
+/* ---------- CTA / 页脚 ---------- */
+.cta{margin-top:13px; background:linear-gradient(135deg, color-mix(in srgb,var(--accent) 13%,var(--surface)), var(--surface));
+  border:1px solid color-mix(in srgb,var(--accent) 24%,var(--border)); border-radius:var(--radius);
+  padding:15px; display:flex; align-items:center; gap:12px}
+.cta .t{font-size:14.5px; font-weight:600}
+.cta .d{font-size:12.5px; color:var(--muted); margin-top:2px}
+.cta .arrow{margin-left:auto; color:var(--accent); font-size:20px}
+.poster-cta{width:100%; margin-top:11px; background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); padding:13px; font-size:14.5px; font-weight:600; text-align:center}
+.poster-cta span{display:block; font-size:12px; font-weight:400; color:var(--muted); margin-top:2px}
+.trust{display:flex; gap:7px; flex-wrap:wrap; margin-top:12px; justify-content:center}
+.trust span{font-size:11.5px; color:var(--faint); background:var(--surface); border:1px solid var(--border);
+  padding:4px 10px; border-radius:999px}
+footer{margin-top:16px; padding:16px 4px 26px; text-align:center; font-size:11.5px; color:var(--faint); line-height:1.9}
+footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2px}
+
+/* ---------- 微信引导蒙层 ---------- */
+.mask{position:fixed; inset:0; z-index:90; background:rgba(0,0,0,.86); display:none;
+  padding:18px; color:#fff; animation:fade .18s ease}
+.mask.show{display:block}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+.mask .arrow{position:absolute; top:8px; right:14px; font-size:44px; animation:bob 1.1s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
+.mask .m-in{position:absolute; top:96px; left:50%; transform:translateX(-50%); width:min(360px,90%); text-align:center}
+.mask h3{font-size:19px; margin-bottom:10px}
+.mask p{font-size:14px; color:#c9cfd8; line-height:1.8}
+.mask .step{background:rgba(255,255,255,.1); border-radius:12px; padding:12px; margin-top:14px; font-size:13.5px; text-align:left}
+.mask .close{margin-top:18px; border:1px solid rgba(255,255,255,.3); border-radius:999px; padding:9px 22px; font-size:14px}
+.mask .copy{margin-top:10px; background:#fff; color:#111; border-radius:999px; padding:10px 22px; font-size:14px; font-weight:600}
+
+/* ---------- 海报 ---------- */
+.pmask{position:fixed; inset:0; z-index:96; background:rgba(0,0,0,.9); display:none;
+  overflow:auto; padding:22px 16px; text-align:center}
+.pmask.show{display:block}
+.pmask img{width:min(330px,86vw); border-radius:14px; margin:0 auto; box-shadow:0 20px 60px rgba(0,0,0,.6)}
+.pmask .p-tip{color:#dfe4ea; font-size:13px; margin-top:14px; line-height:1.8}
+.pmask .p-act{margin-top:16px; display:flex; gap:10px; justify-content:center; flex-wrap:wrap}
+.pmask .p-act button,.pmask .p-act a{border:1px solid rgba(255,255,255,.32); color:#fff;
+  border-radius:999px; padding:9px 20px; font-size:14px}
+.pmask .p-act .prim{background:#fff; color:#111; border-color:#fff; font-weight:600}
+.pload{position:fixed; inset:0; z-index:97; display:none; place-items:center;
+  background:rgba(0,0,0,.6); color:#fff; font-size:14px}
+.pload.show{display:grid}
+
+/* ---------- 状态页 ---------- */
+.state{max-width:420px; margin:16vh auto 0; text-align:center; padding:0 22px}
+.state .ico{font-size:44px}
+.state h2{font-size:19px; margin:14px 0 8px}
+.state p{color:var(--muted); font-size:14px}
+.state .home{display:inline-block; margin-top:20px; background:var(--accent); color:#fff;
+  padding:11px 24px; border-radius:12px; font-size:14.5px; font-weight:600}
+
+/* ---------- 提示条 ---------- */
+.toast{position:fixed; left:50%; bottom:96px; transform:translate(-50%,14px); z-index:95;
+  background:rgba(20,22,26,.95); color:#fff; font-size:13px; padding:9px 18px; border-radius:999px;
+  opacity:0; pointer-events:none; transition:.22s}
+.toast.show{opacity:1; transform:translate(-50%,0)}
+.qr{display:none; margin-top:13px; background:var(--surface); border:1px solid var(--border);
+  border-radius:var(--radius); padding:15px; text-align:center}
+.qr img{width:132px; margin:0 auto 8px; border-radius:8px}
+.qr div{font-size:12px; color:var(--muted)}
+@media (min-width:760px){ .qr{display:block} }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="toast" id="toast"></div>
+
+<div class="pload" id="pload">正在生成海报…</div>
+<div class="pmask" id="pmask">
+  <img id="posterImg" alt="分享海报">
+  <div class="p-tip" id="posterTip">长按图片保存到相册 · 或直接转发给朋友</div>
+  <div class="p-act">
+    <a class="prim" id="posterDl" download="douyin-share.png" style="display:none">下载海报</a>
+    <button onclick="hidePoster()">关闭</button>
+  </div>
+</div>
+
+<div class="mask" id="mask">
+  <div class="arrow">↗</div>
+  <div class="m-in">
+    <h3 id="maskTitle">在浏览器中打开</h3>
+    <p id="maskDesc">微信内不支持直接保存视频文件，<br>请按下面两步操作 👇</p>
+    <div class="step">
+      ① 点击右上角的 <b>···</b> 按钮<br>
+      ② 选择 <b>「在浏览器中打开」</b><br>
+      ③ 在浏览器里点下载即可保存原片
+    </div>
+    <button class="copy" onclick="copyLink()">📋 复制本页链接</button><br>
+    <button class="close" onclick="hideMask()">我知道了</button>
+  </div>
+</div>
+
+<script>
+const S = window.__SHARE = {{SHARE_DATA}};
+const IS_WECHAT_UA = {{WECHAT}} || /micromessenger/i.test(navigator.userAgent);
+const ORIGIN = "{{ORIGIN}}";
+const app = document.getElementById('app');
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (n) => (n === null || n === undefined) ? '—'
+  : (n >= 10000 ? (n/10000).toFixed(1).replace(/\.0$/,'') + 'w' : String(n));
+const fmtDate = (ts) => { if(!ts) return ''; const d = new Date(ts*1000);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+
+/* 埋点：sendBeacon 不阻塞页面 */
+function track(kind){
+  try {
+    const b = JSON.stringify({kind});
+    if (navigator.sendBeacon) navigator.sendBeacon('/api/share/' + S.sid + '/event',
+      new Blob([b], {type:'application/json'}));
+    else fetch('/api/share/' + S.sid + '/event', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:b, keepalive:true});
+  } catch {}
+}
+function toast(msg){
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 1900);
+}
+function showMask(title, desc){
+  if (title) document.getElementById('maskTitle').textContent = title;
+  if (desc) document.getElementById('maskDesc').innerHTML = desc;
+  document.getElementById('mask').classList.add('show');
+}
+function hideMask(){ document.getElementById('mask').classList.remove('show'); }
+function copyLink(){
+  const url = S.url || location.href;
+  navigator.clipboard?.writeText(url).then(()=>toast('链接已复制')).catch(()=>{
+    const i = document.createElement('input'); i.value = url; document.body.appendChild(i);
+    i.select(); try{ document.execCommand('copy'); toast('链接已复制'); }catch{} i.remove();
+  });
+}
+
+/* ---------------- 状态页 ---------------- */
+const STATES = {
+  notfound: ['🔍','分享页不存在','链接可能有误，或已被创建者删除。'],
+  expired:  ['⏳','分享链接已过期','为保护创作者权益，分享页有有效期。可以让分享者重新生成一个。'],
+  dead:     ['🗑','内容已不可用','该作品可能已被原作者删除，或设置为私密/仅粉丝可见。'],
+  takedown: ['🛡','内容已下架','该分享页因权利人投诉或违规已被下架处理。'],
+};
+function renderState(state){
+  const [ico, h, p] = STATES[state] || STATES.notfound;
+  document.body.style.paddingBottom = '0';
+  app.innerHTML = `<div class="state">
+    <div class="ico">${ico}</div><h2>${h}</h2><p>${p}</p>
+    ${S.author ? `<p style="margin-top:10px;font-size:12.5px;color:var(--faint)">原作者：@${esc(S.author)}</p>` : ''}
+    <a class="home" href="/">去生成我自己的分享页 →</a>
+  </div>`;
+}
+
+/* ---------------- 正常页 ---------------- */
+function authorBlock(d){
+  const av = S.avatar ? `<img src="${esc(S.avatar)}" alt="" referrerpolicy="no-referrer">` : '<div class="ph"></div>';
+  const home = d.author_url || '';
+  return `<div class="author">
+    ${av}
+    <div>
+      <div class="n">${esc(S.author) || '未知作者'}</div>
+      <div class="s">${d.create_time ? '发布于 ' + fmtDate(d.create_time) : '抖音创作者'}</div>
+    </div>
+    ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener">原作品 ›</a>` : ''}
+  </div>`;
+}
+function statsBlock(st){
+  if (!st) return '';
+  const c = [['点赞',st.digg],['评论',st.comment],['收藏',st.collect],['分享',st.share]];
+  return `<div class="stats">${c.map(([k,v]) =>
+    `<div class="stat"><b>${num(v)}</b><span>${k}</span></div>`).join('')}</div>`;
+}
+function extraBlock(d){
+  let h = '';
+  if (d.music && d.music.title) h += `<div>🎵 ${esc(d.music.title)}${d.music.author ? ' · ' + esc(d.music.author) : ''}</div>`;
+  if (d.location) h += `<div>📍 ${esc(d.location)}</div>`;
+  const ex = h ? `<div class="extra">${h}</div>` : '';
+  const tg = (d.tags && d.tags.length)
+    ? `<div class="tags">${d.tags.slice(0,8).map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}</div>` : '';
+  return ex + tg;
+}
+
+function render(){
+  const d = S.data || {};
+  const isNote = S.kind === 'note';
+  const wide = d.video && d.video.width && d.video.height && d.video.width > d.video.height;
+
+  const media = isNote
+    ? `<div class="album">${(d.images||[]).map((im,i)=>`
+        <figure>
+          <span class="idx">${i+1}</span>
+          <img src="${esc(im.url)}" alt="第 ${i+1} 张" loading="lazy" referrerpolicy="no-referrer"
+               onerror="imgFail()">
+          <button class="save" onclick="saveImage('${esc(im.url)}','${esc(im.filename)}')">保存</button>
+        </figure>`).join('')}</div>`
+    : `<div class="player${wide ? ' wide' : ''}" id="playerBox">
+        ${S.cover ? `<img class="poster" id="poster" src="${esc(S.cover)}" alt="" referrerpolicy="no-referrer">` : ''}
+        <div class="playbtn" id="playBtn" onclick="startPlay()"><i></i></div>
+        <div class="loading" id="loading">加载中…</div>
+      </div>`;
+
+  app.innerHTML = `
+  <div class="wrap">
+    <div class="top">
+      <a class="brand" href="/"><span class="logo">↓</span><b>抖音无水印</b>· 分享页</a>
+      <a class="mini" href="/">生成我的 →</a>
+    </div>
+
+    <div class="card">
+      ${media}
+      <div class="body">
+        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · 浏览器直连</span>
+        <div class="title">${esc(S.title)}</div>
+        ${authorBlock(d)}
+        ${statsBlock(d.stats)}
+        ${extraBlock(d)}
+      </div>
+    </div>
+
+    <a class="cta" href="/" onclick="track('cta')">
+      <div>
+        <div class="t">你也有想分享的抖音作品？</div>
+        <div class="d">粘贴链接 → 生成一个微信里点开就能看的页面</div>
+      </div>
+      <div class="arrow">›</div>
+    </a>
+
+    <button class="poster-cta" onclick="makePoster()">📸 生成分享海报<span>图片比链接更适合发朋友圈与群聊</span></button>
+
+    <div class="trust"><span>🔓 开源</span><span>🔒 零隐私采集</span><span>🚫 永不接广告</span><span>👤 无需登录</span></div>
+
+    <div class="qr">
+      <img src="/s/${esc(S.sid)}/qr.svg" alt="扫码在手机上打开">
+      <div>手机扫码打开 · 或复制链接发给朋友</div>
+    </div>
+
+    <footer>
+      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不存储任何视频文件。<br>
+      请勿未经授权二次发布或商用。<a href="javascript:void(0)" onclick="report()">侵权投诉</a> ·
+      <a href="/">关于本站</a>${S.expires_at ? ' · 本页 ' + fmtDate(S.expires_at) + ' 过期' : ''}
+    </footer>
+  </div>
+
+  <div class="bar"><div class="in">
+    ${isNote
+      ? `<button class="btn p" onclick="saveAll()">⬇ 保存全部图片</button>`
+      : `<button class="btn p" onclick="download()">⬇ 下载无水印原片</button>`}
+    <button class="btn g" onclick="copyLink()">复制链接</button>
+  </div></div>`;
+}
+
+/* ---------------- 播放：直连 → 服务器代理 → 引导 ---------------- */
+let _tried = 0;
+function startPlay(){
+  const d = S.data || {};
+  if (!d.video || !d.video.url) return;
+  const box = document.getElementById('playerBox');
+  const btn = document.getElementById('playBtn');
+  const ld = document.getElementById('loading');
+  btn.style.display = 'none'; ld.style.display = 'block';
+  track('play');
+
+  const v = document.createElement('video');
+  v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
+  v.setAttribute('x5-playsinline',''); v.setAttribute('x5-video-player-type','h5');
+  v.setAttribute('x5-video-player-fullscreen','false');
+  v.controls = true; v.preload = 'auto'; v.autoplay = true;
+  if (S.cover) v.poster = S.cover;
+  v.src = d.video.url;
+  v.id = 'player';
+  box.appendChild(v);
+  const poster = document.getElementById('poster'); if (poster) poster.style.display = 'none';
+
+  const done = () => { ld.style.display = 'none'; clearTimeout(watchdog); };
+  v.addEventListener('loadeddata', done);
+  v.addEventListener('playing', done);
+  v.addEventListener('error', fallback);
+  // 直连在部分网络/内核下不会报 error，只是一直不 ready —— 用看门狗兜底
+  const watchdog = setTimeout(() => { if (v.readyState < 2) fallback(); }, 8000);
+
+  function fallback(){
+    clearTimeout(watchdog);
+    if (_tried === 0 && d.video.proxy_url){
+      _tried = 1; track('fallback');
+      ld.textContent = '切换线路中…';
+      v.src = d.video.proxy_url; v.load(); v.play?.().catch(()=>{});
+      setTimeout(() => { if (v.readyState < 2) giveUp(); }, 12000);
+    } else giveUp();
+  }
+  function giveUp(){
+    ld.style.display = 'none';
+    if (IS_WECHAT_UA) showMask('在浏览器中打开观看',
+      '当前网络环境下微信内无法播放这条视频，<br>用浏览器打开即可正常观看 👇');
+    else toast('播放失败，请稍后重试或直接下载');
+  }
+  v.play?.().catch(()=>{ /* 需用户手势时由 controls 兜底 */ });
+}
+
+/* ---------------- 下载 ---------------- */
+function download(){
+  const d = S.data || {};
+  if (!d.video || !d.video.url) return;
+  track('download');
+  if (IS_WECHAT_UA){ showMask(); return; }
+  browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'));
+}
+function saveImage(url, name){
+  track('download');
+  if (IS_WECHAT_UA){
+    showMask('长按图片即可保存', '在微信里 <b>长按上方图片</b> → 选择「保存图片」<br>即可保存原图到相册。');
+    return;
+  }
+  browserDownload(url, name);
+}
+async function saveAll(){
+  if (IS_WECHAT_UA){
+    showMask('长按图片即可保存', '在微信里逐张 <b>长按图片</b> → 「保存图片」，<br>或用浏览器打开一键批量下载。');
+    return;
+  }
+  const imgs = (S.data || {}).images || [];
+  track('download');
+  for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
+}
+async function browserDownload(url, filename){
+  toast('开始下载…');
+  try {
+    const resp = await fetch(url, {mode:'cors'});
+    if (!resp.ok) throw new Error('bad');
+    const blob = await resp.blob();
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = u; a.download = filename || 'download';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(u), 5000);
+  } catch { window.open(url, '_blank', 'noopener'); }
+}
+function imgFail(){
+  // 图集 CDN 直链过期：服务端会在下次访问时按 item_id 刷新，这里提示用户重载
+  if (window._imgFailed) return; window._imgFailed = true;
+  toast('图片链接已刷新，正在重新加载…');
+  setTimeout(()=>location.reload(), 1200);
+}
+
+/* ---------------- 分享海报（前端 canvas 合成，服务器不参与、不落地） ----------------
+   微信对链接的拦截远多于图片，海报是链接被封时最重要的传播兜底。
+   封面来自抖音 CDN（返回 Access-Control-Allow-Origin: *），可跨域绘制；
+   二维码用同源 PNG（SVG 在部分内核会污染画布，导致 toBlob 抛 SecurityError）。 */
+function loadImg(src, cross){
+  return new Promise((res, rej) => {
+    const i = new Image();
+    if (cross) i.crossOrigin = 'anonymous';
+    i.onload = () => res(i); i.onerror = rej;
+    i.src = src;
+  });
+}
+function wrapText(ctx, text, maxW, maxLines){
+  const lines = []; let cur = '';
+  for (const ch of String(text)){
+    if (ctx.measureText(cur + ch).width > maxW){ lines.push(cur); cur = ch;
+      if (lines.length === maxLines){ lines[maxLines-1] = lines[maxLines-1].slice(0,-1) + '…'; return lines; }
+    } else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  return lines.slice(0, maxLines);
+}
+
+let _posterURL = null;
+async function makePoster(){
+  document.getElementById('pload').classList.add('show');
+  try {
+    const W = 750, H = 1180, P = 44;
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const x = c.getContext('2d');
+
+    const g = x.createLinearGradient(0, 0, W, H);
+    g.addColorStop(0, '#191d24'); g.addColorStop(1, '#0d0f13');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+
+    // 封面：等比裁切填满 750×560
+    const CH = 560;
+    let cover = null;
+    try { if (S.cover) cover = await loadImg(S.cover, true); } catch {}
+    if (cover){
+      const r = Math.max(W / cover.width, CH / cover.height);
+      const w = cover.width * r, h = cover.height * r;
+      x.save(); x.beginPath(); x.rect(0, 0, W, CH); x.clip();
+      x.drawImage(cover, (W - w) / 2, (CH - h) / 2, w, h);
+      const fade = x.createLinearGradient(0, CH - 200, 0, CH);
+      fade.addColorStop(0, 'rgba(13,15,19,0)'); fade.addColorStop(1, 'rgba(13,15,19,1)');
+      x.fillStyle = fade; x.fillRect(0, CH - 200, W, 200);
+      x.restore();
+    } else {
+      x.fillStyle = '#22262e'; x.fillRect(0, 0, W, CH);
+      x.fillStyle = '#5B6470'; x.font = '600 30px sans-serif'; x.textAlign = 'center';
+      x.fillText('抖音作品', W/2, CH/2); x.textAlign = 'left';
+    }
+
+    // 播放角标
+    x.fillStyle = 'rgba(254,44,85,.94)';
+    x.beginPath(); x.arc(W/2, CH/2 - 40, 54, 0, Math.PI*2); x.fill();
+    x.fillStyle = '#fff'; x.beginPath();
+    x.moveTo(W/2 - 17, CH/2 - 68); x.lineTo(W/2 + 26, CH/2 - 40); x.lineTo(W/2 - 17, CH/2 - 12);
+    x.closePath(); x.fill();
+
+    // 标题
+    let y = CH + 62;
+    x.fillStyle = '#EDEFF2'; x.font = '650 36px "PingFang SC",system-ui,sans-serif';
+    for (const line of wrapText(x, S.title, W - P*2, 3)){ x.fillText(line, P, y); y += 50; }
+
+    // 作者
+    y += 14;
+    try {
+      if (S.avatar){
+        const av = await loadImg(S.avatar, true);
+        x.save(); x.beginPath(); x.arc(P + 27, y - 8, 27, 0, Math.PI*2); x.clip();
+        x.drawImage(av, P, y - 35, 54, 54); x.restore();
+      }
+    } catch {}
+    x.fillStyle = '#B9C0CA'; x.font = '400 27px "PingFang SC",system-ui,sans-serif';
+    x.fillText('@' + (S.author || '抖音创作者'), P + (S.avatar ? 70 : 0), y);
+
+    // 互动数据
+    const st = (S.data || {}).stats || {};
+    y += 52;
+    x.fillStyle = '#7C8593'; x.font = '400 24px "PingFang SC",system-ui,sans-serif';
+    x.fillText(`❤ ${num(st.digg)}   💬 ${num(st.comment)}   ★ ${num(st.collect)}`, P, y);
+
+    // 二维码 + 引导
+    const qr = await loadImg('/s/' + S.sid + '/qr.png', false);
+    const QS = 190, qy = H - QS - 92;
+    x.fillStyle = '#fff'; x.fillRect(P - 8, qy - 8, QS + 16, QS + 16);
+    x.drawImage(qr, P, qy, QS, QS);
+    x.fillStyle = '#EDEFF2'; x.font = '600 30px "PingFang SC",system-ui,sans-serif';
+    x.fillText('扫码直接观看', P + QS + 34, qy + 62);
+    x.fillStyle = '#8A93A0'; x.font = '400 24px "PingFang SC",system-ui,sans-serif';
+    x.fillText('无水印原片 · 免登录', P + QS + 34, qy + 104);
+    x.fillText('不用装抖音 App', P + QS + 34, qy + 140);
+
+    // 品牌页脚
+    x.fillStyle = '#4E5561'; x.font = '400 21px "PingFang SC",system-ui,sans-serif';
+    x.fillText('抖音无水印下载器 · 开源 · 零隐私采集 · 永不接广告', P, H - 42);
+
+    const blob = await new Promise(r => c.toBlob(r, 'image/png', .92));
+    if (_posterURL) URL.revokeObjectURL(_posterURL);
+    _posterURL = URL.createObjectURL(blob);
+    const img = document.getElementById('posterImg');
+    img.src = _posterURL;
+    const dl = document.getElementById('posterDl');
+    dl.href = _posterURL;
+    dl.style.display = IS_WECHAT_UA ? 'none' : '';       // 微信内无法下载，只能长按保存
+    document.getElementById('posterTip').textContent = IS_WECHAT_UA
+      ? '长按图片保存到相册 · 或直接转发给朋友'
+      : '右键/长按保存图片，或点下载海报';
+    document.getElementById('pmask').classList.add('show');
+    track('cta');
+  } catch(e){
+    toast('海报生成失败：' + (e && e.message ? e.message : '图片跨域受限'));
+  } finally {
+    document.getElementById('pload').classList.remove('show');
+  }
+}
+function hidePoster(){ document.getElementById('pmask').classList.remove('show'); }
+
+/* ---------------- 微信分享卡片（JS-SDK，未配置公众号时静默跳过） ---------------- */
+async function setupWxShare(){
+  if (!IS_WECHAT_UA || !S.sid) return;
+  let cfg;
+  try {
+    const url = location.href.split('#')[0];
+    cfg = await (await fetch('/api/wx/jssdk?url=' + encodeURIComponent(url))).json();
+  } catch { return; }
+  if (!cfg || !cfg.enabled) return;                     // 没配公众号 → 用微信默认抓取的卡片
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'https://res.wx.qq.com/open/js/jweixin-1.6.0.js';
+    s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  }).catch(() => {});
+  if (!window.wx) return;
+  wx.config({debug:false, appId:cfg.appId, timestamp:cfg.timestamp, nonceStr:cfg.nonceStr,
+    signature:cfg.signature, jsApiList:['updateAppMessageShareData','updateTimelineShareData']});
+  wx.ready(() => {
+    const opt = {
+      title: S.title.slice(0, 40),
+      desc: '@' + (S.author || '抖音创作者') + ' 的作品 · 点开直接看，无需安装 App',
+      link: S.url || location.href,
+      imgUrl: S.cover || (ORIGIN + '/og.svg'),
+    };
+    wx.updateAppMessageShareData(opt);
+    wx.updateTimelineShareData({title: opt.title, link: opt.link, imgUrl: opt.imgUrl});
+  });
+}
+
+/* ---------------- 投诉 ---------------- */
+function report(){
+  const reason = prompt('请简要说明投诉理由（如：我是该作品的著作权人，要求下架）');
+  if (!reason) return;
+  const contact = prompt('留下联系方式（选填，便于我们回复处理结果）') || '';
+  fetch('/api/report', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({sid: S.sid, reason, contact})})
+    .then(r=>r.json()).then(d=>toast(d.message || '已收到投诉')).catch(()=>toast('提交失败，请稍后再试'));
+}
+
+/* ---------------- 入口 ---------------- */
+if (!S || !S.state || S.state !== 'ok') renderState(S && S.state);
+else { render(); setupWxShare(); }
+</script>
+</body>
+</html>

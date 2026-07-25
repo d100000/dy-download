@@ -93,6 +93,29 @@ CREATE TABLE IF NOT EXISTS api_logs(
 );
 CREATE INDEX IF NOT EXISTS idx_apilog_ts ON api_logs(ts);
 CREATE TABLE IF NOT EXISTS app_settings(k TEXT PRIMARY KEY, v TEXT);
+CREATE TABLE IF NOT EXISTS shares(
+  id TEXT PRIMARY KEY, item_id TEXT, kind TEXT, vid TEXT,
+  owner_user_id INTEGER, owner_fp TEXT, owner_ip TEXT,
+  title TEXT, author TEXT, avatar TEXT, cover TEXT,
+  payload TEXT, custom_title TEXT,
+  visibility TEXT DEFAULT 'link', pw_salt TEXT, pw_hash TEXT,
+  expires_at INTEGER DEFAULT 0, refreshed_at INTEGER,
+  status TEXT DEFAULT 'ok',
+  views INTEGER DEFAULT 0, plays INTEGER DEFAULT 0,
+  downloads INTEGER DEFAULT 0, cta_clicks INTEGER DEFAULT 0,
+  created INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_shares_item ON shares(item_id);
+CREATE TABLE IF NOT EXISTS share_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT, kind TEXT,
+  ip TEXT, ua TEXT, referer TEXT, wechat INTEGER, fp TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_share_ev ON share_events(ts, sid);
+CREATE TABLE IF NOT EXISTS reports(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT,
+  reason TEXT, contact TEXT, ip TEXT, handled INTEGER DEFAULT 0
+);
 """
 
 
@@ -479,7 +502,7 @@ def _sweep_memory():
     for cid, v in list(_captchas.items()):
         if now - v[2] > 300:
             _captchas.pop(cid, None)
-    for store, win in ((_auth_hits, 3600), (_captcha_hits, 60)):
+    for store, win in ((_auth_hits, 3600), (_captcha_hits, 60), (_share_hits, 3600)):
         for ip, hits in list(store.items()):
             fresh = [t for t in hits if now - t < win]
             if fresh:
@@ -1086,7 +1109,11 @@ def _parse_share(text: str) -> dict:
     kind, item_id = km.group(1), km.group(2)
     if kind == "slides":
         kind = "note"
+    return _parse_item(kind, item_id)
 
+
+def _parse_item(kind: str, item_id: str) -> dict:
+    """抓分享页并提取元数据。与短链解析分开，便于分享页按 item_id 刷新过期直链。"""
     try:
         page, used_proxy = open_url(f"https://www.iesdouyin.com/share/{kind}/{item_id}/")
         try:
@@ -1216,6 +1243,336 @@ def _parse_cached(text: str) -> dict:
             if now - ts > CACHE_TTL:
                 _cache.pop(k, None)
     return data
+
+
+# ---------------------------------------------------------------- 分享页
+#
+# 目标：抖音链接发到微信打不开 —— 生成一个「微信里点开就能看」的作品页。
+# 原则（与全站一致）：只存元数据快照 + video_id，**不落地任何媒体字节**。
+#   · 视频：每次渲染用 _play_api(vid) 重拼播放地址（该地址无签名/无时效，天然长期有效）
+#   · 图集：CDN 直链会过期 → 超过 SHARE_REFRESH_TTL 或前端上报失败时按 item_id 惰性重解析
+#   · 源作品被删 → 刷新失败 → status='dead'，页面展示"已被原作者删除"并保留署名
+
+SHARE_TTL_ANON = int(os.environ.get("SHARE_TTL_ANON_DAYS", "7")) * 86400
+SHARE_TTL_USER = int(os.environ.get("SHARE_TTL_USER_DAYS", "30")) * 86400
+SHARE_REFRESH_TTL = 12 * 3600          # 图集直链超过这个时长就在下次访问时刷新
+SHARE_MAX_PER_HOUR = 30                # 匿名创建限频（每 IP）
+_share_hits: dict = {}
+
+# ---- 分享域名池 ----
+# 微信封"下载/侵权类"域名是常态而非意外，因此分享链接与主站域名物理隔离，并可轮换。
+# 短码与域名解耦：同一个 sid 在任意域名下都能打开，某域名被封时切换即可救活存量分享。
+# 配置：SHARE_DOMAINS="https://s1.example.com,https://s2.example.com"
+SHARE_DOMAINS = [d.strip().rstrip("/") for d in
+                 os.environ.get("SHARE_DOMAINS", "").split(",") if d.strip()]
+_share_dom_rr = 0
+
+
+def _domains_off() -> set:
+    """被管理员标记为"已被封"的域名，暂时不再分配给新链接。"""
+    try:
+        return set(json.loads(app_setting("share_domains_off", "[]")))
+    except Exception:
+        return set()
+
+
+def _share_origin(request: Request) -> str:
+    """给**新生成的分享链接**分配域名；未配置域名池时退回当前站点。"""
+    global _share_dom_rr
+    pool = [d for d in SHARE_DOMAINS if d not in _domains_off()]
+    if not pool:
+        return _origin(request)
+    _share_dom_rr = (_share_dom_rr + 1) % len(pool)
+    return pool[_share_dom_rr]
+
+# 短码字母表：去掉 0/O/1/l/I 等易混字符
+_SID_ALPHABET = "23456789abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def _new_sid(n: int = 7) -> str:
+    for _ in range(6):
+        sid = "".join(secrets.choice(_SID_ALPHABET) for _ in range(n))
+        if not db_exec("SELECT id FROM shares WHERE id=?", (sid,), "one"):
+            return sid
+    return "".join(secrets.choice(_SID_ALPHABET) for _ in range(n + 3))
+
+
+def _is_wechat(request: Request) -> bool:
+    return "micromessenger" in (request.headers.get("user-agent") or "").lower()
+
+
+def _share_ttl(request: Request) -> int:
+    return SHARE_TTL_USER if current_user(request) else SHARE_TTL_ANON
+
+
+def _share_state(row: dict) -> str:
+    """ok | expired | dead | takedown —— 决定页面展示哪种状态。"""
+    if row["status"] in ("dead", "takedown"):
+        return row["status"]
+    if row["expires_at"] and row["expires_at"] < time.time():
+        return "expired"
+    return "ok"
+
+
+def _refresh_share(row: dict) -> dict:
+    """图集直链过期时按 item_id 重新解析。失败则标记 dead（源多半已被删）。"""
+    try:
+        data = _parse_item(row["kind"], row["item_id"])
+    except Exception:
+        db_exec("UPDATE shares SET status='dead', refreshed_at=? WHERE id=?",
+                (int(time.time()), row["id"]))
+        row["status"] = "dead"
+        return row
+    db_exec("UPDATE shares SET payload=?, cover=?, refreshed_at=?, status='ok' WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), data.get("cover", ""),
+             int(time.time()), row["id"]))
+    row["payload"] = json.dumps(data, ensure_ascii=False)
+    row["cover"] = data.get("cover", "")
+    row["status"] = "ok"
+    return row
+
+
+def _share_view(row: dict, origin: str = "") -> dict:
+    """把 shares 行转成分享页要用的数据结构（含重拼后的播放地址）。"""
+    data = json.loads(row["payload"] or "{}")
+    if row["kind"] != "note" and row["vid"]:
+        data.setdefault("video", {})
+        data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
+        data["video"]["proxy_url"] = f"/api/video/{row['vid']}"
+    return {
+        "sid": row["id"],
+        "kind": row["kind"],
+        "item_id": row["item_id"],
+        "title": row["custom_title"] or row["title"] or "（无标题）",
+        "author": row["author"] or "",
+        "avatar": row["avatar"] or "",
+        "cover": row["cover"] or "",
+        "created": row["created"],
+        "expires_at": row["expires_at"],
+        "state": _share_state(row),
+        "url": f"{origin}/s/{row['id']}" if origin else f"/s/{row['id']}",
+        "views": row["views"], "plays": row["plays"], "downloads": row["downloads"],
+        "data": data,
+    }
+
+
+def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
+    u = current_user(request)
+    sid = _new_sid()
+    now = int(time.time())
+    vid = ""
+    if data.get("video", {}).get("url"):
+        vm = re.search(r"video_id=([\w-]+)", data["video"]["url"])
+        vid = vm.group(1) if vm else ""
+    db_exec(
+        "INSERT INTO shares(id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
+        "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
+        "refreshed_at,status,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, data.get("item_id", ""), data.get("kind", "video"), vid,
+         u["id"] if u else None, _client_fp(request), _client_ip(request),
+         (data.get("title") or "")[:300], (data.get("author") or "")[:100],
+         data.get("avatar", ""), data.get("cover", ""),
+         json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
+         "link", now + _share_ttl(request), now, "ok", now))
+    row = dict(db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one"))
+    return _share_view(row, _share_origin(request))      # 新链接按域名池分配
+
+
+def _share_event(request: Request, sid: str, kind: str):
+    col = {"view": "views", "play": "plays",
+           "download": "downloads", "cta": "cta_clicks"}.get(kind)
+    try:
+        if col:
+            db_exec(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
+        db_exec("INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (int(time.time()), sid, kind, _client_ip(request),
+                 (request.headers.get("user-agent") or "")[:200],
+                 (request.headers.get("referer") or "")[:200],
+                 1 if _is_wechat(request) else 0, _client_fp(request)))
+    except Exception:
+        pass
+
+
+class ShareBody(BaseModel):
+    text: str = ""
+    item_id: str = ""
+    title: str = ""
+
+
+@app.post("/api/share")
+def api_share_create(body: ShareBody, request: Request):
+    """生成分享页。已解析过的作品命中缓存 → 不重复解析、不再扣配额。"""
+    if not _rate_ok(_share_hits, _client_ip(request), 3600, SHARE_MAX_PER_HOUR):
+        raise ApiError(429, "创建分享页过于频繁，请稍后再试")
+
+    data = None
+    if body.item_id:
+        hit = _cache.get(body.item_id.strip())
+        if hit and time.time() - hit[0] < CACHE_TTL:
+            data = hit[1]
+        else:
+            # 缓存已过期：本站已有该作品的分享页时可直接复用快照，仍然零解析成本
+            row = db_exec("SELECT * FROM shares WHERE item_id=? AND status='ok' "
+                          "ORDER BY created DESC LIMIT 1", (body.item_id.strip(),), "one")
+            if row:
+                data = json.loads(dict(row)["payload"] or "{}")
+    if data is None:
+        if not body.text.strip():
+            raise ApiError(400, "解析结果已过期，请重新粘贴链接后再生成分享页")
+        limit, used, remaining = quota_status(request)      # 需要真解析才计配额
+        if remaining <= 0:
+            raise _quota_error(limit)
+        data = _parse_cached(body.text)
+        reserve_quota(request, 1)
+    if not data.get("item_id"):
+        raise ApiError(400, "解析数据不完整，无法生成分享页")
+    return _share_create(request, data, body.title)
+
+
+@app.get("/api/share/{sid}")
+def api_share_get(sid: str, request: Request):
+    row = db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one")
+    if not row:
+        raise ApiError(404, "分享页不存在或已被删除")
+    return _share_view(dict(row), _origin(request))
+
+
+class ShareEventBody(BaseModel):
+    kind: str
+
+
+@app.post("/api/share/{sid}/event")
+def api_share_event(sid: str, body: ShareEventBody, request: Request):
+    if body.kind in ("view", "play", "download", "cta", "fallback"):
+        _share_event(request, sid, body.kind)
+    return {"ok": True}
+
+
+def _qr_bytes(sid: str, request: Request, kind: str, scale: int):
+    try:
+        import segno
+    except ImportError:
+        raise ApiError(501, "服务器未安装二维码依赖 segno")
+    buf = io.BytesIO()
+    segno.make(f"{_share_origin(request)}/s/{sid}", error="m").save(
+        buf, kind=kind, scale=scale, border=2, dark="#111418", light="#ffffff")
+    return buf.getvalue()
+
+
+@app.get("/s/{sid}/qr.svg")
+def share_qr(sid: str, request: Request):
+    return Response(_qr_bytes(sid, request, "svg", 6), media_type="image/svg+xml",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/s/{sid}/qr.png")
+def share_qr_png(sid: str, request: Request):
+    """海报合成用：同源 PNG，画进 canvas 不会污染画布（SVG 在部分浏览器会）。"""
+    return Response(_qr_bytes(sid, request, "png", 8), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/shares")
+def api_my_shares(request: Request, limit: int = 50):
+    u = current_user(request)
+    if not u:
+        raise ApiError(401, "请先登录后查看我的分享")
+    rows = db_exec("SELECT * FROM shares WHERE owner_user_id=? ORDER BY created DESC LIMIT ?",
+                   (u["id"], max(1, min(200, limit))), "all")
+    origin = _share_origin(request)     # 复制出去的链接始终用当前可用域名
+    return {"shares": [_share_view(dict(r), origin) for r in rows]}
+
+
+@app.delete("/api/shares/{sid}")
+def api_share_delete(sid: str, request: Request):
+    u = current_user(request)
+    if not u:
+        raise ApiError(401, "请先登录")
+    n = db_exec("DELETE FROM shares WHERE id=? AND owner_user_id=?", (sid, u["id"]), "rowcount")
+    if not n:
+        raise ApiError(404, "分享页不存在或不属于你")
+    return {"ok": True}
+
+
+class ReportBody(BaseModel):
+    sid: str
+    reason: str
+    contact: str = ""
+
+
+@app.post("/api/report")
+def api_report(body: ReportBody, request: Request):
+    """侵权/违规投诉入口（无需登录）。管理员在后台处理后可下架。"""
+    if not body.reason.strip():
+        raise ApiError(400, "请填写投诉理由")
+    db_exec("INSERT INTO reports(ts,sid,reason,contact,ip) VALUES(?,?,?,?,?)",
+            (int(time.time()), body.sid[:32], body.reason[:1000],
+             body.contact[:200], _client_ip(request)))
+    return {"ok": True, "message": "已收到，我们会尽快处理"}
+
+
+# ---- 微信 JS-SDK 分享卡片签名 ----
+#
+# 裸页面在微信里的分享卡片由微信自行抓取，样式朴素；接入 JS-SDK 才能精确控制
+# 标题/描述/缩略图。需要「已认证服务号 + 已备案域名」，在后台填 AppID/AppSecret 启用。
+# jsapi_ticket 全局唯一、7200s 有效且有调用频次上限 → **必须存 app_settings 表**，
+# 存内存会导致多 worker 各自刷新互相顶掉。
+
+def _wx_api(url: str) -> dict:
+    """请求微信开放接口。**刻意不走代理池**——公众号要求服务器出口 IP 在白名单内，
+    走代理会因 IP 不匹配而失败；且这里请求的是微信而非抖音，不涉及被抖音封的问题。"""
+    req = urlreq.Request(url, headers={"User-Agent": "douyin-dl/1.0"})
+    with urlreq.urlopen(req, timeout=10) as r:
+        return json.loads(r.read().decode("utf-8", "ignore"))
+
+
+def _wx_ticket():
+    """返回 (appid, jsapi_ticket)；未配置返回 (None, None)。带 app_settings 级缓存。"""
+    appid = app_setting("wx_appid").strip()
+    secret = app_setting("wx_secret").strip()
+    if not (appid and secret):
+        return None, None
+    now = time.time()
+    cached = app_setting("wx_ticket")
+    try:
+        exp = float(app_setting("wx_ticket_exp") or 0)
+    except ValueError:
+        exp = 0
+    if cached and exp > now + 60:
+        return appid, cached
+    tok = _wx_api("https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential"
+                  f"&appid={urlparse.quote(appid)}&secret={urlparse.quote(secret)}")
+    if not tok.get("access_token"):
+        raise ApiError(502, f"获取微信 access_token 失败：{tok.get('errmsg') or tok}")
+    tk = _wx_api("https://api.weixin.qq.com/cgi-bin/ticket/getticket?type=jsapi"
+                 f"&access_token={urlparse.quote(tok['access_token'])}")
+    if not tk.get("ticket"):
+        raise ApiError(502, f"获取 jsapi_ticket 失败：{tk.get('errmsg') or tk}")
+    set_app_setting("wx_ticket", tk["ticket"])
+    set_app_setting("wx_ticket_exp", now + int(tk.get("expires_in", 7200)) - 300)
+    return appid, tk["ticket"]
+
+
+@app.get("/api/wx/jssdk")
+def wx_jssdk(request: Request, url: str = ""):
+    """给分享页签名。未配置公众号时返回 enabled=false，前端静默降级。"""
+    # 先校验 URL 归属，再取 ticket：避免外站请求也能触发微信接口调用（有频次上限）
+    allowed = list(SHARE_DOMAINS) + [_origin(request)]
+    page = (url or "").split("#")[0]
+    if not any(page.startswith(a) for a in allowed):
+        raise ApiError(403, "该 URL 不属于本站，拒绝签名")
+    try:
+        appid, ticket = _wx_ticket()
+    except ApiError as e:
+        return {"enabled": False, "error": e.message}
+    if not appid:
+        return {"enabled": False}
+    nonce = secrets.token_hex(8)
+    ts = int(time.time())
+    raw = (f"jsapi_ticket={ticket}&noncestr={nonce}&timestamp={ts}&url={page}")
+    return {"enabled": True, "appId": appid, "timestamp": ts, "nonceStr": nonce,
+            "signature": hashlib.sha1(raw.encode()).hexdigest()}
 
 
 # ---------------------------------------------------------------- 公共 API
@@ -1897,6 +2254,89 @@ def admin_api_logs(request: Request, limit: int = 100):
     return {"logs": [dict(r) for r in rows]}
 
 
+# ---- 分享页管理（含侵权下架）----
+
+@app.get("/api/admin/shares")
+def admin_shares(request: Request, limit: int = 100, q: str = ""):
+    _require_admin(request)
+    like = f"%{q}%"
+    rows = db_exec(
+        "SELECT id,item_id,kind,title,author,status,views,plays,downloads,cta_clicks,"
+        "expires_at,created,owner_user_id,owner_ip FROM shares "
+        "WHERE (?='' OR title LIKE ? OR author LIKE ? OR id=?) "
+        "ORDER BY created DESC LIMIT ?",
+        (q, like, like, q, max(1, min(500, limit))), "all")
+    tot = db_exec("SELECT COUNT(*) c, COALESCE(SUM(views),0) v, COALESCE(SUM(plays),0) p, "
+                  "COALESCE(SUM(cta_clicks),0) k FROM shares", (), "one")
+    return {"shares": [dict(r) for r in rows],
+            "total": tot["c"], "views": tot["v"], "plays": tot["p"], "cta": tot["k"]}
+
+
+@app.post("/api/admin/shares/{sid}/takedown")
+def admin_takedown(sid: str, request: Request):
+    _require_admin(request)
+    n = db_exec("UPDATE shares SET status='takedown' WHERE id=?", (sid,), "rowcount")
+    if not n:
+        raise ApiError(404, "分享页不存在")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/shares/{sid}")
+def admin_del_share(sid: str, request: Request):
+    _require_admin(request)
+    db_exec("DELETE FROM shares WHERE id=?", (sid,))
+    return {"ok": True}
+
+
+@app.get("/api/admin/reports")
+def admin_reports(request: Request, limit: int = 100):
+    _require_admin(request)
+    rows = db_exec("SELECT * FROM reports ORDER BY ts DESC LIMIT ?",
+                   (max(1, min(500, limit)),), "all")
+    return {"reports": [dict(r) for r in rows]}
+
+
+@app.post("/api/admin/reports/{rid}/handle")
+def admin_handle_report(rid: int, request: Request):
+    _require_admin(request)
+    db_exec("UPDATE reports SET handled=1 WHERE id=?", (rid,))
+    return {"ok": True}
+
+
+@app.get("/api/admin/share-config")
+def admin_share_config(request: Request):
+    _require_admin(request)
+    off = _domains_off()
+    return {
+        "domains": [{"url": d, "enabled": d not in off} for d in SHARE_DOMAINS],
+        "env_hint": "分享域名通过环境变量 SHARE_DOMAINS 配置（逗号分隔），重启生效",
+        "wx": {"appid": app_setting("wx_appid"),
+               "configured": bool(app_setting("wx_appid") and app_setting("wx_secret"))},
+    }
+
+
+class ShareConfigBody(BaseModel):
+    wx_appid: Optional[str] = None
+    wx_secret: Optional[str] = None
+    toggle_domain: Optional[str] = None
+
+
+@app.post("/api/admin/share-config")
+def admin_set_share_config(body: ShareConfigBody, request: Request):
+    _require_admin(request)
+    if body.wx_appid is not None:
+        set_app_setting("wx_appid", body.wx_appid.strip())
+    if body.wx_secret is not None and body.wx_secret.strip():
+        set_app_setting("wx_secret", body.wx_secret.strip())
+        set_app_setting("wx_ticket", "")          # 换了密钥，缓存的 ticket 立刻作废
+        set_app_setting("wx_ticket_exp", 0)
+    if body.toggle_domain:
+        off = _domains_off()
+        off.symmetric_difference_update({body.toggle_domain})
+        set_app_setting("share_domains_off", json.dumps(sorted(off)))
+    return admin_share_config(request)
+
+
 # ---- 用户自助 API 密钥（登录后）----
 
 @app.get("/api/keys")
@@ -2086,6 +2526,62 @@ def index(request: Request):
     return resp
 
 
+def _share_head(view: Optional[dict], origin: str) -> str:
+    """分享页的 per-share 头信息。**一律 noindex** —— 不收录他人作品内容。"""
+    def esc(s):
+        return (str(s or "").replace("&", "&amp;").replace('"', "&quot;")
+                .replace("<", "&lt;").replace(">", "&gt;"))
+
+    if not view or view["state"] != "ok":
+        return ('<title>内容不可用 · 抖音分享</title>\n'
+                '<meta name="robots" content="noindex,nofollow">\n'
+                '<meta name="theme-color" content="#0E1013">')
+    title = view["title"][:60]
+    author = view["author"] or "抖音作者"
+    card_title = f"{title} · @{author}"
+    desc = f"由 @{author} 发布的抖音作品，点开即可观看，无需安装 App。"
+    cover = view["cover"] or f"{origin}/og.svg"
+    return f'''<title>{esc(card_title)}</title>
+<meta name="description" content="{esc(desc)}">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#0E1013">
+<meta property="og:type" content="video.other">
+<meta property="og:title" content="{esc(card_title)}">
+<meta property="og:description" content="{esc(desc)}">
+<meta property="og:image" content="{esc(cover)}">
+<meta property="og:url" content="{esc(view['url'])}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{esc(card_title)}">
+<meta name="twitter:image" content="{esc(cover)}">'''
+
+
+@app.get("/s/{sid}", response_class=HTMLResponse)
+def share_page(sid: str, request: Request):
+    """分享页：服务端渲染，微信内可直接打开与播放。"""
+    origin = _origin(request)
+    row = db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one")
+    view = None
+    if row:
+        row = dict(row)
+        # 图集直链会过期：超过刷新窗口就按 item_id 重新解析（视频靠 vid 重拼，无需刷新）
+        if (_share_state(row) == "ok" and row["kind"] == "note"
+                and time.time() - (row["refreshed_at"] or 0) > SHARE_REFRESH_TTL):
+            row = _refresh_share(row)
+        view = _share_view(row, origin)
+        _share_event(request, sid, "view")
+
+    html = Path("static/share.html").read_text("utf-8")
+    # 注入 <script> 前把 < 转义成 <，防止标题里的 </script> 打断脚本
+    payload = json.dumps(view or {"state": "notfound", "sid": sid},
+                         ensure_ascii=False).replace("<", "\\u003c")
+    html = (html.replace("{{HTMLLANG}}", "zh-CN")
+                .replace("{{SHARE_HEAD}}", _share_head(view, origin))
+                .replace("{{ORIGIN}}", origin)
+                .replace("{{WECHAT}}", "true" if _is_wechat(request) else "false")
+                .replace("{{SHARE_DATA}}", payload))
+    return HTMLResponse(html, status_code=200 if view else 404)
+
+
 @app.get("/api-docs", response_class=HTMLResponse)
 def api_docs(request: Request):
     log_pageview(request)
@@ -2221,7 +2717,8 @@ def admin_page():
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots(request: Request):
-    return (f"User-agent: *\nAllow: /\nDisallow: /admin_d\nDisallow: /api/\n\n"
+    # /s/ 是用户生成的他人作品分享页，一律不收录（详见 docs/分享页功能规划.md §3.1）
+    return (f"User-agent: *\nAllow: /\nDisallow: /admin_d\nDisallow: /api/\nDisallow: /s/\n\n"
             f"Sitemap: {_origin(request)}/sitemap.xml\n")
 
 

@@ -175,6 +175,7 @@ tr:last-child td{border-bottom:none}
       <button class="admin-tab active" data-view="overview">数据概览</button>
       <button class="admin-tab" data-view="proxy">代理池</button>
       <button class="admin-tab" data-view="users">用户</button>
+      <button class="admin-tab" data-view="shares">分享页</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
     </div>
 
@@ -329,6 +330,62 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
 
+    <!-- 分享页 -->
+    <div class="view" id="v-shares" style="display:none">
+      <div class="stat-row" id="shareStats"></div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div><h3>分享页</h3><div class="desc">用户生成的分享链接 · 全部 noindex 不被搜索引擎收录</div></div>
+          <div style="display:flex;gap:8px">
+            <input id="shareSearch" placeholder="搜标题 / 作者 / 短码" style="width:180px">
+            <button class="btn btn-ghost btn-sm" id="sharesRefresh">刷新</button>
+          </div>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>短码</th><th>标题</th><th>作者</th><th>类型</th><th>访问</th><th>播放</th><th>下载</th><th>CTA</th><th>状态</th><th>创建</th><th></th></tr></thead>
+          <tbody id="sharesBody"></tbody>
+        </table></div>
+        <div class="empty" id="sharesEmpty" style="display:none">还没有人生成分享页。</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>侵权投诉</h3><div class="desc">权利人提交的下架请求 · 处理后请及时下架对应分享页</div></div>
+          <button class="btn btn-ghost btn-sm" id="reportsRefresh">刷新</button></div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>时间</th><th>分享页</th><th>理由</th><th>联系方式</th><th>状态</th><th></th></tr></thead>
+          <tbody id="reportsBody"></tbody>
+        </table></div>
+        <div class="empty" id="reportsEmpty" style="display:none">暂无投诉。</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>分享域名池</h3>
+          <div class="desc">微信封分享域名是常态 · 短码与域名解耦，被封时停用该域名即可，存量链接换域名仍可打开</div></div></div>
+        <div class="panel-body">
+          <div id="domainList"></div>
+          <div class="desc" style="margin-top:10px" id="domainHint"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>微信分享卡片（JS-SDK）</h3>
+          <div class="desc">填认证服务号的 AppID / AppSecret 后，微信里的分享卡片可自定义标题与封面；留空则用微信默认抓取</div></div></div>
+        <div class="panel-body">
+          <div class="form-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="wxAppid" placeholder="AppID (wx...)" style="width:230px">
+            <input id="wxSecret" type="password" placeholder="AppSecret（留空则不修改）" style="width:250px">
+            <button class="btn btn-primary btn-sm" id="wxSave">保存</button>
+            <span class="desc" id="wxState"></span>
+          </div>
+          <div class="desc" style="margin-top:9px">
+            需要：已认证服务号 + 域名已 ICP 备案 + 在公众号后台配置 JS 接口安全域名与 IP 白名单。
+            签名接口 <span class="mono">/api/wx/jssdk</span> 只为本站域名签名。
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 请求日志 -->
     <div class="view" id="v-logs" style="display:none">
       <div class="panel">
@@ -379,8 +436,94 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.admin-tab').forEach(x=>x.classList.toggle('active', x===t));
   document.querySelectorAll('.view').forEach(v=>v.style.display='none');
   const v = t.dataset.view; $('#v-'+v).style.display='';
-  if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers(); else if(v==='logs') loadLogs();
+  if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
+  else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
 });
+
+/* ---------------- 分享页管理 ---------------- */
+async function loadShares(){
+  const q = ($('#shareSearch')?.value || '').trim();
+  let d; try{ d = await api('/api/admin/shares?limit=200&q=' + encodeURIComponent(q)); }catch{ return; }
+  $('#shareStats').innerHTML = `
+    <div class="stat"><div class="k">分享页总数</div><div class="v tnum">${d.total}</div></div>
+    <div class="stat"><div class="k">总访问</div><div class="v tnum">${d.views}</div></div>
+    <div class="stat"><div class="k">总播放</div><div class="v tnum">${d.plays}</div></div>
+    <div class="stat"><div class="k">CTA 点击</div><div class="v tnum">${d.cta}<small> / 回流首页</small></div></div>`;
+  $('#sharesEmpty').style.display = d.shares.length ? 'none' : '';
+  const label = {ok:'生效中', dead:'源已删', takedown:'已下架'};
+  $('#sharesBody').innerHTML = d.shares.map(s => {
+    const expired = s.expires_at && s.expires_at * 1000 < Date.now();
+    const state = expired && s.status === 'ok' ? '已过期' : (label[s.status] || s.status);
+    return `<tr>
+      <td class="mono"><a href="/s/${esc(s.id)}" target="_blank" rel="noopener">${esc(s.id)}</a></td>
+      <td style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.title||'')}">${esc(s.title||'')}</td>
+      <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.author||'')}</td>
+      <td>${s.kind === 'note' ? '图集' : '视频'}</td>
+      <td class="tnum">${s.views}</td><td class="tnum">${s.plays}</td>
+      <td class="tnum">${s.downloads}</td><td class="tnum">${s.cta_clicks}</td>
+      <td><span class="badge${s.status === 'ok' && !expired ? '' : ' bad'}">${state}</span></td>
+      <td class="tnum">${ago2(s.created)}</td>
+      <td style="white-space:nowrap">
+        ${s.status === 'takedown' ? '' : `<button class="btn btn-ghost btn-sm" onclick="takedownShare('${esc(s.id)}')">下架</button>`}
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="delShare('${esc(s.id)}')">删除</button>
+      </td></tr>`;
+  }).join('');
+  loadReports(); loadShareConfig();
+}
+async function takedownShare(sid){
+  if(!confirm('下架后该分享页立即不可访问（用于处理侵权投诉）。确定？')) return;
+  try{ await api('/api/admin/shares/'+sid+'/takedown', {method:'POST'}); loadShares(); }
+  catch(e){ alert(e.message); }
+}
+async function delShare(sid){
+  if(!confirm('彻底删除该分享页记录？此操作不可恢复。')) return;
+  try{ await api('/api/admin/shares/'+sid, {method:'DELETE'}); loadShares(); }
+  catch(e){ alert(e.message); }
+}
+$('#sharesRefresh').onclick = loadShares;
+$('#shareSearch').onkeydown = e => { if(e.key === 'Enter') loadShares(); };
+
+async function loadReports(){
+  let d; try{ d = await api('/api/admin/reports'); }catch{ return; }
+  $('#reportsEmpty').style.display = d.reports.length ? 'none' : '';
+  $('#reportsBody').innerHTML = d.reports.map(r => `<tr>
+    <td class="tnum">${ago2(r.ts)}</td>
+    <td class="mono"><a href="/s/${esc(r.sid)}" target="_blank" rel="noopener">${esc(r.sid)}</a></td>
+    <td style="max-width:300px">${esc(r.reason)}</td>
+    <td>${esc(r.contact || '—')}</td>
+    <td><span class="badge${r.handled ? '' : ' bad'}">${r.handled ? '已处理' : '待处理'}</span></td>
+    <td>${r.handled ? '' : `<button class="btn btn-ghost btn-sm" onclick="handleReport(${r.id})">标记已处理</button>`}</td>
+  </tr>`).join('');
+}
+$('#reportsRefresh').onclick = loadReports;
+async function handleReport(id){
+  try{ await api('/api/admin/reports/'+id+'/handle', {method:'POST'}); loadReports(); }catch(e){ alert(e.message); }
+}
+
+async function loadShareConfig(){
+  let d; try{ d = await api('/api/admin/share-config'); }catch{ return; }
+  $('#domainHint').textContent = d.env_hint;
+  $('#domainList').innerHTML = d.domains.length
+    ? d.domains.map(x => `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span class="mono" style="flex:1">${esc(x.url)}</span>
+        <span class="badge${x.enabled ? '' : ' bad'}">${x.enabled ? '分配中' : '已停用'}</span>
+        <button class="btn btn-ghost btn-sm" onclick="toggleDomain('${esc(x.url)}')">${x.enabled ? '停用（已被封）' : '恢复'}</button>
+      </div>`).join('')
+    : '<div class="desc">未配置分享域名池，分享链接使用当前访问域名。生产环境建议配置 3–5 个独立域名。</div>';
+  $('#wxAppid').value = d.wx.appid || '';
+  $('#wxState').textContent = d.wx.configured ? '✓ 已配置，分享卡片走 JS-SDK' : '未配置，使用微信默认卡片';
+}
+async function toggleDomain(url){
+  try{ await api('/api/admin/share-config', {method:'POST', body: JSON.stringify({toggle_domain:url})}); loadShareConfig(); }
+  catch(e){ alert(e.message); }
+}
+$('#wxSave').onclick = async () => {
+  try{
+    await api('/api/admin/share-config', {method:'POST', body: JSON.stringify({
+      wx_appid: $('#wxAppid').value.trim(), wx_secret: $('#wxSecret').value.trim()})});
+    $('#wxSecret').value = ''; loadShareConfig(); alert('已保存');
+  }catch(e){ alert(e.message); }
+};
 
 /* 数据概览 */
 const yuan = c => '¥'+((c||0)/100).toFixed(2);

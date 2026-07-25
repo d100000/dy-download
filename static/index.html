@@ -272,6 +272,45 @@ a.ghost-btn{text-decoration:none}
 .pm-imgs{display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; padding:12px 16px 16px}
 .pm-imgs img{width:100%; border-radius:8px; display:block}
 
+/* ---------- 分享页弹窗 ---------- */
+.share-box{width:min(420px,94vw); padding:22px}
+.share-box h3{font-size:17px; font-weight:650; margin-bottom:4px}
+.share-box .sub{font-size:12.5px; color:var(--muted); margin-bottom:16px}
+.share-link{display:flex; gap:8px; align-items:center; background:var(--surface-2);
+  border:1px solid var(--border); border-radius:11px; padding:10px 12px; margin-bottom:12px}
+.share-link input{flex:1; background:none; border:none; color:var(--text); font-size:13px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace; outline:none; min-width:0}
+.share-link button{flex:0 0 auto; background:var(--accent); color:#fff; border-radius:8px;
+  padding:7px 13px; font-size:12.5px; font-weight:600}
+.share-qr{display:flex; gap:14px; align-items:center; background:var(--surface-2);
+  border:1px solid var(--border); border-radius:12px; padding:13px; margin-bottom:14px}
+.share-qr img{width:96px; height:96px; border-radius:8px; background:#fff; flex:0 0 auto}
+.share-qr .qt{font-size:12.5px; color:var(--muted); line-height:1.7}
+.share-qr .qt b{color:var(--text); display:block; font-size:13.5px; margin-bottom:3px}
+.share-tips{font-size:12px; color:var(--faint); line-height:1.8; background:var(--surface-2);
+  border-radius:10px; padding:11px 13px; margin-bottom:14px}
+.share-acts{display:flex; gap:9px}
+.share-acts .primary-btn,.share-acts .ghost-btn{flex:1; justify-content:center; text-align:center}
+.share-err{color:var(--danger-text); font-size:13px; padding:10px 0}
+
+/* ---------- 我的分享 ---------- */
+.mine-box{width:min(560px,95vw); padding:22px; max-height:86vh; overflow:auto}
+.mine-item{display:flex; gap:11px; align-items:center; padding:11px; border:1px solid var(--border);
+  border-radius:12px; margin-bottom:9px; background:var(--surface-2)}
+.mine-item img{width:52px; height:66px; border-radius:8px; object-fit:cover; flex:0 0 auto; background:var(--surface)}
+.mine-item .mt{flex:1; min-width:0}
+.mine-item .mt b{display:block; font-size:13.5px; font-weight:600; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.mine-item .mt .ms{font-size:11.5px; color:var(--faint); margin-top:3px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.mine-item .mt .mn{font-size:11.5px; color:var(--muted); margin-top:4px; display:flex; gap:12px}
+.mine-item .mo{display:flex; flex-direction:column; gap:5px; flex:0 0 auto}
+.mine-item .mo button,.mine-item .mo a{font-size:11.5px; padding:5px 10px; border-radius:7px;
+  border:1px solid var(--border); background:var(--surface); text-align:center; white-space:nowrap}
+.mine-item .mo .del{color:var(--danger-text)}
+.mine-empty{text-align:center; color:var(--muted); font-size:13.5px; padding:26px 0}
+.mine-state{font-size:11px; padding:1px 7px; border-radius:999px; background:var(--surface); border:1px solid var(--border)}
+
 /* ---------- 导航右侧 / 用户 ---------- */
 .nav-right{display:flex; align-items:center; gap:10px}
 .nav-link{font-size:13.5px; color:var(--muted); background:none; border:none; cursor:pointer; text-decoration:none}
@@ -494,6 +533,7 @@ footer{
     <a class="nav-link" href="/api-docs" data-i18n="nav_api">API 接入</a>
     <button class="nav-user" id="authBtn" data-i18n="nav_login">登录 / 注册</button>
     <div class="user-menu" id="userMenu" style="display:none">
+      <button class="nav-link" id="mySharesBtn">我的分享</button>
       <a class="nav-link" href="/api-console" data-i18n="nav_console">API 控制台</a>
       <span class="user-email" id="userEmail"></span>
       <button class="nav-link" id="logoutBtn" data-i18n="nav_logout">退出</button>
@@ -543,6 +583,25 @@ footer{
         <div class="auth-err" id="authErr2"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- 分享页弹窗 -->
+<div class="pm" id="shareModal">
+  <div class="pm-box share-box">
+    <button class="pm-close" onclick="closeShare()" aria-label="关闭">✕</button>
+    <div id="shareContent"></div>
+  </div>
+</div>
+
+<!-- 我的分享 -->
+<div class="pm" id="mySharesModal">
+  <div class="pm-box mine-box">
+    <button class="pm-close" onclick="closeMine()" aria-label="关闭">✕</button>
+    <h3 style="font-size:17px;font-weight:650">我的分享</h3>
+    <div class="sub" style="font-size:12.5px;color:var(--muted);margin:4px 0 14px">
+      你生成的分享页与它们的访问数据。删除后链接立即失效。</div>
+    <div id="mineList"></div>
   </div>
 </div>
 
@@ -841,7 +900,8 @@ async function parseBatch(text){
   refreshQuota();
   _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
   const fails = data.results.filter(r=>!r.ok);
-  _batch.forEach(d => { saveHistory(d); if (d.kind==='note') _albums[d.item_id]=d.images; });
+  _batch.forEach(d => { saveHistory(d); if (d.kind==='note') _albums[d.item_id]=d.images;
+                        _shareSrc[d.item_id] = d._link || ''; });
   renderBatch(data.count, fails);
 }
 
@@ -861,6 +921,7 @@ function renderBatch(count, fails){
         ${isNote?`<button class="mini-btn" onclick="downloadAll('${esc(d.item_id)}')">下载图集</button>`
                 :`<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>
                   <button class="mini-btn ghost" onclick="openPlayer(${i})">播放</button>`}
+        <button class="mini-btn ghost" onclick="makeShare('${esc(d.item_id)}',this)">分享页</button>
       </td>
     </tr>`;
   }).join('');
@@ -977,6 +1038,7 @@ const _albums = {};   // item_id -> images（供批量场景的"下载全部"取
 function render(d){
   result.innerHTML = (d.kind === 'note' ? albumHTML(d) : videoHTML(d));
   if (d.kind === 'note') _albums[d.item_id] = d.images;
+  _shareSrc[d.item_id] = input.value;      // 解析缓存过期时用它重新解析
   result.classList.add('show');
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
   wireAvatar(result, d.item_id);
@@ -1128,6 +1190,7 @@ function videoHTML(d){
         ${extrasBlock(d)}
         <div class="actions">
           <button class="primary-btn" onclick="browserDownload('${esc(d.video.url)}','${esc(d.video.filename)}',this)">⬇ 下载视频</button>
+          <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
           <a class="ghost-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener">新窗口打开</a>
         </div>
@@ -1150,8 +1213,9 @@ function albumHTML(d){
         ${statsRow(d.stats)}
         ${extrasBlock(d)}
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
+        <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
         <button class="primary-btn" onclick="downloadAll('${esc(d.item_id)}')">⬇ 下载全部</button>
       </div>
     </div>
@@ -1173,6 +1237,126 @@ function albumHTML(d){
 async function downloadAll(itemId){
   const imgs = _albums[itemId] || [];
   for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
+}
+
+/* ================= 分享页：生成「微信里点开就能看」的链接 ================= */
+const _shareSrc = {};          // item_id -> 原始链接，解析缓存过期时用于重新解析
+const shareModal = $('#shareModal');
+shareModal.addEventListener('click', e => { if (e.target === shareModal) closeShare(); });
+
+function closeShare(){ shareModal.classList.remove('show'); document.body.style.overflow = ''; }
+function openShare(html){
+  $('#shareContent').innerHTML = html;
+  shareModal.classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+
+async function makeShare(itemId, btn){
+  const old = btn ? btn.textContent : null;
+  if (btn){ btn.textContent = '生成中…'; btn.style.pointerEvents = 'none'; }
+  try {
+    const resp = await fetch('/api/share', {
+      method:'POST', headers: jsonHeaders(),
+      body: JSON.stringify({item_id: itemId, text: _shareSrc[itemId] || ''})
+    });
+    const d = await resp.json().catch(()=>({}));
+    if (!resp.ok) throw new Error(d.error || '生成分享页失败');
+    shareResultHTML(d);
+    refreshQuota();
+  } catch(e){
+    openShare(`<h3>生成失败</h3><div class="share-err">${esc(e.message)}</div>
+      <div class="share-acts"><button class="ghost-btn" onclick="closeShare()">关闭</button></div>`);
+  } finally {
+    if (btn){ btn.textContent = old; btn.style.pointerEvents = ''; }
+  }
+}
+
+function shareResultHTML(d){
+  const url = d.url;
+  const days = d.expires_at ? Math.max(1, Math.round((d.expires_at*1000 - Date.now())/86400000)) : 0;
+  openShare(`
+    <h3>🔗 分享页已生成</h3>
+    <div class="sub">把这个链接发到微信，对方点开就能直接看，不用装抖音 App。</div>
+    <div class="share-link">
+      <input id="shareUrl" value="${esc(url)}" readonly onclick="this.select()">
+      <button onclick="copyShareUrl(this)">复制</button>
+    </div>
+    <div class="share-qr">
+      <img src="/s/${esc(d.sid)}/qr.svg" alt="分享页二维码">
+      <div class="qt"><b>扫码在手机上打开</b>用手机扫一扫，可直接转发到微信；也可以先复制链接再粘贴到聊天窗口。</div>
+    </div>
+    <div class="share-tips">
+      · 页面只呈现作品信息与播放地址，<b>不存储任何视频文件</b><br>
+      · 已署名原作者并回链原作品，尊重创作者权益<br>
+      ${days ? `· 该链接 <b>${days} 天</b>后过期${d.expires_at ? '（登录后有效期更长）' : ''}` : ''}
+    </div>
+    <div class="share-acts">
+      <a class="primary-btn" href="${esc(url)}" target="_blank" rel="noopener">预览分享页 ↗</a>
+      <button class="ghost-btn" onclick="closeShare()">完成</button>
+    </div>`);
+}
+
+/* ---- 我的分享 ---- */
+const mineModal = $('#mySharesModal');
+mineModal.addEventListener('click', e => { if (e.target === mineModal) closeMine(); });
+function closeMine(){ mineModal.classList.remove('show'); document.body.style.overflow = ''; }
+
+$('#mySharesBtn').onclick = async () => {
+  mineModal.classList.add('show'); document.body.style.overflow = 'hidden';
+  $('#mineList').innerHTML = '<div class="mine-empty">加载中…</div>';
+  try {
+    const d = await (await fetch('/api/shares')).json();
+    renderMine(d.shares || []);
+  } catch {
+    $('#mineList').innerHTML = '<div class="mine-empty">加载失败，请稍后重试。</div>';
+  }
+};
+
+const STATE_LABEL = {ok:'生效中', expired:'已过期', dead:'源已删除', takedown:'已下架'};
+function renderMine(list){
+  if (!list.length){
+    $('#mineList').innerHTML = `<div class="mine-empty">还没有生成过分享页。<br>
+      解析任意作品后点「🔗 生成分享页」即可。</div>`;
+    return;
+  }
+  $('#mineList').innerHTML = list.map(s => {
+    const days = s.expires_at ? Math.round((s.expires_at*1000 - Date.now())/86400000) : 0;
+    return `<div class="mine-item" data-sid="${esc(s.sid)}">
+      ${s.cover ? `<img src="${esc(s.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<img alt="">'}
+      <div class="mt">
+        <b>${esc(s.title)}</b>
+        <div class="ms">@${esc(s.author||'未知')} · <span class="mine-state">${STATE_LABEL[s.state]||s.state}</span>
+          ${s.expires_at ? (days > 0 ? ` · ${days} 天后过期` : ' · 已过期') : ''}</div>
+        <div class="mn"><span title="访问">👁 ${s.views}</span><span title="播放">▶ ${s.plays}</span><span title="下载">⬇ ${s.downloads}</span></div>
+      </div>
+      <div class="mo">
+        <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a>
+        <button onclick="copyMine('${esc(s.url)}',this)">复制</button>
+        <button class="del" onclick="delMine('${esc(s.sid)}')">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+function copyMine(url, btn){
+  navigator.clipboard?.writeText(url).then(()=>{
+    const o = btn.textContent; btn.textContent = '✓'; setTimeout(()=>btn.textContent=o, 1400);
+  }).catch(()=>{});
+}
+async function delMine(sid){
+  if (!confirm('删除后这个分享链接会立即失效，确定删除？')) return;
+  try {
+    const r = await fetch('/api/shares/' + sid, {method:'DELETE'});
+    if (!r.ok) throw new Error();
+    document.querySelector(`.mine-item[data-sid="${sid}"]`)?.remove();
+    if (!document.querySelector('.mine-item')) renderMine([]);
+  } catch { alert('删除失败，请稍后重试'); }
+}
+
+function copyShareUrl(btn){
+  const el = $('#shareUrl');
+  el.select();
+  const done = () => { const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1600); };
+  navigator.clipboard?.writeText(el.value).then(done).catch(()=>{ try{ document.execCommand('copy'); done(); }catch{} });
 }
 
 /* ---------- 本地历史 ---------- */
