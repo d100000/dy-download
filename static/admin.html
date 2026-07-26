@@ -293,6 +293,32 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
 
+    <!-- 内置机场加速（mihomo） -->
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>内置机场加速（mihomo）</h3>
+          <div class="desc">粘贴机场订阅链接，自动下载内核并落地成本地代理。仅本项目可用，不影响服务器上其他程序。</div></div>
+        <span id="mihomoState" class="badge idle">未启用</span>
+      </div>
+      <div class="panel-body">
+        <div class="setting-row" style="align-items:flex-start">
+          <div class="label" style="flex:1">
+            <b>机场订阅 URL</b>
+            <p>vmess/trojan 等加密节点无法直接进代理池，由内置 mihomo 吃订阅后落地为一条本地 socks5，多节点测速/切换全自动。留空并保存即停用。</p>
+            <input class="ctl" id="mihomoSub" type="text" style="width:100%;margin-top:8px"
+                   placeholder="https://机场域名/…/subscribe?token=…">
+            <div id="mihomoInfo" class="desc mono" style="margin-top:8px"></div>
+            <div id="mihomoErr" class="desc" style="margin-top:6px;color:var(--danger);white-space:pre-wrap"></div>
+          </div>
+        </div>
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" id="mihomoSave">保存并启动</button>
+          <button class="btn btn-ghost btn-sm" id="mihomoStop">停用</button>
+          <button class="btn btn-ghost btn-sm" id="mihomoRefresh">刷新状态</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 开放 API 密钥 + 计费 -->
     <div class="panel">
       <div class="panel-head">
@@ -360,7 +386,20 @@ tr:last-child td{border-bottom:none}
       </div>
 
       <div class="panel">
-        <div class="panel-head"><div><h3>分享域名池</h3>
+        <div class="panel-head"><div><h3>主分享域名</h3>
+          <div class="desc">所有新生成的分享链接都用这个域名（应填一个能在微信里直接打开的域名，如 https://dy.bobdong.cn）· 即时生效，无需重启</div></div></div>
+        <div class="panel-body">
+          <div class="form-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="primaryDomain" placeholder="https://dy.bobdong.cn" style="width:300px">
+            <button class="btn btn-primary btn-sm" id="primarySave">保存</button>
+            <span class="desc" id="primaryState"></span>
+          </div>
+          <div class="desc" style="margin-top:9px">留空则退回下方域名池 / 当前访问域名。存量旧链接不受影响（短码与域名解耦，任意域名都能打开）。</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><div><h3>备用分享域名池</h3>
           <div class="desc">微信封分享域名是常态 · 短码与域名解耦，被封时停用该域名即可，存量链接换域名仍可打开</div></div></div>
         <div class="panel-body">
           <div id="domainList"></div>
@@ -438,6 +477,7 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   const v = t.dataset.view; $('#v-'+v).style.display='';
   if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
+  else if(v==='proxy') loadMihomo();
 });
 
 /* ---------------- 分享页管理 ---------------- */
@@ -510,6 +550,8 @@ async function loadShareConfig(){
         <button class="btn btn-ghost btn-sm" onclick="toggleDomain('${esc(x.url)}')">${x.enabled ? '停用（已被封）' : '恢复'}</button>
       </div>`).join('')
     : '<div class="desc">未配置分享域名池，分享链接使用当前访问域名。生产环境建议配置 3–5 个独立域名。</div>';
+  $('#primaryDomain').value = d.primary_domain || '';
+  $('#primaryState').textContent = d.primary_domain ? '✓ 新链接使用此域名' : '未设置，使用域名池 / 当前域名';
   $('#wxAppid').value = d.wx.appid || '';
   $('#wxState').textContent = d.wx.configured ? '✓ 已配置，分享卡片走 JS-SDK' : '未配置，使用微信默认卡片';
 }
@@ -517,6 +559,13 @@ async function toggleDomain(url){
   try{ await api('/api/admin/share-config', {method:'POST', body: JSON.stringify({toggle_domain:url})}); loadShareConfig(); }
   catch(e){ alert(e.message); }
 }
+$('#primarySave').onclick = async () => {
+  try{
+    await api('/api/admin/share-config', {method:'POST', body: JSON.stringify({
+      primary_domain: $('#primaryDomain').value.trim()})});
+    loadShareConfig(); alert('已保存');
+  }catch(e){ alert(e.message); }
+};
 $('#wxSave').onclick = async () => {
   try{
     await api('/api/admin/share-config', {method:'POST', body: JSON.stringify({
@@ -589,7 +638,7 @@ const ago = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); i
 async function load(){
   let s;
   try { s = await api('/api/admin/state'); } catch(err){ return; }
-  loadKeys();
+  loadKeys(); loadMihomo();
   const st = s.stats, en = s.proxies.filter(p=>p.enabled).length,
         banned = s.proxies.filter(p=>p.banned).length;
   $('#statRow').innerHTML = `
@@ -680,6 +729,50 @@ $('#testAllBtn').onclick = async e => {
   catch(err){ toast(err.message, true); } finally { btn.innerHTML=old; btn.disabled=false; load(); }
 };
 $('#refreshBtn').onclick = load;
+
+/* 内置机场加速（mihomo） */
+let mihomoPoll = null;
+function renderMihomo(d){
+  const map = {stopped:['idle','已停止'], downloading:['warn','下载内核中…'],
+    starting:['warn','启动中…'], running:['ok','运行中'], error:['bad','异常']};
+  let key = d.state;
+  if(!d.enabled) key='stopped';
+  const [cls,txt] = d.enabled ? (map[key]||['idle',key]) : ['idle','未启用'];
+  const el=$('#mihomoState'); el.className='badge '+cls; el.textContent=txt;
+  if(document.activeElement!==$('#mihomoSub')) $('#mihomoSub').value = d.sub_url_masked||'';
+  const parts=[];
+  if(d.binary_ready) parts.push('内核 '+d.version+' 已就绪'); else parts.push('内核未下载');
+  if(d.running){
+    parts.push('出口 IP '+(d.exit_ip||'—'));
+    if(d.latency_ms!=null) parts.push(d.latency_ms+' ms');
+    parts.push(d.douyin_ok===true?'抖音可达':d.douyin_ok===false?'抖音不可达':'待测');
+  }
+  $('#mihomoInfo').textContent = parts.join(' · ');
+  $('#mihomoErr').textContent = d.last_error ? ('错误：'+d.last_error) : '';
+}
+async function loadMihomo(){
+  let d; try{ d = await api('/api/admin/mihomo'); }catch{ return; }
+  renderMihomo(d);
+  // 下载/启动这类过渡态时短轮询，稳定后停
+  const transient = d.enabled && ['downloading','starting'].includes(d.state);
+  if(transient && !mihomoPoll){ mihomoPoll=setInterval(loadMihomo,2000); }
+  else if(!transient && mihomoPoll){ clearInterval(mihomoPoll); mihomoPoll=null; load(); }
+}
+$('#mihomoSave').onclick = async e => {
+  const btn=e.currentTarget, old=btn.innerHTML, sub=$('#mihomoSub').value.trim();
+  if(sub.includes('***')){ toast('订阅未改动；如需更换请粘贴新链接', true); return; }
+  btn.innerHTML='<span class="spin"></span> 处理中'; btn.disabled=true;
+  try{ renderMihomo(await api('/api/admin/mihomo', {method:'POST', body:JSON.stringify({sub_url:sub})}));
+    toast(sub?'已保存，正在下载/启动内核…':'已停用'); loadMihomo();
+  }catch(err){ toast(err.message, true); } finally{ btn.innerHTML=old; btn.disabled=false; }
+};
+$('#mihomoStop').onclick = async () => {
+  if(!confirm('停用内置机场加速？将停掉 mihomo 并移除对应代理条目。')) return;
+  try{ renderMihomo(await api('/api/admin/mihomo', {method:'POST', body:JSON.stringify({action:'stop'})}));
+    $('#mihomoSub').value=''; toast('已停用'); loadMihomo();
+  }catch(err){ toast(err.message, true); }
+};
+$('#mihomoRefresh').onclick = loadMihomo;
 
 /* 开放 API 密钥 */
 const ago2 = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); if(s<60)return s+'秒前'; if(s<3600)return Math.floor(s/60)+'分前'; if(s<86400)return Math.floor(s/3600)+'时前'; return Math.floor(s/86400)+'天前'; };

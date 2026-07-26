@@ -15,21 +15,33 @@ python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站�
 docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v $(pwd)/data:/data douyin-dl
 ```
 
-页面：`/` 下载器 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露；`run.sh` 打印的 `/admin` 是过时文案）。
+页面：`/` 下载器 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露）。
 
-无测试套件、无 lint 配置，验证靠手动跑服务 + 真实链接解析（抖音接口随时可变，改解析逻辑必须实测）。`/healthz` 可做存活探针。
+无测试套件、无 lint 配置，验证靠手动跑服务 + 真实链接解析（抖音接口随时可变，改解析逻辑必须实测）。`/healthz` 可做存活探针（含 `version` 字段）。
+
+## 版本号与 README 维护（每次改动必做）
+
+版本号唯一来源是 `server.py` 顶部的 `APP_VERSION`（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。**每次功能性改动必须**：① bump `APP_VERSION`；② 同步 README.md 顶部版本号；③ 在 README「更新日志」表新增一行（版本、日期、内容）；④ 若功能有增删，同步 README 功能列表与部署说明。仅改文档/注释不 bump。
 
 ## 架构
 
 ### 单文件后端 + 单文件前端
 
-`server.py`（~2300 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，顺序即依赖顺序：常量 → SQLite 层 → 配额风控 → 用户/验证码 → 代理池 → 计费 → HTTP 出站层 → 解析 → API 路由 → 管理后台 → SEO 页面。新增功能应放进对应分区，不要拆包。
+`server.py`（~2770 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。新增功能应放进对应分区，不要拆包。
 
-`static/*.html` 每个页面是自包含单文件（内联 CSS + 原生 JS，无构建、无框架、无依赖）。`index.html` / `api-docs.html` **不是**静态资源：路由读文件后替换 `{{HTMLLANG}}` / `{{SEO_HEAD}}` / `{{ORIGIN}}` 占位符再返回（没有 `StaticFiles` 挂载）。新增可被搜索引擎收录的页面时，必须同样走路由 + `_seo_head()` 模板，否则占位符会原样输出到页面。
+注意用户体系被拆成了相距很远的两块：**底层**（`hash_pw`/`current_user`/滑块验证码，约 242 行起）在文件前部，**路由**（`/api/auth/*`）在文件**最末尾**。改用户相关功能时两处都要看。
+
+`static/*.html` 每个页面是自包含单文件（内联 CSS + 原生 JS，无构建、无框架、无依赖）。没有 `StaticFiles` 挂载，每个页面都有独立路由，分两类：
+- **模板替换型**：`index.html` / `api-docs.html`（替换 `{{HTMLLANG}}` / `{{SEO_HEAD}}` / `{{ORIGIN}}`）、`share.html`（见分享页一节）。
+- **纯 `FileResponse`**：`admin.html`（`/admin_d`）、`api-console.html`（`/api-console`），无占位符、不做 SEO。
+
+新增可被搜索引擎收录的页面时，必须走模板 + `_seo_head()`，否则占位符会原样输出到页面。
 
 ### 解析链路（`_parse_share`）
 
 短链 302 取 `Location` → 判定 `video`/`note`/`slides` → 抓 `iesdouyin.com/share/{kind}/{id}/` → 正则提取 `window._ROUTER_DATA` JSON → 取 `item_list[0]` → 从 `play_addr` 抠出 `video_id` → 拼 `aweme.snssdk.com/aweme/v1/play/?video_id=...`（即 `playwm`→`play` 去水印）。分享页拿不到 `_ROUTER_DATA` 视为被风控：若走了代理则把该代理标记封禁并禁用。结果进 `_cache`（30 分钟，按原文与 item_id 双键）。
+
+这套链路在仓库里有**三份互不共享代码的实现**，改动时要想清楚同步范围：`server.py`（主服务，且内部还有 `_parse_share` / `_parse_item` 两个入口）、`oss/server.py`（开源精简版）、`douyin_dl.py`（纯标准库 CLI）。抖音改页面结构时三份都会坏，但只有主服务是必须立刻修的。
 
 ### 流量分工：服务器只解析，字节走浏览器直连
 
@@ -45,6 +57,8 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 `ProxyManager`（`threading.Lock` 保护）持久化在 `data/config.json`（代理列表 + 策略），不在 SQLite 里。支持 `scheme://user:pass@host:port`、`host:port:user:pass`、`user:pass@host:port`、`host:port` 四种输入格式（`parse_proxy` 归一化，无前缀按 `default_protocol`，默认 socks5）。策略：`round_robin`/`random`/`least_fail`、每请求重试数、连续失败自动禁用、后台 `_health_loop` 定时并发测速（出口 IP + 抖音可达性）并对恢复的代理自愈解禁。
 
+**内置 mihomo 内核（机场订阅）**：代理池只认 http/socks，机场的 vmess/trojan 等加密协议进不来，因此由 `MihomoManager`（`server.py` 内「内置 mihomo 内核」分区）把订阅落地成一个本地 socks5 端口再接进池子。它托管一个完整的子进程生命周期：`ensure_binary()` 按平台下载内核（`data/mihomo/`，`MIHOMO_DL_BASE`/`MIHOMO_VERSION` 可换源换版本，`MIHOMO_OFF=1` 全禁）→ `write_config()` 渲染 YAML → `_start_locked()`/`stop()`/`reload()` → 后台 `supervise()` 守护线程（每 5s，仿 `_health_loop`）。`ProxyManager.sync_managed()` 维护那条 `id="mihomo"` 的托管代理条目。后台 `/api/admin/mihomo` 读写，订阅存 `app_settings` 表的 `mihomo_sub_url`。改动时注意三条硬约束：① **隔离**——只绑 `127.0.0.1` + `allow-lan:false` + 随机高端口 + `authentication` 账密（连本机也要验证），保证同机其他项目连不进、不改系统代理、不开 TUN；② **fail-closed**——`fallback` 组必须挂一个永远失败的 `blackhole` 成员，否则空 provider 会让内核注入 COMPATIBLE(=DIRECT) 导致服务器真实 IP 泄漏；③ **exec 路径**——用 `MIHOMO_BIN.resolve()` 绝对路径且不传 `cwd`（`DATA_DIR` 是相对路径，传 cwd 会让相对二进制路径解析错）。子进程随服务启停（startup 起 `supervise`，shutdown 调 `stop`），pidfile 清理孤儿，务必单 worker。
+
 ### 分享页（`/s/{sid}`）
 
 把抖音链接变成"微信里点开就能看"的页面。规划见 [docs/分享页功能规划.md](docs/分享页功能规划.md)。
@@ -57,13 +71,19 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 播放走三级降级：浏览器直连 CDN → `/api/video/{vid}` 服务器代理 → 微信内引导"用浏览器打开"。每次降级上报 `fallback` 埋点，**这是服务器带宽成本的核心监控指标**。
 
-**域名池**：`SHARE_DOMAINS`（逗号分隔）配置分享专用域名，`_share_origin()` 轮换分配给新链接；短码与域名解耦，某域名被微信封了在后台停用即可，存量链接换域名照样打开。主站域名与分享域名要物理隔离——分享域名被封是日常，主站被牵连是灾难。
+**域名池**：`_share_origin()` 给新链接分配域名，优先级为 **后台主域名（`app_settings.share_primary_domain`，即时生效不重启）→ `SHARE_DOMAINS` 环境变量域名池（轮换）→ 请求来源**。短码与域名解耦，某域名被微信封了在后台停用即可（`share_domains_off` 也对主域名生效，会自动退回池子/来源），存量链接换域名照样打开。主站域名与分享域名要物理隔离——分享域名被封是日常，主站被牵连是灾难。
 
 **微信 JS-SDK**：`/api/wx/jssdk` 出签名，未配置公众号时返回 `enabled:false`，前端静默降级到微信默认卡片。`jsapi_ticket` **存 app_settings 表**（全局唯一 + 有频次上限，存内存会导致多 worker 互相顶掉）。这里的出站请求**刻意不走 `open_url()`**：公众号要求服务器出口 IP 在白名单内，走代理反而失败。
 
 **海报**在前端用 canvas 合成（封面走 CDN 的 `ACAO:*` 跨域绘制，二维码用同源 PNG——SVG 在部分内核会污染画布导致 `toBlob` 抛 SecurityError），服务器同样不参与、不落地。微信封图片远少于封链接，海报是链接被封时的传播兜底。
 
-### 两套独立的计量体系
+### 滑块验证码与 `pass_token` 门禁
+
+自研的防机器人链路（无 Pillow、无第三方库）：`_png()` 是手写的极简 PNG 编码器（stdlib `zlib`+`struct`），`make_captcha()` 服务端生成带缺口的背景图。**缺口坐标只存在服务端 `_captchas` 与像素里**，绝不出现在响应体中——抓包拿不到答案，改这段时别把坐标漏进返回值。`verify_captcha()` 校验落点 + 行为轨迹 + PoW（`POW_BITS=14`，抬高批量自动化成本）+ 蜜罐字段。
+
+关键耦合：**`/api/parse` 硬性要求一个一次性 `pass_token`**（`issue_pass()` 签发 → `consume_pass()` 消费，缺则必拒）。因此任何新的网页端解析入口都要先走滑块拿令牌；而开放 API `/api/v1/*` 用 API Key 计费，**不经过**这套门禁。验证码接口本身有 `_captcha_rate_ok()` 限频，防的是生成图片的 CPU-DoS。
+
+
 
 - **网页免费配额**：`usage_daily` 表按 subject 计数，登录用户按 `user:{id}`（`FREE_USER_DAILY`），匿名按 `ip:` + 前端指纹 `fp:`（取最大值，`FREE_ANON_DAILY`）。仅解析**成功**才 `reserve_quota`。
 - **开放 API 计费**（分为单位）：`try_reserve()` 用带条件的 `UPDATE ... WHERE balance_cents>=?` 做原子预扣，`api_settle()` 成功计入 spent/calls、失败退款并写 `api_logs`。`/api/v1/jobs` 提交后在 **daemon 线程**里跑 `_run_job`，客户端轮询 `/api/v1/jobs/{id}`；结果每 5 条落一次库以免 O(n²) 序列化。
@@ -90,4 +110,4 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 
 ## 参考文档
 
-`docs/产品文档.md`：解析方案的实测记录、抖音六层限制机制与代理池对策。`docs/软件介绍.md`：功能全貌与架构概述。`docs/分享页功能规划.md`：分享页的产品方案、微信兼容专项与待实测清单。`docs/商业化与产品规划.md`：三视角商业化方案。
+`docs/产品文档.md`：解析方案的实测记录、抖音六层限制机制与代理池对策。`docs/软件介绍.md`：功能全貌与架构概述。`docs/分享页功能规划.md`：分享页的产品方案、微信兼容专项与待实测清单。`docs/商业化与产品规划.md`：三视角商业化方案。`docs/机场代理接入.md`：机场订阅（vmess/trojan 等）无法直接入池，用 mihomo 边车落地成本地 socks5 端口再加进代理池的部署方案。

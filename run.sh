@@ -19,6 +19,6 @@ if [ ! -d "$VENV" ]; then
   "$VENV/bin/pip" install --quiet -r requirements.txt
 fi
 
-echo "▶ 启动服务：http://127.0.0.1:$PORT   （管理后台 /admin）"
+echo "▶ 启动服务：http://127.0.0.1:$PORT   （管理后台 /admin_d）"
 echo "  管理密码：${ADMIN_PASSWORD:-douyin-admin（默认，生产请用 ADMIN_PASSWORD 覆盖）}"
 exec "$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port "$PORT"

@@ -578,8 +578,8 @@ async function setupWxShare(){
     signature:cfg.signature, jsApiList:['updateAppMessageShareData','updateTimelineShareData']});
   wx.ready(() => {
     const opt = {
-      title: S.title.slice(0, 40),
-      desc: '@' + (S.author || '抖音创作者') + ' 的作品 · 点开直接看，无需安装 App',
+      title: (S.title || '抖音作品').slice(0, 40),        // 标题=抖音文案，与卡片抓取一致
+      desc: '@' + (S.author || '抖音创作者') + ' 的抖音作品 · 点开即可观看，无需安装 App',
       link: S.url || location.href,
       imgUrl: S.cover || (ORIGIN + '/og.svg'),
     };

@@ -15,15 +15,19 @@
 环境变量:  ADMIN_PASSWORD  管理后台密码（默认 douyin-admin，生产务必修改）
 """
 
+import gzip
 import hashlib
 import hmac
 import io
 import json
 import os
+import platform
 import random
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -38,6 +42,10 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------- 常量与存储
+
+# 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
+# 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
+APP_VERSION = "1.2.0"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -723,6 +731,34 @@ class ProxyManager:
             self.settings[key] = val
             self._save()
 
+    def sync_managed(self, url: Optional[str], enabled: bool,
+                     note: str = "内置机场加速（mihomo）"):
+        """维护唯一一条「托管」代理条目（内置 mihomo 落地的本地端口）。
+        url=None 时移除该条目；否则 upsert 并按 enabled 启停。与用户手动加的代理隔离。"""
+        with self._lock:
+            m = next((p for p in self.proxies if p.get("managed")), None)
+            if url is None:
+                if m:
+                    self.proxies = [p for p in self.proxies if not p.get("managed")]
+                    self._save()
+                return
+            if m:
+                changed = (m["url"] != url) or (m["enabled"] != enabled)
+                m["url"], m["note"] = url, note
+                m["enabled"] = enabled
+                if changed:
+                    m["banned"] = False
+                    m["banned_reason"] = None
+            else:
+                self.proxies.append({
+                    "id": "mihomo", "url": url, "enabled": enabled, "managed": True,
+                    "auto_off": False, "note": note, "added_at": int(time.time()),
+                    "ok": 0, "fail": 0, "last_used": None, "last_ok": None,
+                    "latency_ms": None, "exit_ip": None, "douyin_ok": None,
+                    "banned": False, "banned_at": None, "banned_reason": None,
+                })
+            self._save()
+
     # ---- 选择与打点 ----
     @property
     def force_proxy(self) -> bool:
@@ -807,6 +843,314 @@ class ProxyManager:
 
 
 proxy_mgr = ProxyManager()
+
+
+# ---------------------------------------------------------------- 内置 mihomo 内核（机场订阅）
+#
+# 机场订阅里是 vmess/vless/trojan 等加密协议，本项目出站层（urllib+PySocks）不会解，
+# 无法直接进代理池。这里内置一个 mihomo（Clash.Meta 内核）子进程：吃订阅 → 在本地
+# 落地成一个 socks5 端口 → 作为一条「托管」代理喂给代理池。多节点测速/切换由 mihomo 负责。
+#
+# 隔离底线（保证只有本项目能用、绝不影响同服务器其他项目）：
+#   · 不设任何系统代理环境变量、不开 TUN/透明代理 → 别的项目联网完全无感
+#   · 只绑 127.0.0.1 + allow-lan:false      → 外部机器连不到
+#   · 随机高位端口 + 账号密码鉴权 + skip-auth-prefixes 置空（本机也必须带凭证）
+#                                           → 同机别的进程即使连到端口也被拒
+#   · 子进程只写 data/mihomo/，以本服务同一用户运行，不碰别的项目文件
+#
+# 默认关闭：只有在后台配置了订阅 URL 后才下载内核并启动。单 worker 运行前提下才安全
+# （多 worker 会重复拉起子进程），本项目本就要求单 worker。
+
+MIHOMO_DIR = DATA_DIR / "mihomo"
+MIHOMO_BIN = MIHOMO_DIR / "mihomo"
+MIHOMO_CFG = MIHOMO_DIR / "config.yaml"
+MIHOMO_PID = MIHOMO_DIR / "mihomo.pid"
+MIHOMO_LOG = MIHOMO_DIR / "run.log"
+MIHOMO_VERSION = os.environ.get("MIHOMO_VERSION", "v1.18.10")
+# 国内服务器连不上 github 时，用 MIHOMO_DL_BASE 换镜像（形如 .../releases/download）
+MIHOMO_DL_BASE = os.environ.get(
+    "MIHOMO_DL_BASE", "https://github.com/MetaCubeX/mihomo/releases/download").rstrip("/")
+MIHOMO_OFF = os.environ.get("MIHOMO_OFF", "").lower() in ("1", "true", "yes")
+
+
+def _mihomo_asset() -> str:
+    """按当前平台拼 mihomo release 资源名。"""
+    system = platform.system().lower()          # linux / darwin
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        arch = "amd64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    else:
+        raise RuntimeError(f"不支持的 CPU 架构：{machine}")
+    if system not in ("linux", "darwin"):
+        raise RuntimeError(f"不支持的系统：{system}")
+    # linux-amd64 用 compatible 变体，兼容不支持 x86-64-v3 指令集的老 CPU
+    if system == "linux" and arch == "amd64":
+        return f"mihomo-linux-amd64-compatible-{MIHOMO_VERSION}.gz"
+    return f"mihomo-{system}-{arch}-{MIHOMO_VERSION}.gz"
+
+
+_MIHOMO_CFG_TMPL = """\
+# 由 server.py 自动生成，请勿手改（改后会被覆盖）。含订阅 token，权限 600。
+mixed-port: {port}
+bind-address: 127.0.0.1
+allow-lan: false
+authentication:
+  - "{user}:{password}"
+skip-auth-prefixes: []
+tun:
+  enable: false
+mode: rule
+log-level: warning
+# 一个永远连不通的占位节点：保证 auto 组永不为空，从而阻止 mihomo 注入
+# COMPATIBLE(=DIRECT) 兜底节点。机场无可用节点时流量落到它 → 直接失败（fail-closed），
+# 绝不退回服务器真实 IP 直连——这是本项目「绝不暴露服务器 IP」底线在 mihomo 层的落实。
+proxies:
+  - name: blackhole
+    type: socks5
+    server: 127.0.0.1
+    port: 1
+proxy-providers:
+  jichang:
+    type: http
+    url: "{sub_url}"
+    path: ./providers/jichang.yaml
+    interval: 3600
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+proxy-groups:
+  # fallback：按顺序选第一个「健康」的节点，机场节点全挂时只剩 blackhole → 失败。
+  # 不用 url-test：空 provider 的 url-test 会被注入 COMPATIBLE 直连节点而漏 IP。
+  - name: auto
+    type: fallback
+    use: [jichang]
+    proxies: [blackhole]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+rules:
+  - MATCH,auto
+"""
+
+
+class MihomoManager:
+    """内置 mihomo 子进程的下载、配置、启停与守护。线程安全。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
+        self._state = "stopped"        # stopped/downloading/starting/running/error
+        self._last_error = ""
+        self._next_try = 0.0           # 失败退避：下次允许启动的时间戳
+
+    # ---- 凭证与本地代理地址（首次生成后持久化）----
+    def _creds(self) -> tuple[str, str, str]:
+        port = app_setting("mihomo_port")
+        user = app_setting("mihomo_user")
+        pw = app_setting("mihomo_pass")
+        if not (port and user and pw):
+            port = str(random.randint(20000, 60000))
+            user = "dy" + secrets.token_hex(3)
+            pw = secrets.token_hex(8)
+            set_app_setting("mihomo_port", port)
+            set_app_setting("mihomo_user", user)
+            set_app_setting("mihomo_pass", pw)
+        return port, user, pw
+
+    def proxy_url(self) -> str:
+        port, user, pw = self._creds()
+        return f"socks5://{user}:{pw}@127.0.0.1:{port}"
+
+    def sub_url(self) -> str:
+        return (app_setting("mihomo_sub_url") or "").strip()
+
+    # ---- 二进制 ----
+    def ensure_binary(self):
+        if MIHOMO_BIN.exists() and os.access(MIHOMO_BIN, os.X_OK):
+            return
+        MIHOMO_DIR.mkdir(parents=True, exist_ok=True)
+        asset = _mihomo_asset()
+        url = f"{MIHOMO_DL_BASE}/{MIHOMO_VERSION}/{asset}"
+        gz = MIHOMO_DIR / asset
+        self._state = "downloading"
+        req = urlreq.Request(url, headers={"User-Agent": "douyin-dl"})
+        with urlreq.urlopen(req, timeout=180) as r, open(gz, "wb") as f:
+            shutil.copyfileobj(r, f)
+        with gzip.open(gz, "rb") as fi, open(MIHOMO_BIN, "wb") as fo:
+            shutil.copyfileobj(fi, fo)
+        os.chmod(MIHOMO_BIN, 0o755)
+        try:
+            gz.unlink()
+        except OSError:
+            pass
+
+    # ---- 配置 ----
+    def write_config(self):
+        MIHOMO_DIR.mkdir(parents=True, exist_ok=True)
+        port, user, pw = self._creds()
+        cfg = _MIHOMO_CFG_TMPL.format(port=port, user=user, password=pw,
+                                      sub_url=self.sub_url())
+        MIHOMO_CFG.write_text(cfg, "utf-8")
+        try:
+            os.chmod(MIHOMO_CFG, 0o600)          # 含订阅 token
+        except OSError:
+            pass
+
+    # ---- 进程 ----
+    @staticmethod
+    def _alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    def _kill_stale(self):
+        """清理上一次残留的 mihomo（防孤儿/端口占用）。"""
+        if not MIHOMO_PID.exists():
+            return
+        try:
+            pid = int(MIHOMO_PID.read_text().strip())
+        except (ValueError, OSError):
+            MIHOMO_PID.unlink(missing_ok=True)
+            return
+        if self._proc and self._proc.pid == pid:
+            return
+        if self._alive(pid):
+            try:
+                os.kill(pid, 15)
+                for _ in range(20):
+                    if not self._alive(pid):
+                        break
+                    time.sleep(0.1)
+                if self._alive(pid):
+                    os.kill(pid, 9)
+            except OSError:
+                pass
+        MIHOMO_PID.unlink(missing_ok=True)
+
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _start_locked(self):
+        if not self.sub_url() or self.running():
+            return
+        self.ensure_binary()
+        self.write_config()
+        self._kill_stale()
+        self._state = "starting"
+        logf = open(MIHOMO_LOG, "ab", buffering=0)
+        # 用绝对路径：DATA_DIR 可能是相对路径，exec 不受进程 cwd 影响
+        self._proc = subprocess.Popen(
+            [str(MIHOMO_BIN.resolve()), "-d", str(MIHOMO_DIR.resolve())],
+            stdout=logf, stderr=logf,
+        )
+        MIHOMO_PID.write_text(str(self._proc.pid))
+        time.sleep(1.5)
+        if self.running():
+            self._state = "running"
+            self._last_error = ""
+        else:
+            self._state = "error"
+            self._last_error = self._log_tail() or f"mihomo 启动即退出（码 {self._proc.returncode}）"
+            self._next_try = time.time() + 30
+
+    def _log_tail(self, n: int = 500) -> str:
+        try:
+            data = MIHOMO_LOG.read_bytes()[-n:]
+            return data.decode("utf-8", "replace").strip()
+        except OSError:
+            return ""
+
+    def stop(self):
+        with self._lock:
+            if self._proc and self._proc.poll() is None:
+                try:
+                    self._proc.terminate()
+                    self._proc.wait(timeout=5)
+                except (subprocess.TimeoutExpired, OSError):
+                    try:
+                        self._proc.kill()
+                    except OSError:
+                        pass
+            self._proc = None
+            self._kill_stale()
+            self._state = "stopped"
+
+    def reload(self):
+        """订阅或凭证变更后：有订阅则重建配置并重启，无订阅则停掉。"""
+        with self._lock:
+            if not self.sub_url():
+                self._next_try = 0
+        if not self.sub_url():
+            self.stop()
+            proxy_mgr.sync_managed(None, False)
+            return
+        self.stop()
+        with self._lock:
+            self._next_try = 0
+            try:
+                self._start_locked()
+            except Exception as e:            # noqa: BLE001 下载/启动失败不能崩主服务
+                self._state = "error"
+                self._last_error = str(e)
+                self._next_try = time.time() + 30
+        proxy_mgr.sync_managed(self.proxy_url(), self.running())
+
+    def _tick(self):
+        sub = self.sub_url()
+        if not sub:
+            if self.running():
+                self.stop()
+            proxy_mgr.sync_managed(None, False)
+            return
+        with self._lock:
+            if not self.running() and time.time() >= self._next_try:
+                try:
+                    self._start_locked()
+                except Exception as e:        # noqa: BLE001
+                    self._state = "error"
+                    self._last_error = str(e)
+                    self._next_try = time.time() + 30
+        proxy_mgr.sync_managed(self.proxy_url(), self.running())
+
+    def supervise(self):
+        while True:
+            time.sleep(5)
+            if MIHOMO_OFF:
+                continue
+            try:
+                self._tick()
+            except Exception as e:            # noqa: BLE001 守护线程绝不能挂
+                self._last_error = str(e)
+
+    def status(self) -> dict:
+        sub = self.sub_url()
+        managed = next((p for p in proxy_mgr.proxies if p.get("managed")), None)
+        return {
+            "enabled": bool(sub),
+            "sub_url_masked": _mask_secret(sub) if sub else "",
+            "state": self._state,
+            "running": self.running(),
+            "binary_ready": MIHOMO_BIN.exists() and os.access(MIHOMO_BIN, os.X_OK),
+            "version": MIHOMO_VERSION,
+            "last_error": self._last_error[-300:],
+            "exit_ip": managed.get("exit_ip") if managed else None,
+            "douyin_ok": managed.get("douyin_ok") if managed else None,
+            "latency_ms": managed.get("latency_ms") if managed else None,
+        }
+
+
+def _mask_secret(s: str) -> str:
+    """打码：保留头尾，中间星号（用于订阅 URL/token 回显）。"""
+    if len(s) <= 12:
+        return s[:2] + "***" + s[-2:] if len(s) > 4 else "***"
+    return s[:18] + "***" + s[-6:]
+
+
+mihomo_mgr = MihomoManager()
 
 
 # ---------------------------------------------------------------- 应用设置 + 开放 API 计费
@@ -1002,7 +1346,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
 
 # ---------------------------------------------------------------- 工具函数
 
-app = FastAPI(title="抖音无水印下载器")
+app = FastAPI(title="抖音无水印下载器", version=APP_VERSION)
 
 
 class ApiError(Exception):
@@ -1277,8 +1621,14 @@ def _domains_off() -> set:
 
 
 def _share_origin(request: Request) -> str:
-    """给**新生成的分享链接**分配域名；未配置域名池时退回当前站点。"""
+    """给**新生成的分享链接**分配域名。
+    优先级：后台配置的主分享域名（app_settings.share_primary_domain）→ SHARE_DOMAINS
+    域名池（轮换）→ 当前请求来源。主域名让所有新链接固定落在同一个"微信可打开"的域名上，
+    无需改环境变量、后台即时生效；被标记封禁后自动退回域名池/请求来源。"""
     global _share_dom_rr
+    primary = app_setting("share_primary_domain", "").strip().rstrip("/")
+    if primary and primary not in _domains_off():
+        return primary
     pool = [d for d in SHARE_DOMAINS if d not in _domains_off()]
     if not pool:
         return _origin(request)
@@ -1558,7 +1908,9 @@ def _wx_ticket():
 def wx_jssdk(request: Request, url: str = ""):
     """给分享页签名。未配置公众号时返回 enabled=false，前端静默降级。"""
     # 先校验 URL 归属，再取 ticket：避免外站请求也能触发微信接口调用（有频次上限）
-    allowed = list(SHARE_DOMAINS) + [_origin(request)]
+    # 含后台主分享域名：反代头缺失（如 Cloudflare flexible SSL）导致 _origin 取错时仍能签名
+    primary = app_setting("share_primary_domain", "").strip().rstrip("/")
+    allowed = list(SHARE_DOMAINS) + [_origin(request)] + ([primary] if primary else [])
     page = (url or "").split("#")[0]
     if not any(page.startswith(a) for a in allowed):
         raise ApiError(403, "该 URL 不属于本站，拒绝签名")
@@ -2308,8 +2660,10 @@ def admin_share_config(request: Request):
     _require_admin(request)
     off = _domains_off()
     return {
+        "primary_domain": app_setting("share_primary_domain", ""),
         "domains": [{"url": d, "enabled": d not in off} for d in SHARE_DOMAINS],
-        "env_hint": "分享域名通过环境变量 SHARE_DOMAINS 配置（逗号分隔），重启生效",
+        "env_hint": "主分享域名在此填写即时生效（无需重启）；额外的备用域名池仍通过环境变量 "
+                    "SHARE_DOMAINS 配置（逗号分隔，重启生效）。",
         "wx": {"appid": app_setting("wx_appid"),
                "configured": bool(app_setting("wx_appid") and app_setting("wx_secret"))},
     }
@@ -2319,11 +2673,17 @@ class ShareConfigBody(BaseModel):
     wx_appid: Optional[str] = None
     wx_secret: Optional[str] = None
     toggle_domain: Optional[str] = None
+    primary_domain: Optional[str] = None
 
 
 @app.post("/api/admin/share-config")
 def admin_set_share_config(body: ShareConfigBody, request: Request):
     _require_admin(request)
+    if body.primary_domain is not None:
+        d = body.primary_domain.strip().rstrip("/")
+        if d and not d.startswith(("http://", "https://")):
+            d = "https://" + d                 # 容错：只填了域名就补 https
+        set_app_setting("share_primary_domain", d)
     if body.wx_appid is not None:
         set_app_setting("wx_appid", body.wx_appid.strip())
     if body.wx_secret is not None and body.wx_secret.strip():
@@ -2335,6 +2695,33 @@ def admin_set_share_config(body: ShareConfigBody, request: Request):
         off.symmetric_difference_update({body.toggle_domain})
         set_app_setting("share_domains_off", json.dumps(sorted(off)))
     return admin_share_config(request)
+
+
+# ---- 内置 mihomo（机场加速）----
+
+@app.get("/api/admin/mihomo")
+def admin_mihomo(request: Request):
+    _require_admin(request)
+    return mihomo_mgr.status()
+
+
+class MihomoBody(BaseModel):
+    sub_url: Optional[str] = None        # 填/改订阅 URL（空串=停用并清除）
+    action: Optional[str] = None         # start / stop / restart
+
+
+@app.post("/api/admin/mihomo")
+def admin_set_mihomo(body: MihomoBody, request: Request):
+    _require_admin(request)
+    if body.sub_url is not None:
+        set_app_setting("mihomo_sub_url", body.sub_url.strip())
+        mihomo_mgr.reload()               # 重建配置并按有无订阅启停
+    elif body.action == "stop":
+        set_app_setting("mihomo_sub_url", "")
+        mihomo_mgr.reload()
+    elif body.action in ("start", "restart"):
+        mihomo_mgr.reload()
+    return mihomo_mgr.status()
 
 
 # ---- 用户自助 API 密钥（登录后）----
@@ -2385,6 +2772,16 @@ def _health_loop():
 @app.on_event("startup")
 def _start_health():
     threading.Thread(target=_health_loop, daemon=True).start()
+    threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
+
+
+@app.on_event("shutdown")
+def _stop_mihomo():
+    # 关服务时杀掉内置 mihomo 子进程，避免留下孤儿进程占用端口
+    try:
+        mihomo_mgr.stop()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- 页面 + SEO
@@ -2536,22 +2933,26 @@ def _share_head(view: Optional[dict], origin: str) -> str:
         return ('<title>内容不可用 · 抖音分享</title>\n'
                 '<meta name="robots" content="noindex,nofollow">\n'
                 '<meta name="theme-color" content="#0E1013">')
-    title = view["title"][:60]
-    author = view["author"] or "抖音作者"
-    card_title = f"{title} · @{author}"
-    desc = f"由 @{author} 发布的抖音作品，点开即可观看，无需安装 App。"
+    # 卡片大标题 = 抖音文案原文（与抖音里一模一样）；作者放进描述行。
+    # 微信抓取网页 meta 生成卡片：title/og:title→标题，og:image→缩略图，description→摘要。
+    # 卡片底部的"来源/抬头"由微信按域名自动填（域名或其绑定的公众号名称），网页无法自定义。
+    title = (view["title"] or "抖音作品")[:60]
+    author = view["author"] or "抖音创作者"
+    desc = f"@{author} 的抖音作品 · 点开即可观看，无需安装 App"
     cover = view["cover"] or f"{origin}/og.svg"
-    return f'''<title>{esc(card_title)}</title>
+    return f'''<title>{esc(title)}</title>
 <meta name="description" content="{esc(desc)}">
 <meta name="robots" content="noindex,nofollow">
 <meta name="theme-color" content="#0E1013">
 <meta property="og:type" content="video.other">
-<meta property="og:title" content="{esc(card_title)}">
+<meta property="og:site_name" content="@{esc(author)}">
+<meta property="og:title" content="{esc(title)}">
 <meta property="og:description" content="{esc(desc)}">
 <meta property="og:image" content="{esc(cover)}">
 <meta property="og:url" content="{esc(view['url'])}">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="{esc(card_title)}">
+<meta name="twitter:title" content="{esc(title)}">
+<meta name="twitter:description" content="{esc(desc)}">
 <meta name="twitter:image" content="{esc(cover)}">'''
 
 
@@ -2765,5 +3166,5 @@ def og_image():
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True, "proxies": len(proxy_mgr.proxies),
+    return {"ok": True, "version": APP_VERSION, "proxies": len(proxy_mgr.proxies),
             "enabled": sum(p["enabled"] for p in proxy_mgr.proxies)}
