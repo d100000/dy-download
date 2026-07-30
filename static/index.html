@@ -719,7 +719,7 @@ GET /api/v1/jobs/job_xxx
   <div class="faq-list">
     <details class="faq-item reveal">
       <summary data-i18n="faq_q1">这个抖音下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。媒体直连抖音时，抖音会收到你的 IP 等网络信息与浏览器信息。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。浏览器直连播放或图片时，抖音会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -788,7 +788,7 @@ const I18N = {
     faq_title:"FAQ", faq_lead:"Douyin no-watermark download & sharing: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — or create a share page in one click and send it to friends on WeChat, who can watch it without installing Douyin. No Douyin login is required; basic parsing needs no site account or app installation.",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
-    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Browser-direct media requests disclose your IP and browser information to Douyin.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy.",
     faq_q2:"Do I need to log in or install anything?", faq_a2:"No Douyin login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
@@ -991,7 +991,7 @@ function renderBatch(count, fails){
 async function dlBatchOne(i, btn){
   const d = _batch[i]; if (!d) return;
   await browserDownload(d.video.url, d.video.filename, btn,
-    d.video.download_url || d.video.proxy_url);
+    d.video.download_url || d.video.proxy_url, true);
 }
 async function downloadAllVideos(){
   const vids = _batch.filter(d => d.kind !== 'note');
@@ -999,8 +999,10 @@ async function downloadAllVideos(){
   try {
     for (let i=0; i<vids.length; i++){
       btn.textContent = `下载中 ${i+1}/${vids.length}…`;
-      await browserDownload(vids[i].video.url, vids[i].video.filename, null,
-        vids[i].video.download_url || vids[i].video.proxy_url);
+      const ok = await browserDownload(
+        vids[i].video.url, vids[i].video.filename, null,
+        vids[i].video.download_url || vids[i].video.proxy_url, true);
+      if (!ok) break;
       await new Promise(r=>setTimeout(r,500));
     }
   } finally {
@@ -1188,9 +1190,36 @@ function wireAvatar(root, itemId){
   link.addEventListener('mouseleave', () => { clearTimeout(_hoverTimer); hideTip(); });
 }
 
-function clickDownload(url, filename){
+function downloadTarget(onError){
+  const id = 'nativeDownloadTarget';
+  let frame = document.getElementById(id);
+  if (!frame){
+    frame = document.createElement('iframe');
+    frame.id = id;
+    frame.name = id;
+    frame.hidden = true;
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+  frame.onload = () => {
+    try {
+      const href = frame.contentWindow?.location?.href || '';
+      if (!href.includes('/api/video/')) return;
+      const text = (frame.contentDocument?.body?.textContent || '').trim();
+      let message = '';
+      try { message = JSON.parse(text).error || ''; } catch {}
+      onError?.(message || '下载未能启动，请稍后重试');
+    } catch {}
+  };
+  return frame.name;
+}
+
+function clickDownload(url, filename, isolated=false, onError=null){
   const a = document.createElement('a');
-  a.href = url; a.download = filename || 'download'; a.rel = 'noopener';
+  a.href = url;
+  if (isolated) a.target = downloadTarget(onError);
+  else a.download = filename || 'download';
+  a.style.display = 'none';
   document.body.appendChild(a); a.click(); a.remove();
 }
 
@@ -1198,41 +1227,163 @@ function downloadFallbackURL(url, filename){
   if (!url) return '';
   try {
     const u = new URL(url, location.href);
-    if (u.origin !== location.origin) return '';
+    if (u.origin !== location.origin || !u.pathname.startsWith('/api/video/')) return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;
   } catch { return ''; }
 }
 
-/* 下载优先浏览器直连，CORS/重定向不允许保存时自动切同源流式接口。
-   兜底只转发字节并设置 Content-Disposition，不会在服务器落地视频。 */
-async function browserDownload(url, filename, btn, fallbackUrl){
-  const old = btn ? btn.textContent : null;
-  if (btn){ btn.textContent = '下载中…'; btn.style.pointerEvents='none'; }
+async function downloadResponseError(resp){
+  let message = '';
   try {
-    const resp = await fetch(url, {mode:'cors'});
-    if(!resp.ok) throw new Error('bad');
+    const data = await resp.json();
+    message = typeof data.error === 'string' ? data.error : '';
+  } catch {}
+  if (message) return message;
+  if (resp.status === 401 || resp.status === 403)
+    return '下载地址已过期，请重新解析后再试';
+  if (resp.status === 429)
+    return '下载请求过于频繁，请稍后再试';
+  return '下载线路暂时不可用（HTTP ' + resp.status + '），请稍后重试';
+}
+
+async function responseBlobWithProgress(resp, onProgress){
+  const type = (resp.headers.get('content-type') || 'application/octet-stream')
+    .split(';', 1)[0];
+  const total = Number(resp.headers.get('content-length')) || 0;
+  if (!resp.body || !resp.body.getReader){
     const blob = await resp.blob();
-    const obju = URL.createObjectURL(blob);
-    clickDownload(obju, filename);
-    setTimeout(()=>URL.revokeObjectURL(obju), 5000);
-  } catch(e){
-    const fallback = downloadFallbackURL(fallbackUrl, filename);
-    if (fallback){
-      clickDownload(fallback, filename);
-      showOk('抖音直连受限，已切换兼容下载线路');
-    } else {
-      window.open(url, '_blank', 'noopener'); // 老缓存无兜底地址时仍保留原行为
+    onProgress?.(blob.size, total || blob.size);
+    return blob;
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  while (true){
+    const {done, value} = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    onProgress?.(loaded, total);
+  }
+  return new Blob(chunks, {type});
+}
+
+function downloadProgress(loaded, total){
+  if (total) return '下载中 ' + Math.min(100, Math.round(loaded / total * 100)) + '%';
+  return '已下载 ' + (loaded / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function fetchAssetBlob(source, onProgress){
+  const resp = await fetch(source, {
+    mode: 'cors', credentials: 'omit', cache: 'no-store',
+  });
+  if (!resp.ok) throw new Error(await downloadResponseError(resp));
+  const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+  if (contentType.startsWith('text/') || contentType.includes('json')
+      || contentType.includes('html')){
+    try { await resp.body?.cancel(); } catch {}
+    throw new Error('下载线路返回了无效内容，请稍后重试');
+  }
+  return responseBlobWithProgress(resp, onProgress);
+}
+
+async function preflightVideoDownload(source){
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++){
+    const controller = typeof AbortController === 'function'
+      ? new AbortController() : null;
+    try {
+      const resp = await fetch(source, {
+        method: 'GET',
+        headers: {'Range': 'bytes=0-0'},
+        mode: 'same-origin',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: controller?.signal,
+      });
+      if (!resp.ok){
+        const error = new Error(await downloadResponseError(resp));
+        error.retryable = resp.status >= 500;
+        throw error;
+      }
+      if (resp.status !== 200 && resp.status !== 206){
+        const error = new Error('下载线路返回了异常状态，请稍后重试');
+        error.retryable = true;
+        throw error;
+      }
+      const contentType = (resp.headers.get('content-type') || '')
+        .split(';', 1)[0].trim().toLowerCase();
+      if (!(contentType.startsWith('video/')
+          || contentType === 'application/mp4'
+          || contentType === 'application/octet-stream'
+          || contentType === 'binary/octet-stream')){
+        const error = new Error('下载线路返回了无效内容，请稍后重试');
+        error.retryable = true;
+        throw error;
+      }
+      if (resp.status === 206){
+        const contentRange = resp.headers.get('content-range') || '';
+        const length = Number(resp.headers.get('content-length')) || 0;
+        if (!/^bytes 0-0\/(?:\d+|\*)$/i.test(contentRange) || length > 65536){
+          const error = new Error('下载线路未正确响应 Range，请稍后重试');
+          error.retryable = true;
+          throw error;
+        }
+        await resp.arrayBuffer();
+      } else {
+        try { await resp.body?.cancel(); } catch {}
+        controller?.abort();
+      }
+      return;
+    } catch (error) {
+      controller?.abort();
+      lastError = error;
+      if (attempt === 1 || error.retryable === false) break;
+      await new Promise(resolve => setTimeout(resolve, 350));
     }
+  }
+  throw lastError || new Error('下载失败，请稍后重试');
+}
+
+/* 视频直接走同源签名流，绕开抖音首跳 302 的 CORS 限制；图片仍由浏览器直连。
+   视频只做 1 字节预检，随后交给浏览器原生流式保存，避免把整段视频堆进内存。
+   下载目标隔离在隐藏 iframe，错误不会覆盖当前页面。 */
+async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false){
+  const oldHTML = btn ? btn.innerHTML : null;
+  const oldDisabled = btn ? btn.disabled : false;
+  if (btn){ btn.textContent = '下载中…'; btn.disabled = true; }
+  try {
+    const fallback = downloadFallbackURL(fallbackUrl, filename);
+    if (requireFallback && !fallback)
+      throw new Error('下载地址已过期，请重新解析后再试');
+    if (fallback){
+      if (btn) btn.textContent = '检查下载线路…';
+      await preflightVideoDownload(fallback);
+      clickDownload(fallback, filename, true, showError);
+    } else {
+      const blob = await fetchAssetBlob(url, (loaded, total) => {
+        if (btn) btn.textContent = downloadProgress(loaded, total);
+      });
+      const obju = URL.createObjectURL(blob);
+      clickDownload(obju, filename);
+      setTimeout(()=>URL.revokeObjectURL(obju), 5000);
+    }
+    showOk('下载已开始，请查看浏览器下载列表');
+    return true;
+  } catch(error){
+    showError(error && error.message ? error.message : '下载失败，请稍后重试');
+    return false;
   } finally {
-    if (btn){ btn.textContent = old; btn.style.pointerEvents=''; }
+    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; }
   }
 }
 
 function downloadVideoItem(btn){
   const v = _videos[btn.dataset.itemId];
-  if (v) browserDownload(v.url, v.filename, btn, v.download_url || v.proxy_url);
+  if (v) browserDownload(
+    v.url, v.filename, btn, v.download_url || v.proxy_url, true);
 }
 
 function videoPlaySrc(v){
@@ -1261,7 +1412,7 @@ function videoHTML(d){
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '微信兼容线路' : '浏览器直连'}</span>
+        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '微信兼容线路' : '直连播放'}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
@@ -1276,9 +1427,9 @@ function videoHTML(d){
           <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>
           <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
-          <a class="ghost-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener">新窗口打开</a>
+          <a class="ghost-btn" href="${esc(d.video.proxy_url || d.video.alt_url || d.video.url)}" target="_blank" rel="noopener">新窗口播放</a>
         </div>
-        <div class="tip">播放优先浏览器直连；直连下载受限时自动切换本站流式转发，服务器不落地保存文件</div>
+        <div class="tip">播放优先浏览器直连；下载使用本站同源流式转发，服务器不落地保存文件</div>
       </div>
     </div>
   </div>`;

@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -1789,7 +1789,8 @@ def _raw_open(url: str, follow: bool, headers: dict, timeout: int, proxy: Option
 
 
 def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
-             timeout: int = 30):
+             timeout: int = 30, retry_http_statuses: tuple = (),
+             ban_on_auth_error: bool = True):
     """出站请求核心：一律经代理，失败自动转移。
 
     所有到抖音的服务器请求都走这里 —— **绝不服务器直连**，避免暴露服务器 IP。
@@ -1821,8 +1822,26 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             return r, p
         except urlerr.HTTPError as e:
             if e.code in (403, 401):                # 抖音封禁该代理 IP → 落库+禁用+换代理
-                proxy_mgr.mark_banned(p, f"抖音返回 {e.code}，IP 被封禁")
-                errors.append(f"{_proxy_public_label(p)} → 被封禁(HTTP {e.code})")
+                if ban_on_auth_error:
+                    proxy_mgr.mark_banned(p, f"抖音返回 {e.code}，IP 被封禁")
+                    errors.append(f"{_proxy_public_label(p)} → 被封禁(HTTP {e.code})")
+                else:
+                    # 媒体 CDN 的 401/403 也可能只针对当前资源/域名，不能据此永久封禁出口。
+                    errors.append(
+                        f"{_proxy_public_label(p)} → 媒体请求 HTTP {e.code}")
+                try:
+                    e.close()
+                except Exception:
+                    pass
+                continue
+            if e.code in retry_http_statuses:
+                # 代理网关也会生成 5xx；媒体请求应换出口验证，不能把故障代理记为健康。
+                # 同时不能累计连接失败：源站 429/5xx 可能只针对当前资源，避免毒死代理池。
+                errors.append(f"{_proxy_public_label(p)} → HTTP {e.code}")
+                try:
+                    e.close()
+                except Exception:
+                    pass
                 continue
             # 其他 4xx/5xx 是源站问题，不怪代理，直接上抛
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
@@ -2080,7 +2099,7 @@ def _play_api_alt(vid: str) -> str:
 
 
 def _video_download_url(vid: str, filename: str = "video.mp4") -> str:
-    """同源下载地址：直连下载受 CORS/Content-Disposition 限制时由服务器流式兜底。"""
+    """同源下载地址：经 Range 预检后由浏览器原生流式保存。"""
     exp, sig = _media_token("video", vid)
     return f"/api/video/{vid}?" + urlparse.urlencode({
         "exp": exp,
@@ -2256,7 +2275,7 @@ def _parse_item(kind: str, item_id: str) -> dict:
         "duration_ms": video.get("duration") or 0,
         "cover": cover_list[0] if cover_list else "",
         "video": {
-            "url": _play_api(vid),                    # 浏览器直连播放/下载（自行跟随 302）
+            "url": _play_api(vid),                    # 浏览器直连播放（自行跟随 302）
             "alt_url": _play_api_alt(vid),            # 备用抖音域名（线路顺序由前端按运行环境决定）
             "proxy_url": _video_proxy_url(vid),       # 同源签名流：微信优先，普通浏览器兜底
             "filename": f"{base}.mp4",
@@ -2368,11 +2387,19 @@ def _refresh_share(row: dict) -> dict:
                 (int(time.time()), row["id"]))
         row["status"] = "dead"
         return row
-    db_exec("UPDATE shares SET payload=?, cover=?, refreshed_at=?, status='ok' WHERE id=?",
-            (json.dumps(data, ensure_ascii=False), data.get("cover", ""),
+    vid = row.get("vid") or ""
+    if row["kind"] != "note":
+        play_url = ((data.get("video") or {}).get("url") or "")
+        match = re.search(r"[?&]video_id=([\w-]+)", play_url)
+        if match:
+            vid = match.group(1)
+    db_exec("UPDATE shares SET payload=?, cover=?, vid=?, refreshed_at=?, status='ok' "
+            "WHERE id=?",
+            (json.dumps(data, ensure_ascii=False), data.get("cover", ""), vid,
              int(time.time()), row["id"]))
     row["payload"] = json.dumps(data, ensure_ascii=False)
     row["cover"] = data.get("cover", "")
+    row["vid"] = vid
     row["status"] = "ok"
     return row
 
@@ -3451,6 +3478,66 @@ def export_xlsx(body: ExportBody):
                     headers={"Content-Disposition": _content_disposition(fname)})
 
 
+def _close_upstream(resp) -> None:
+    try:
+        resp.close()
+    except Exception:
+        pass
+
+
+def _open_video_upstream(vid: str, headers: dict):
+    """打开一个可信的视频响应；主线路异常时切到备用播放域名。"""
+    no_proxy_error = None
+    for upstream in (_play_api(vid), _play_api_alt(vid)):
+        resp = None
+        accepted = False
+        try:
+            resp, _ = open_url(
+                upstream,
+                headers=headers,
+                retry_http_statuses=(408, 425, 429, 500, 502, 503, 504),
+                ban_on_auth_error=False,
+            )
+            status = resp.status if hasattr(resp, "status") else resp.getcode()
+            if status not in (200, 206):
+                raise ValueError(f"unexpected video status {status}")
+
+            content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0]
+            content_type = content_type.strip().lower()
+            if not content_type or not (
+                content_type.startswith("video/")
+                or content_type in {
+                    "application/mp4",
+                    "application/octet-stream",
+                    "binary/octet-stream",
+                }
+            ):
+                raise ValueError(f"unexpected video content type {content_type}")
+
+            geturl = getattr(resp, "geturl", None)
+            final_url = geturl() if callable(geturl) else ""
+            if final_url and not _host_allowed(final_url):
+                raise ValueError("video redirect left the Douyin media allowlist")
+
+            accepted = True
+            return resp
+        except ApiError as exc:
+            if exc.status == 503:
+                no_proxy_error = exc
+                break
+        except urlerr.HTTPError as exc:
+            _close_upstream(exc)
+        except Exception:
+            pass
+        finally:
+            if resp is not None and not accepted:
+                _close_upstream(resp)
+
+    if no_proxy_error:
+        raise no_proxy_error
+    raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
+
+
 @app.get("/api/video/{vid}")
 def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
               dl: str = "", name: str = "video.mp4"):
@@ -3461,22 +3548,19 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
     if not _valid_single_range(range_header):
         raise ApiError(416, "仅支持单段 bytes Range 请求")
     lease = _media_lease(request)
-    upstream = f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
     extra = dict(CDN_HEADERS)
     if range_header:
         extra["Range"] = range_header
     try:
-        # 同源播放/下载线路（微信优先、普通浏览器兜底）：经代理，绝不直连暴露服务器 IP
-        resp, _ = open_url(upstream, headers=extra)
+        # 同源播放/下载线路：经代理，绝不直连暴露服务器 IP。
+        # 主播放域名被风控、返回网关页或临时 5xx 时，自动切换备用域名。
+        resp = _open_video_upstream(vid, extra)
     except ApiError:
         _media_release(lease)
         raise
-    except urlerr.HTTPError as e:
-        _media_release(lease)
-        raise ApiError(502, f"视频源返回 {e.code}，链接可能已过期，请重新解析")
     except Exception:
         _media_release(lease)
-        raise ApiError(502, "拉取视频失败，请重试")
+        raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
 
     status = resp.status if hasattr(resp, "status") else resp.getcode()
     headers = {
@@ -3498,7 +3582,7 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
 
 
 # 注：图集打包 ZIP 需服务器逐张下载再压缩，会走服务器 IP/带宽，
-# 与"下载走浏览器直连"的设计冲突，已改为前端逐张浏览器直连下载（downloadAll）。
+# 图集打包与"图片下载走浏览器直连"的设计冲突，已改为前端逐张下载（downloadAll）。
 
 
 # ---------------------------------------------------------------- 管理后台
@@ -4152,10 +4236,10 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
 
     ld = {
         "zh": {
-            "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。直连优先、签名流式兜底，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
-            "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "直连优先且不落地", "开发者 API"],
+            "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。播放直连、视频签名流式下载，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
+            "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "播放直连且媒体不落地", "开发者 API"],
             "faq": [
-                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；媒体直连时抖音会收到请求方网络与浏览器信息。"),
+                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；浏览器直连播放或图片时抖音会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录抖音账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
@@ -4169,10 +4253,10 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
                 ("下载或生成分享页", "一键下载无水印原片；或生成分享页发到微信。直接粘贴显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。")]),
         },
         "en": {
-            "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. It is browser-direct first with a signed streaming fallback, open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
-            "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Browser-direct (nothing stored)", "Developer API"],
+            "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. Playback is browser-direct while video downloads use a signed streaming route. It is open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
+            "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Direct playback with no media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Browser-direct media requests disclose network and browser information to Douyin."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
@@ -4257,6 +4341,8 @@ def index(request: Request):
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin))
                 .replace("{{ORIGIN}}", origin))
     resp = HTMLResponse(html)
+    resp.headers["Cache-Control"] = "private, no-store"
+    resp.headers["Pragma"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -4307,8 +4393,12 @@ def share_page(sid: str, request: Request):
     if row:
         row = dict(row)
         # 图集直链会过期：超过刷新窗口就按 item_id 重新解析（视频靠 vid 重拼，无需刷新）
-        if (_share_state(row) == "ok" and row["kind"] == "note"
-                and time.time() - (row["refreshed_at"] or 0) > SHARE_REFRESH_TTL):
+        should_refresh_note = (row["kind"] == "note"
+                               and time.time() - (row["refreshed_at"] or 0)
+                               > SHARE_REFRESH_TTL)
+        should_repair_video = row["kind"] != "note" and not row["vid"]
+        if (_share_state(row) == "ok"
+                and (should_refresh_note or should_repair_video)):
             row = _refresh_share(row)
         view = _share_view(row, origin)
         _share_event(request, sid, "view")
@@ -4322,7 +4412,11 @@ def share_page(sid: str, request: Request):
                 .replace("{{ORIGIN}}", origin)
                 .replace("{{WECHAT}}", "true" if _is_wechat(request) else "false")
                 .replace("{{SHARE_DATA}}", payload))
-    return HTMLResponse(html, status_code=200 if view else 404)
+    resp = HTMLResponse(html, status_code=200 if view else 404)
+    resp.headers["Cache-Control"] = "private, no-store"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Vary"] = "User-Agent"
+    return resp
 
 
 @app.get("/api-docs", response_class=HTMLResponse)
@@ -4476,7 +4570,7 @@ def llms_txt(request: Request):
     o = _origin(request)
     return f"""# 抖音无水印下载器（Douyin Downloader）
 
-> 免费、开源的抖音视频与图集**下载 + 分享**工具。粘贴抖音分享链接即可在线预览并下载无水印原片；也可生成分享页，好友无需安装抖音 App 即可观看。在微信聊天中直接粘贴会显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。媒体优先由浏览器直连，受限或微信内播放时使用带有效期授权的同源流式转发；本站不落地保存媒体文件。基础解析无需账号，站内账号与开发者 API 可选，永不接广告。
+> 免费、开源的抖音视频与图集**下载 + 分享**工具。粘贴抖音分享链接即可在线预览并下载无水印原片；也可生成分享页，好友无需安装抖音 App 即可观看。在微信聊天中直接粘贴会显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。普通浏览器播放与图片优先直连，视频下载和微信兼容播放使用带有效期授权的同源流式转发；本站不落地保存媒体文件。基础解析无需账号，站内账号与开发者 API 可选，永不接广告。
 
 ## 核心特性
 - 抖音视频无水印下载：解析分享链接，去除水印，下载原始清晰度视频。
@@ -4486,7 +4580,7 @@ def llms_txt(request: Request):
 - **免 App 观看**：接收方无需安装抖音、无需登录，微信内置浏览器直接播放。
 - **分享海报**：前端合成带二维码的海报图，长按保存后可发朋友圈；链接被拦截时的传播兜底。
 - 在线预览：下载前可直接在网页中预览播放。
-- 可靠媒体链路：浏览器直连优先，受限时走同源流式转发，本站不缓存、不留存。
+- 可靠媒体链路：播放与图片直连优先，视频下载走同源签名流式转发，本站不缓存、不留存。
 - 开源可审查、数据最小化：不保存媒体文件；免费额度和诊断只处理必要的用途化摘要、粗粒度环境与事件，保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；站内账号可选。
 - 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
 

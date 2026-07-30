@@ -376,7 +376,7 @@ function render(){
   <div class="bar"><div class="in">
     ${isNote
       ? `<button class="btn p" onclick="saveAll()">⬇ 保存全部图片</button>`
-      : `<button class="btn p" onclick="download()">⬇ 下载无水印原片</button>`}
+      : `<button class="btn p" onclick="download(this)">⬇ 下载无水印原片</button>`}
     <button class="btn g" onclick="shareToFriend()">↗ 分享给好友</button>
   </div></div>`;
 }
@@ -504,13 +504,13 @@ function startPlay(){
 }
 
 /* ---------------- 下载 ---------------- */
-function download(){
+function download(btn){
   const d = S.data || {};
   if (!d.video || !d.video.url) return;
   track('download');
   if (IS_WECHAT_UA){ showMask(); return; }
   browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
-    d.video.download_url || d.video.proxy_url);
+    btn, d.video.download_url || d.video.proxy_url, true);
 }
 function saveImage(url, name){
   track('download');
@@ -529,38 +529,183 @@ async function saveAll(){
   track('download');
   for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
 }
-function clickDownload(url, filename){
+function downloadTarget(onError){
+  const id = 'nativeDownloadTarget';
+  let frame = document.getElementById(id);
+  if (!frame){
+    frame = document.createElement('iframe');
+    frame.id = id;
+    frame.name = id;
+    frame.hidden = true;
+    frame.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(frame);
+  }
+  frame.onload = () => {
+    try {
+      const href = frame.contentWindow?.location?.href || '';
+      if (!href.includes('/api/video/')) return;
+      const text = (frame.contentDocument?.body?.textContent || '').trim();
+      let message = '';
+      try { message = JSON.parse(text).error || ''; } catch {}
+      onError?.(message || '下载未能启动，请稍后重试');
+    } catch {}
+  };
+  return frame.name;
+}
+function clickDownload(url, filename, isolated=false, onError=null){
   const a = document.createElement('a');
-  a.href = url; a.download = filename || 'download'; a.rel = 'noopener';
+  a.href = url;
+  if (isolated) a.target = downloadTarget(onError);
+  else a.download = filename || 'download';
+  a.style.display = 'none';
   document.body.appendChild(a); a.click(); a.remove();
 }
 function downloadFallbackURL(url, filename){
   if (!url) return '';
   try {
     const u = new URL(url, location.href);
-    if (u.origin !== location.origin) return '';
+    if (u.origin !== location.origin || !u.pathname.startsWith('/api/video/')) return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;
   } catch { return ''; }
 }
-async function browserDownload(url, filename, fallbackUrl){
-  toast('开始下载…');
+async function downloadResponseError(resp){
+  let message = '';
   try {
-    const resp = await fetch(url, {mode:'cors'});
-    if (!resp.ok) throw new Error('bad');
+    const data = await resp.json();
+    message = typeof data.error === 'string' ? data.error : '';
+  } catch {}
+  if (message) return message;
+  if (resp.status === 401 || resp.status === 403)
+    return '下载地址已过期，请刷新页面后再试';
+  if (resp.status === 429)
+    return '下载请求过于频繁，请稍后再试';
+  return '下载线路暂时不可用（HTTP ' + resp.status + '），请稍后重试';
+}
+async function responseBlobWithProgress(resp, onProgress){
+  const type = (resp.headers.get('content-type') || 'application/octet-stream')
+    .split(';', 1)[0];
+  const total = Number(resp.headers.get('content-length')) || 0;
+  if (!resp.body || !resp.body.getReader){
     const blob = await resp.blob();
-    const u = URL.createObjectURL(blob);
-    clickDownload(u, filename);
-    setTimeout(()=>URL.revokeObjectURL(u), 5000);
-  } catch {
-    const fallback = downloadFallbackURL(fallbackUrl, filename);
-    if (fallback){
-      clickDownload(fallback, filename);
-      toast('直连受限，已切换兼容下载线路');
-    } else {
-      window.open(url, '_blank', 'noopener');
+    onProgress?.(blob.size, total || blob.size);
+    return blob;
+  }
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  while (true){
+    const {done, value} = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    onProgress?.(loaded, total);
+  }
+  return new Blob(chunks, {type});
+}
+function downloadProgress(loaded, total){
+  if (total) return '下载中 ' + Math.min(100, Math.round(loaded / total * 100)) + '%';
+  return '已下载 ' + (loaded / 1024 / 1024).toFixed(1) + ' MB';
+}
+async function fetchAssetBlob(source, onProgress){
+  const resp = await fetch(source, {
+    mode: 'cors', credentials: 'omit', cache: 'no-store',
+  });
+  if (!resp.ok) throw new Error(await downloadResponseError(resp));
+  const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+  if (contentType.startsWith('text/') || contentType.includes('json')
+      || contentType.includes('html')){
+    try { await resp.body?.cancel(); } catch {}
+    throw new Error('下载线路返回了无效内容，请稍后重试');
+  }
+  return responseBlobWithProgress(resp, onProgress);
+}
+async function preflightVideoDownload(source){
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++){
+    const controller = typeof AbortController === 'function'
+      ? new AbortController() : null;
+    try {
+      const resp = await fetch(source, {
+        method: 'GET',
+        headers: {'Range': 'bytes=0-0'},
+        mode: 'same-origin',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        signal: controller?.signal,
+      });
+      if (!resp.ok){
+        const error = new Error(await downloadResponseError(resp));
+        error.retryable = resp.status >= 500;
+        throw error;
+      }
+      if (resp.status !== 200 && resp.status !== 206){
+        const error = new Error('下载线路返回了异常状态，请稍后重试');
+        error.retryable = true;
+        throw error;
+      }
+      const contentType = (resp.headers.get('content-type') || '')
+        .split(';', 1)[0].trim().toLowerCase();
+      if (!(contentType.startsWith('video/')
+          || contentType === 'application/mp4'
+          || contentType === 'application/octet-stream'
+          || contentType === 'binary/octet-stream')){
+        const error = new Error('下载线路返回了无效内容，请稍后重试');
+        error.retryable = true;
+        throw error;
+      }
+      if (resp.status === 206){
+        const contentRange = resp.headers.get('content-range') || '';
+        const length = Number(resp.headers.get('content-length')) || 0;
+        if (!/^bytes 0-0\/(?:\d+|\*)$/i.test(contentRange) || length > 65536){
+          const error = new Error('下载线路未正确响应 Range，请稍后重试');
+          error.retryable = true;
+          throw error;
+        }
+        await resp.arrayBuffer();
+      } else {
+        try { await resp.body?.cancel(); } catch {}
+        controller?.abort();
+      }
+      return;
+    } catch (error) {
+      controller?.abort();
+      lastError = error;
+      if (attempt === 1 || error.retryable === false) break;
+      await new Promise(resolve => setTimeout(resolve, 350));
     }
+  }
+  throw lastError || new Error('下载失败，请稍后重试');
+}
+async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false){
+  const oldHTML = btn ? btn.innerHTML : null;
+  const oldDisabled = btn ? btn.disabled : false;
+  if (btn){ btn.textContent = '下载中…'; btn.disabled = true; }
+  else toast('开始下载…');
+  try {
+    const fallback = downloadFallbackURL(fallbackUrl, filename);
+    if (requireFallback && !fallback)
+      throw new Error('下载地址已过期，请刷新页面后再试');
+    if (fallback){
+      if (btn) btn.textContent = '检查下载线路…';
+      await preflightVideoDownload(fallback);
+      clickDownload(fallback, filename, true, toast);
+    } else {
+      const blob = await fetchAssetBlob(url, (loaded, total) => {
+        if (btn) btn.textContent = downloadProgress(loaded, total);
+      });
+      const u = URL.createObjectURL(blob);
+      clickDownload(u, filename);
+      setTimeout(()=>URL.revokeObjectURL(u), 5000);
+    }
+    toast('下载已开始，请查看浏览器下载列表');
+    return true;
+  } catch (error) {
+    toast(error && error.message ? error.message : '下载失败，请稍后重试');
+    return false;
+  } finally {
+    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; }
   }
 }
 function imgFail(){

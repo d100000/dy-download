@@ -46,13 +46,13 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 这套链路在仓库里有**三份互不共享代码的实现**，改动时要想清楚同步范围：`server.py`（主服务，且内部还有 `_parse_share` / `_parse_item` 两个入口）、`oss/server.py`（开源精简版）、`douyin_dl.py`（纯标准库 CLI）。抖音改页面结构时三份都会坏，但只有主服务是必须立刻修的。
 
-### 流量分工：浏览器直连优先，同源流式兜底
+### 流量分工：播放直连优先，视频下载统一同源流式
 
-这是全项目的核心设计取舍，改动前先理解：解析（短链 + 分享页）在服务器完成并走代理；普通浏览器的媒体字节仍优先直连抖音 CDN（`result.video.url` 是可直接 GET 的播放接口，浏览器自行跟 302）。视频下载受 CORS/重定向限制时，前端自动使用 `video.download_url`（带 `exp`/`sig` 的 `/api/video/{vid}`）流式兜底；微信内播放也优先同源签名地址，避免抖音域名被 WebView 拦截。`_media_signature()` 绑定 `kind/resource/exp`，但刻意不绑定 `dl/name`，因此前端可追加下载参数；入口还必须经过单 IP 限频、流生命周期并发租约和单段 Range 校验。未使用的通用 `/api/media` 已删除，不得重新引入任意 URL 代理。兜底会消耗服务器带宽并暴露服务器/代理 IP，但只转发、不落地保存。图集仍逐张浏览器直连，已刻意去掉"图集打包 ZIP"这类必须服务器下载的功能——不要重新引入。
+这是全项目的核心设计取舍，改动前先理解：解析（短链 + 分享页）在服务器完成并走代理；普通浏览器播放优先直连抖音 CDN（`result.video.url` 是可直接 GET 的播放接口，浏览器自行跟 302）。抖音播放接口首跳 302 缺少 CORS，视频下载统一使用 `video.download_url`（带 `exp`/`sig` 的 `/api/video/{vid}`）：前端先发 1 字节 Range 预检，再交给隐藏 iframe 原生流式保存，不能把完整视频读进 Blob；微信内播放也优先同源签名地址，避免抖音域名被 WebView 拦截。`_media_signature()` 绑定 `kind/resource/exp`，但刻意不绑定 `dl/name`，因此前端可追加下载参数；入口还必须经过单 IP 限频、流生命周期并发租约和单段 Range 校验。未使用的通用 `/api/media` 已删除，不得重新引入任意 URL 代理。视频下载会消耗服务器带宽并使用服务器代理出口，但只转发、不落地保存。图集仍逐张浏览器直连，已刻意去掉"图集打包 ZIP"这类必须服务器下载的功能——不要重新引入。
 
 ### 出站请求：一律经 `open_url()`
 
-`open_url()` 是唯一允许的出站入口（基于 `urllib` + `PySocks`，无 requests）。它按 `ProxyManager.candidates()` 的轮换策略依次尝试代理，失败自动转移，403/401 或验证页判定为 IP 被封 → `mark_banned()` 落库 + 禁用 + 换下一个。`force_proxy=True`（默认）时没有可用代理就直接报 503，**绝不直连**——这是防止服务器真实 IP 暴露/被封的底线。任何新代码不得直接 `urlopen`/`requests` 请求抖音。
+`open_url()` 是唯一允许的出站入口（基于 `urllib` + `PySocks`，无 requests）。它按 `ProxyManager.candidates()` 的轮换策略依次尝试代理，失败自动转移；解析页的 403/401 或验证页判定为 IP 被封 → `mark_banned()` 落库 + 禁用 + 换下一个。媒体请求是例外：单个资源/地区限制也会返回 401/403/429/5xx，因此只做中性换代理与换域名，既不 `mark_ok`，也不能 `mark_fail`/`mark_banned` 污染代理健康状态。`force_proxy=True`（默认）时没有可用代理就直接报 503，**绝不直连**——这是防止服务器真实 IP 暴露/被封的底线。任何新代码不得直接 `urlopen`/`requests` 请求抖音。
 
 ### 代理池
 
@@ -121,7 +121,7 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 
 ## `oss/` —— 独立的开源精简版
 
-`oss/` 不是本服务的一部分，而是要 force-push 到公开仓库 `d100000/dy-download` 的**最小可用版**（约 300 行：只有粘贴链接 → 解析 → 浏览器直连下载，代理仅一个 `PROXY` 环境变量）。管理后台、代理池、用户体系、计费 API、数据分析**不得进入 `oss/`**。它与根目录的 `server.py` / `static/index.html` 是手工同步的两份代码：改了根目录的解析逻辑，若需要同步，要手动移植到 `oss/server.py`，反之亦然。发布流程见 `oss/PUBLISH.md`（`./publish.sh` 会强制覆盖远程历史）。
+`oss/` 不是本服务的一部分，而是要 force-push 到公开仓库 `d100000/dy-download` 的**最小可用版**（约 300 行：只有粘贴链接 → 解析 → 视频同源流式下载 / 图集浏览器直连，代理仅一个 `PROXY` 环境变量）。管理后台、代理池、用户体系、计费 API、数据分析**不得进入 `oss/`**。它与根目录的 `server.py` / `static/index.html` 是手工同步的两份代码：改了根目录的解析逻辑，若需要同步，要手动移植到 `oss/server.py`，反之亦然。发布流程见 `oss/PUBLISH.md`（`./publish.sh` 会强制覆盖远程历史）。
 
 ## 参考文档
 

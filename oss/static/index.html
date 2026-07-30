@@ -82,7 +82,7 @@ footer a{color:var(--accent);text-decoration:none}
 <main>
 <section class="hero">
   <h1 data-i18n-html="h1">粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
-  <p data-i18n="sub">开源 · 免登录 · 浏览器直连下载 · 支持视频与图集</p>
+  <p data-i18n="sub">开源 · 免登录 · 视频流式下载 · 支持视频与图集</p>
   <div class="composer">
     <textarea id="input" data-i18n-ph="ph" placeholder="粘贴抖音分享文案或链接，例如：3.89 复制打开抖音…… https://v.douyin.com/xxxx/"></textarea>
     <div class="bar">
@@ -113,7 +113,7 @@ const LANG=window.__LANG||'zh';
 const IS_WECHAT_UA=/micromessenger/i.test(navigator.userAgent);
 const I18N={en:{
   h1:'Paste a link,<br>get the <span class="hl">watermark-free</span> original',
-  sub:"Open source · No login · Browser-direct · Videos & galleries",
+  sub:"Open source · No login · Streamed video downloads · Videos & galleries",
   ph:"Paste a Douyin share text or link, e.g. 3.89 ... https://v.douyin.com/xxxx/",
   paste:"📋 Paste", parse:"Parse",
   trust_h:"Why you can trust it",
@@ -148,15 +148,26 @@ async function parse(){
     const d=await r.json();if(!r.ok)throw new Error(d.error||'解析失败');render(d);
   }catch(e){err(e.message)}finally{btn.disabled=false;$('#spin').style.display='none';$('#btnText').textContent='解析'}
 }
-function clickDownload(url,name){const a=document.createElement('a');a.href=url;a.download=name||'download';a.rel='noopener';document.body.appendChild(a);a.click();a.remove()}
-function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin)return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
-async function dl(url,name,btn,fallback){const o=btn?btn.textContent:0;if(btn){btn.textContent='下载中…'}
-  try{const r=await fetch(url,{mode:'cors'});if(!r.ok)throw 0;const b=await r.blob(),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),5000)}
-  catch{const f=fallbackURL(fallback,name);if(f)clickDownload(f,name);else window.open(url,'_blank','noopener')}finally{if(btn)btn.textContent=o}}
+function downloadTarget(onError){
+  const id='nativeDownloadTarget';let frame=document.getElementById(id);
+  if(!frame){frame=document.createElement('iframe');frame.id=id;frame.name=id;frame.hidden=true;frame.setAttribute('aria-hidden','true');document.body.appendChild(frame)}
+  frame.onload=()=>{try{const href=frame.contentWindow?.location?.href||'';if(!href.includes('/api/video/'))return;const text=(frame.contentDocument?.body?.textContent||'').trim();let message='';try{message=JSON.parse(text).error||''}catch{}onError?.(message||'下载未能启动，请稍后重试')}catch{}};
+  return frame.name;
+}
+function clickDownload(url,name,isolated=false,onError=null){const a=document.createElement('a');a.href=url;if(isolated)a.target=downloadTarget(onError);else a.download=name||'download';a.style.display='none';document.body.appendChild(a);a.click();a.remove()}
+function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin||!u.pathname.startsWith('/api/video/'))return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
+async function downloadResponseError(r){let m='';try{const d=await r.json();m=typeof d.error==='string'?d.error:''}catch{}if(m)return m;if(r.status===401||r.status===403)return'下载地址已过期，请重新解析后再试';if(r.status===429)return'下载请求过于频繁，请稍后再试';return'下载线路暂时不可用（HTTP '+r.status+'），请稍后重试'}
+async function responseBlobWithProgress(r,onProgress){const type=(r.headers.get('content-type')||'application/octet-stream').split(';',1)[0],total=Number(r.headers.get('content-length'))||0;if(!r.body||!r.body.getReader){const b=await r.blob();onProgress?.(b.size,total||b.size);return b}const reader=r.body.getReader(),chunks=[];let loaded=0;while(true){const{done,value}=await reader.read();if(done)break;chunks.push(value);loaded+=value.byteLength;onProgress?.(loaded,total)}return new Blob(chunks,{type})}
+function downloadProgress(loaded,total){return total?'下载中 '+Math.min(100,Math.round(loaded/total*100))+'%':'已下载 '+(loaded/1024/1024).toFixed(1)+' MB'}
+async function fetchAssetBlob(source,onProgress){const r=await fetch(source,{mode:'cors',credentials:'omit',cache:'no-store'});if(!r.ok)throw new Error(await downloadResponseError(r));const type=(r.headers.get('content-type')||'').toLowerCase();if(type.startsWith('text/')||type.includes('json')||type.includes('html')){try{await r.body?.cancel()}catch{}throw new Error('下载线路返回了无效内容，请稍后重试')}return responseBlobWithProgress(r,onProgress)}
+async function preflightVideoDownload(source){let last=null;for(let i=0;i<2;i++){const controller=typeof AbortController==='function'?new AbortController():null;try{const r=await fetch(source,{method:'GET',headers:{'Range':'bytes=0-0'},mode:'same-origin',credentials:'same-origin',cache:'no-store',signal:controller?.signal});if(!r.ok){const e=new Error(await downloadResponseError(r));e.retryable=r.status>=500;throw e}if(r.status!==200&&r.status!==206){const e=new Error('下载线路返回了异常状态，请稍后重试');e.retryable=true;throw e}const type=(r.headers.get('content-type')||'').split(';',1)[0].trim().toLowerCase();if(!(type.startsWith('video/')||type==='application/mp4'||type==='application/octet-stream'||type==='binary/octet-stream')){const e=new Error('下载线路返回了无效内容，请稍后重试');e.retryable=true;throw e}if(r.status===206){const range=r.headers.get('content-range')||'',length=Number(r.headers.get('content-length'))||0;if(!/^bytes 0-0\/(?:\d+|\*)$/i.test(range)||length>65536){const e=new Error('下载线路未正确响应 Range，请稍后重试');e.retryable=true;throw e}await r.arrayBuffer()}else{try{await r.body?.cancel()}catch{}controller?.abort()}return}catch(e){controller?.abort();last=e;if(i===1||e.retryable===false)break;await new Promise(resolve=>setTimeout(resolve,350))}}throw last||new Error('下载失败，请稍后重试')}
+async function dl(url,name,btn,fallback,requireFallback=false){const old=btn?btn.innerHTML:null,wasDisabled=btn?btn.disabled:false;if(btn){btn.textContent='下载中…';btn.disabled=true}
+  try{const f=fallbackURL(fallback,name);if(requireFallback&&!f)throw new Error('下载地址已过期，请重新解析后再试');if(f){if(btn)btn.textContent='检查下载线路…';await preflightVideoDownload(f);clickDownload(f,name,true,err)}else{const b=await fetchAssetBlob(url,(loaded,total)=>{if(btn)btn.textContent=downloadProgress(loaded,total)}),u=URL.createObjectURL(b);clickDownload(u,name);setTimeout(()=>URL.revokeObjectURL(u),5000)}return true}
+  catch(e){err(e&&e.message?e.message:'下载失败，请稍后重试');return false}finally{if(btn){btn.innerHTML=old;btn.disabled=wasDisabled}}}
 function stats(s){if(!s)return'';return `<div class="stats">${[['❤ 点赞',s.digg],['💬 评论',s.comment],['★ 收藏',s.collect],['↗ 分享',s.share]].map(([l,n])=>`<div class="chip"><b>${fmtN(n)}</b><span>${l}</span></div>`).join('')}</div>`}
 function author(d){return `<div class="author">${d.avatar?`<img src="${esc(d.avatar)}">`:''}<div class="n">${esc(d.author)||'未知作者'}</div></div>`}
 let _imgs=[],_video=null;
-function downloadVideo(btn){if(_video)dl(_video.url,_video.filename,btn,_video.download_url||_video.proxy_url)}
+function downloadVideo(btn){if(_video)dl(_video.url,_video.filename,btn,_video.download_url||_video.proxy_url,true)}
 function videoPlaySrc(v){return IS_WECHAT_UA&&v.proxy_url?v.proxy_url:(v.url||v.proxy_url||'')}
 function render(d){
   if(d.kind==='note'){_video=null;_imgs=d.images||[];
@@ -165,9 +176,9 @@ function render(d){
   }else{_video=d.video;
     result.innerHTML=`<div class="card"><div class="card-body">
     <div class="player"><video controls playsinline webkit-playsinline x5-playsinline x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata" src="${esc(videoPlaySrc(d.video))}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video></div>
-    <div class="info"><span class="badge">视频 · 无水印 · ${IS_WECHAT_UA?'微信兼容线路':'浏览器直连'}</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
-    <div class="actions"><button class="primary" onclick="downloadVideo(this)">⬇ 下载视频</button><a class="ghost" href="${esc(d.video.url)}" target="_blank" rel="noopener" style="text-decoration:none">新窗口打开</a></div>
-    <div class="tip">播放优先浏览器直连；直连下载受限时自动切换本站流式转发，服务器不落地保存文件</div></div></div></div>`;
+    <div class="info"><span class="badge">视频 · 无水印 · ${IS_WECHAT_UA?'微信兼容线路':'直连播放'}</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
+    <div class="actions"><button class="primary" onclick="downloadVideo(this)">⬇ 下载视频</button><a class="ghost" href="${esc(d.video.proxy_url||d.video.url)}" target="_blank" rel="noopener" style="text-decoration:none">新窗口播放</a></div>
+    <div class="tip">播放优先浏览器直连；下载使用本站同源流式转发，服务器不落地保存文件</div></div></div></div>`;
   }
   result.classList.add('show');result.scrollIntoView({behavior:'smooth',block:'nearest'});
 }

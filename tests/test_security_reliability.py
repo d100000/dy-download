@@ -7,6 +7,8 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
+from urllib import error as urlerr
 from urllib import parse as urlparse
 
 from fastapi.testclient import TestClient
@@ -79,12 +81,33 @@ class StaticRegressionTests(unittest.TestCase):
                           "no collection, nothing uploaded"):
             self.assertNotIn(forbidden, corpus)
 
+    def test_oss_video_proxy_has_alternate_route_and_strict_media_type(self):
+        source = Path("oss/server.py").read_text("utf-8")
+        self.assertIn("aweme.snssdk.com/aweme/v1/play/", source)
+        self.assertIn("www.iesdouyin.com/aweme/v1/play/", source)
+        self.assertIn("if not content_type or not (", source)
+
     def test_api_responses_are_not_cacheable(self):
         with TestClient(server.app) as client:
             response = client.get("/api/keys")
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.headers.get("cache-control"), "private, no-store")
         self.assertEqual(response.headers.get("pragma"), "no-cache")
+
+    def test_inline_script_pages_are_not_cacheable(self):
+        home = server.index(make_request("/"))
+        self.assertEqual(home.headers.get("cache-control"), "private, no-store")
+        self.assertEqual(home.headers.get("pragma"), "no-cache")
+
+        share = server.share_page(
+            "missing-share",
+            make_request("/s/missing-share", headers={
+                "User-Agent": "Mozilla/5.0 MicroMessenger/8.0",
+            }))
+        self.assertEqual(share.status_code, 404)
+        self.assertEqual(share.headers.get("cache-control"), "private, no-store")
+        self.assertEqual(share.headers.get("pragma"), "no-cache")
+        self.assertEqual(share.headers.get("vary"), "User-Agent")
 
 
 class MediaSecurityTests(unittest.TestCase):
@@ -163,6 +186,7 @@ class MediaSecurityTests(unittest.TestCase):
             headers = {
                 "Content-Length": "5",
                 "Content-Range": "bytes 0-4/10",
+                "Content-Type": "video/mp4",
             }
 
             def __init__(self):
@@ -202,6 +226,219 @@ class MediaSecurityTests(unittest.TestCase):
             self.assertNotIn("203.0.113.21", server._media_active)
         finally:
             server.open_url = original_open
+
+    def test_video_upstream_rejects_error_page_and_uses_alternate_domain(self):
+        class FakeResponse:
+            def __init__(self, content_type, final_url):
+                self.status = 200
+                self.headers = {"Content-Type": content_type}
+                self.final_url = final_url
+                self.closed = False
+
+            def geturl(self):
+                return self.final_url
+
+            def close(self):
+                self.closed = True
+
+        bad = FakeResponse(
+            "text/html; charset=utf-8",
+            "https://aweme.snssdk.com/aweme/v1/play/")
+        good = FakeResponse(
+            "video/mp4",
+            "https://v26.douyinvod.com/video/tos/cn/example")
+        calls = []
+        original_open = server.open_url
+
+        def fake_open(url, **_kwargs):
+            calls.append((url, _kwargs))
+            return (bad if len(calls) == 1 else good), None
+
+        server.open_url = fake_open
+        try:
+            response = server._open_video_upstream(
+                "video_id_12345", {"Range": "bytes=0-4"})
+            self.assertIs(response, good)
+            self.assertTrue(bad.closed)
+            self.assertFalse(good.closed)
+            self.assertEqual(len(calls), 2)
+            self.assertIn("aweme.snssdk.com", calls[0][0])
+            self.assertIn("www.iesdouyin.com", calls[1][0])
+            self.assertFalse(calls[0][1]["ban_on_auth_error"])
+            self.assertIn(502, calls[0][1]["retry_http_statuses"])
+        finally:
+            good.close()
+            server.open_url = original_open
+
+    def test_video_upstream_failures_return_only_generic_error(self):
+        original_open = server.open_url
+        server.open_url = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("http://user:secret@proxy.example failed"))
+        try:
+            with self.assertRaises(server.ApiError) as failed:
+                server._open_video_upstream("video_id_12345", {})
+            self.assertEqual(failed.exception.status, 502)
+            self.assertEqual(
+                failed.exception.message,
+                "视频下载线路暂时不可用，请稍后重试")
+            self.assertNotIn("secret", failed.exception.message)
+        finally:
+            server.open_url = original_open
+
+    def test_video_upstream_rejects_empty_type_and_untrusted_redirect(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, content_type, final_url):
+                self.headers = {"Content-Type": content_type}
+                self.final_url = final_url
+                self.closed = False
+
+            def geturl(self):
+                return self.final_url
+
+            def close(self):
+                self.closed = True
+
+        empty_type = FakeResponse(
+            "", "https://aweme.snssdk.com/aweme/v1/play/")
+        untrusted = FakeResponse(
+            "video/mp4", "https://media.attacker.example/video")
+        responses = [empty_type, untrusted]
+        original_open = server.open_url
+        server.open_url = lambda *_args, **_kwargs: (responses.pop(0), None)
+        try:
+            with self.assertRaises(server.ApiError) as failed:
+                server._open_video_upstream("video_id_12345", {})
+            self.assertEqual(failed.exception.status, 502)
+            self.assertTrue(empty_type.closed)
+            self.assertTrue(untrusted.closed)
+        finally:
+            server.open_url = original_open
+
+    def test_media_5xx_rotates_proxy_without_mutating_health(self):
+        first = {
+            "url": "http://proxy-one.example:8000",
+            "fail": 4,
+            "enabled": True,
+        }
+        second = {
+            "url": "http://proxy-two.example:8000",
+            "fail": 0,
+            "enabled": True,
+        }
+
+        class FakeResponse:
+            pass
+
+        response = FakeResponse()
+        attempts = []
+
+        def fake_raw_open(url, follow, headers, timeout, proxy):
+            attempts.append(proxy)
+            if proxy is first:
+                raise urlerr.HTTPError(url, 502, "gateway error", {}, None)
+            return response
+
+        with mock.patch.object(
+                server.proxy_mgr, "candidates",
+                return_value=[first, second]), \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_fail") as mark_fail, \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_ok") as mark_ok, \
+             mock.patch.object(server.proxy_mgr, "note_retry"), \
+             mock.patch.object(
+                 server, "_raw_open", side_effect=fake_raw_open):
+            opened, used = server.open_url(
+                "https://aweme.snssdk.com/aweme/v1/play/",
+                retry_http_statuses=(502,),
+                ban_on_auth_error=False)
+
+        self.assertIs(opened, response)
+        self.assertIs(used, second)
+        self.assertEqual(attempts, [first, second])
+        mark_fail.assert_not_called()
+        mark_ok.assert_called_once()
+        self.assertEqual(first["fail"], 4)
+        self.assertTrue(first["enabled"])
+
+    def test_media_resource_403_rotates_without_banning_proxy(self):
+        first = {
+            "url": "http://proxy-one.example:8000",
+            "fail": 4,
+            "enabled": True,
+        }
+        second = {
+            "url": "http://proxy-two.example:8000",
+            "fail": 0,
+            "enabled": True,
+        }
+
+        class FakeResponse:
+            pass
+
+        response = FakeResponse()
+
+        def fake_raw_open(url, follow, headers, timeout, proxy):
+            if proxy is first:
+                raise urlerr.HTTPError(url, 403, "resource forbidden", {}, None)
+            return response
+
+        with mock.patch.object(
+                server.proxy_mgr, "candidates",
+                return_value=[first, second]), \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_fail") as mark_fail, \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_banned") as mark_banned, \
+             mock.patch.object(server.proxy_mgr, "mark_ok"), \
+             mock.patch.object(server.proxy_mgr, "note_retry"), \
+             mock.patch.object(
+                 server, "_raw_open", side_effect=fake_raw_open):
+            opened, used = server.open_url(
+                "https://aweme.snssdk.com/aweme/v1/play/",
+                retry_http_statuses=(502,),
+                ban_on_auth_error=False)
+
+        self.assertIs(opened, response)
+        self.assertIs(used, second)
+        mark_fail.assert_not_called()
+        mark_banned.assert_not_called()
+        self.assertEqual(first["fail"], 4)
+        self.assertTrue(first["enabled"])
+
+    def test_refresh_share_repairs_legacy_video_id(self):
+        sid = "legacy-missing-video-id"
+        vid = "recovered_video_id_12345"
+        server.db_exec(
+            "INSERT OR REPLACE INTO shares"
+            "(id,item_id,kind,vid,payload,status,created) VALUES(?,?,?,?,?,?,?)",
+            (sid, "item-123", "video", "", "{}", "ok", int(time.time())))
+        row = {
+            "id": sid,
+            "item_id": "item-123",
+            "kind": "video",
+            "vid": "",
+            "status": "ok",
+        }
+        parsed = {
+            "cover": "https://p3.douyinpic.com/example.jpeg",
+            "video": {
+                "url": server._play_api(vid),
+                "filename": "legacy.mp4",
+            },
+        }
+        try:
+            with mock.patch.object(server, "_parse_item", return_value=parsed):
+                refreshed = server._refresh_share(row)
+            self.assertEqual(refreshed["vid"], vid)
+            stored = server.db_exec(
+                "SELECT vid,status FROM shares WHERE id=?", (sid,), "one")
+            self.assertEqual(stored["vid"], vid)
+            self.assertEqual(stored["status"], "ok")
+        finally:
+            server.db_exec("DELETE FROM shares WHERE id=?", (sid,))
 
     def test_asgi_header_send_failure_still_releases_lease(self):
         request = make_request(client_ip="203.0.113.22")

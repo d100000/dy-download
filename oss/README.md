@@ -5,8 +5,8 @@
 <h1 align="center">抖音无水印下载器 · Douyin / TikTok Video Downloader</h1>
 
 <p align="center">
-  <b>开源、免登录、无水印</b>的抖音视频 / 图集下载工具。粘贴分享链接即可在线预览并下载无水印原片；视频优先由浏览器<b>直连抖音 CDN</b>，受限时自动切换服务器流式转发，全程不落地、不存储媒体文件。<br>
-  <b>Open-source, self-hosted, no-watermark</b> downloader for Douyin (Chinese TikTok). Paste a share link, preview and download the original video / image-gallery with no watermark — browser-direct first with a streaming fallback, and no media files are stored on the server.
+  <b>开源、免登录、无水印</b>的抖音视频 / 图集下载工具。粘贴分享链接即可在线预览并下载无水印原片；视频播放优先直连，视频下载使用同源签名流式线路，全程不落地、不存储媒体文件。<br>
+  <b>Open-source, self-hosted, no-watermark</b> downloader for Douyin (Chinese TikTok). Paste a share link to preview and download original videos or image galleries — direct playback with signed same-origin video downloads, and no media files are stored on the server.
 </p>
 
 <p align="center">
@@ -20,7 +20,7 @@
 - 🎬 **无水印视频下载** — 720P / MP4，在线预览可拖动进度 · No-watermark video download
 - 🖼 **图集下载** — 图文作品逐张原图下载 · Image-gallery (slideshow) download
 - 🔒 **免登录 · 不建用户画像** — 不创建用户或分析数据库，网络请求所需信息仅用于当次处理与内存限频 · No login, user profiles, or analytics database
-- ⚡ **可靠下载** — 浏览器直连优先，受限时自动切换同源流式下载，服务器不落地 · Browser-direct with streaming fallback, zero server storage
+- ⚡ **可靠下载** — 1 字节 Range 预检后由浏览器从同源地址原生流式保存，服务器不落地 · Range preflight and native same-origin streaming, zero server storage
 - 🛡 **媒体防滥用** — 流式地址带 HMAC 有效期签名，并按 IP 限制请求频率、并发数及多段 Range · Signed, expiring and rate-limited media URLs
 - 🚫 **无广告** — 干净、无弹窗、无捆绑 · Ad-free
 - 🌓 明暗双主题 · 移动端适配 · Dark/light theme, mobile-ready
@@ -62,8 +62,8 @@ PROXY=socks5://user:pass@host:port uvicorn server:app --port 8000 --no-access-lo
 - 未被产品使用的通用 `/api/media?url=...` 代理已移除，避免服务器成为任意
   抖音 CDN 转发器。
 - 本基础版不创建用户、行为分析或请求日志数据库，也不保存视频和图片文件。
-  但解析时分享链接会发送给本服务；浏览器直连媒体时，抖音 CDN 会看到浏览器
-  的网络请求信息；走同源流式兜底时，本服务或前置反向代理会按网络通信需要接触
+  但解析时分享链接会发送给本服务；浏览器直连播放或图片时，抖音 CDN 会看到浏览器
+  的网络请求信息；视频下载与同源兼容播放时，本服务或前置反向代理会按网络通信需要接触
   IP、User-Agent 和请求地址。仓库内启动脚本、Docker 和示例命令默认关闭 Uvicorn
   access log；若自行增加 Nginx、云平台或容器访问日志，应避免记录原始 IP、完整
   User-Agent/Referer 和含媒体签名的 query，并设置短期清理策略。

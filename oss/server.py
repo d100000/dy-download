@@ -2,7 +2,7 @@
 """抖音无水印下载器 · 开源基础版 (Douyin Downloader · Open-Source Edition)
 
 免登录，粘贴分享链接即可在线预览并下载无水印视频 / 图集。
-视频与图片优先由用户浏览器直连抖音 CDN；直连受限时由服务器流式转发，
+视频播放与图片由用户浏览器优先直连抖音 CDN；视频下载由服务器流式转发，
 全程不落地、不存储内容。
 
 启动:  uvicorn server:app --host 0.0.0.0 --port 8000 --no-access-log
@@ -32,6 +32,11 @@ from pydantic import BaseModel
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1")
 CDN_HEADERS = {"Referer": "https://www.douyin.com/"}
+MEDIA_HOST_SUFFIXES = (
+    "douyinvod.com", "iesdouyin.com", "snssdk.com", "ibytedtos.com",
+    "amemv.com", "zjcdn.com", "douyincdn.com", "bytecdn.cn",
+    "douyin.com", "pstatp.com",
+)
 PROXY = os.environ.get("PROXY", "").strip()
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -373,6 +378,67 @@ def _stream(r, finalize, chunk=256 * 1024):
         finalize()
 
 
+def _media_host_allowed(url: str) -> bool:
+    try:
+        parsed = urlparse.urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return (parsed.scheme in ("http", "https") and not parsed.username
+                and not parsed.password
+                and parsed.port in (None, 80, 443)
+                and any(host == suffix or host.endswith("." + suffix)
+                        for suffix in MEDIA_HOST_SUFFIXES))
+    except (TypeError, ValueError):
+        return False
+
+
+def _close_upstream(response) -> None:
+    try:
+        response.close()
+    except Exception:
+        pass
+
+
+def _open_video_upstream(vid: str, headers: dict):
+    """主播放域名失效、返回错误页或临时 5xx 时自动切换备用域名。"""
+    urls = (
+        f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0",
+        f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0",
+    )
+    for url in urls:
+        response = None
+        accepted = False
+        try:
+            response = _open(url, headers=headers)
+            status = (response.status if hasattr(response, "status")
+                      else response.getcode())
+            content_type = (response.headers.get("Content-Type") or "")
+            content_type = content_type.split(";", 1)[0].strip().lower()
+            final_url = response.geturl() if hasattr(response, "geturl") else url
+            if status not in (200, 206):
+                raise ValueError(f"unexpected video status {status}")
+            if not content_type or not (
+                content_type.startswith("video/")
+                or content_type in {
+                    "application/mp4",
+                    "application/octet-stream",
+                    "binary/octet-stream",
+                }
+            ):
+                raise ValueError(f"unexpected video content type {content_type}")
+            if not _media_host_allowed(final_url):
+                raise ValueError("video redirect left the Douyin media allowlist")
+            accepted = True
+            return response
+        except urlerr.HTTPError as exc:
+            _close_upstream(exc)
+        except Exception:
+            pass
+        finally:
+            if response is not None and not accepted:
+                _close_upstream(response)
+    raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
+
+
 @app.get("/api/video/{vid}")
 def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
               dl: str = "", name: str = "video.mp4"):
@@ -386,7 +452,7 @@ def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
         extra["Range"] = range_header
     r = None
     try:
-        r = _open(f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0", headers=extra)
+        r = _open_video_upstream(vid, extra)
         h = {"Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
              "X-Content-Type-Options": "nosniff"}
         for k in ("Content-Length", "Content-Range"):
@@ -398,14 +464,16 @@ def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
             h["Content-Disposition"] = (
                 "attachment; filename*=UTF-8''" + urlparse.quote(safe_name))
         status = r.status if hasattr(r, "status") else r.getcode()
+    except ApiError:
+        if r is not None:
+            _close_upstream(r)
+        _media_release(lease)
+        raise
     except Exception:
         if r is not None:
-            try:
-                r.close()
-            except Exception:
-                pass
+            _close_upstream(r)
         _media_release(lease)
-        raise ApiError(502, "拉取视频失败")
+        raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
     finalize = _media_finalizer(r, lease)
     return _MediaStreamingResponse(
         _stream(r, finalize), finalize=finalize, status_code=status,
@@ -439,11 +507,11 @@ def _seo_head(lang: str, origin: str) -> str:
     canon = f"{origin}/" if zh else f"{origin}/?lang=en"
     m = {
         "zh": {"t": "抖音无水印下载器 · 开源版",
-               "d": "免费开源的抖音无水印下载工具：粘贴分享链接即可在线预览并下载抖音视频与图集的无水印原片。免登录、无广告、直连优先且支持流式兜底、可自建。",
+               "d": "免费开源的抖音无水印下载工具：粘贴分享链接即可在线预览并下载抖音视频与图集的无水印原片。免登录、无广告、播放直连且视频支持同源流式下载、可自建。",
                "k": "抖音下载,抖音无水印下载,抖音视频下载,douyin downloader,抖音图集下载,开源,自建",
                "s": "抖音无水印下载器", "l": "zh_CN"},
         "en": {"t": "Douyin Downloader — No Watermark, Free & Open Source",
-               "d": "Free, open-source Douyin (Chinese TikTok) no-watermark downloader. Paste a share link to preview and download original videos & photo galleries. No login, no ads, browser-direct with streaming fallback, self-hostable.",
+               "d": "Free, open-source Douyin (Chinese TikTok) no-watermark downloader. Paste a share link to preview and download original videos and photo galleries. No login, no ads, direct playback with same-origin video streaming, self-hostable.",
                "k": "douyin downloader,douyin video download,no watermark,tiktok downloader,open source,self-hosted",
                "s": "Douyin Downloader", "l": "en_US"},
     }[lang]
@@ -491,6 +559,8 @@ def index(request: Request):
     html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin)))
     resp = HTMLResponse(html)
+    resp.headers["Cache-Control"] = "private, no-store"
+    resp.headers["Pragma"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -517,7 +587,7 @@ def og_image():
 <circle cx="200" cy="150" r="360" fill="#FE2C55" opacity="0.28"/><circle cx="1050" cy="130" r="320" fill="#25F4EE" opacity="0.22"/>
 <text x="90" y="330" font-family="sans-serif" font-size="82" font-weight="800" fill="#fff">Douyin Downloader</text>
 <text x="92" y="410" font-family="sans-serif" font-size="38" font-weight="700" fill="#25F4EE">No Watermark · Open Source · No Ads</text>
-<text x="94" y="470" font-family="sans-serif" font-size="30" fill="#8A93A0">Paste a link · browser-direct · self-hostable</text></svg>'''
+<text x="94" y="470" font-family="sans-serif" font-size="30" fill="#8A93A0">Paste a link · streamed download · self-hostable</text></svg>'''
     return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 
