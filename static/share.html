@@ -385,12 +385,20 @@ function render(){
    普通浏览器优先两个抖音域名以节省服务器带宽；微信 WebView 容易拦截抖音域名，
    因此优先同源代理，避免等待 14 秒后才切换并丢失首次点击带来的播放授权。
    每条线路的 ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
+let _playSession = 0;
 function startPlay(){
   const d = S.data || {};
   if (!d.video || !d.video.url) return;
   const box = document.getElementById('playerBox');
   const btn = document.getElementById('playBtn');
   const ld = document.getElementById('loading');
+  const existing = document.getElementById('player');
+  if (existing){
+    const retryPromise = existing.play?.();
+    retryPromise?.catch(()=>{});
+    return;
+  }
+  const session = ++_playSession;
   btn.style.display = 'none'; ld.style.display = 'block';
   track('play');
 
@@ -415,24 +423,32 @@ function startPlay(){
   box.appendChild(v);
   const poster = document.getElementById('poster'); if (poster) poster.style.display = 'none';
 
-  let idx = -1, t0 = 0, timer = 0, settled = false, hs = null;
+  let idx = -1, t0 = 0, timer = 0, settled = false, hs = null, attempt = 0;
+  const successEvents = ['loadeddata', 'canplay', 'playing', 'timeupdate'];
+  const isCurrent = () =>
+    session === _playSession && document.getElementById('player') === v;
+  const isActuallyPlaying = () =>
+    v.currentTime > 0 || (!v.paused && v.readyState >= 2);
 
   // 每条线路挂自己的一套监听并在切走时摘掉：否则上一条线路迟到的 error
   // 会把下一条线路一起判死，出现「只试了一条就放弃」。
   function unbind(){
     if (!hs) return;
-    v.removeEventListener('loadeddata', hs.ok);
-    v.removeEventListener('playing', hs.ok);
-    v.removeEventListener('error', hs.err);
+    successEvents.forEach(name => v.removeEventListener(name, hs.ok));
+    if (hs.err) v.removeEventListener('error', hs.err);
     hs = null;
   }
   function stop(){ clearTimeout(timer); unbind(); }
 
-  const onOK = () => {
+  const onOK = (myAttempt) => {
+    if (!isCurrent() || settled || myAttempt !== attempt) return;
     settled = true; stop(); ld.style.display = 'none';
     track('play_ok', {source:routes[idx].source, stage:'ok', ms:Date.now()-t0});
   };
-  const onErr = (stage) => {
+  const onErr = (stage, myAttempt) => {
+    if (!isCurrent() || settled || myAttempt !== attempt) return;
+    // 微信/X5 偶尔会在视频已经起播后补发 error，不能因此切线或弹失败遮罩。
+    if (isActuallyPlaying()){ onOK(myAttempt); return; }
     const e = v.error;
     const detail = (e ? 'code=' + e.code : 'no-error') + ' rs=' + v.readyState + ' ns=' + v.networkState;
     track('play_fail', {source:routes[idx].source, stage, detail, ms:Date.now()-t0});
@@ -441,31 +457,47 @@ function startPlay(){
 
   function next(){
     stop();
+    if (!isCurrent() || settled) return;
+    if (idx + 1 >= routes.length){ giveUp(); return; }
     idx++;
-    if (idx >= routes.length){ giveUp(); return; }
+    const myAttempt = ++attempt;
     const r = routes[idx];
     if (idx > 0) track('fallback', {source:r.source, stage:'start'});
     ld.textContent = r.tip;
     t0 = Date.now();
-    hs = {ok: () => { if (!settled) onOK(); },
-          err: () => { if (!settled) onErr('error'); }};
-    v.addEventListener('loadeddata', hs.ok);
-    v.addEventListener('playing', hs.ok);
+    hs = {ok: () => onOK(myAttempt),
+          err: () => onErr('error', myAttempt)};
+    successEvents.forEach(name => v.addEventListener(name, hs.ok));
     v.addEventListener('error', hs.err);
-    v.src = r.src; v.load(); v.play?.().catch(()=>{ /* 需用户手势时由 controls 兜底 */ });
+    v.src = r.src; v.load();
+    const playPromise = v.play?.();
+    if (playPromise?.then){
+      playPromise.then(() => onOK(myAttempt)).catch(()=>{ /* controls 仍可手动播放 */ });
+    }
     // 直连在部分网络/内核下不会报 error，只是一直不 ready —— 用看门狗兜底
     timer = setTimeout(() => {
-      if (settled) return;
-      if (v.readyState < 2) onErr('timeout'); else onOK();
+      if (!isCurrent() || settled || myAttempt !== attempt) return;
+      if (isActuallyPlaying() || v.readyState >= 2) onOK(myAttempt);
+      else onErr('timeout', myAttempt);
     }, r.wait);
   }
   function giveUp(){
-    settled = true; stop(); ld.style.display = 'none';
-    track('play_fail', {source:'', stage:'giveup',
-      detail:'all ' + routes.length + ' routes failed'});
-    if (IS_WECHAT_UA) showMask('在浏览器中打开观看',
-      '当前网络环境下微信内无法播放这条视频，<br>用浏览器打开即可正常观看 👇');
-    else toast('播放失败，请稍后重试或直接下载');
+    if (!isCurrent() || settled) return;
+    const myAttempt = attempt;
+    // X5 的 playing/timeupdate 有时比 error/timeout 晚到，留一个很短的确认窗口。
+    hs = {ok: () => onOK(myAttempt), err: null};
+    successEvents.forEach(name => v.addEventListener(name, hs.ok));
+    timer = setTimeout(() => {
+      if (!isCurrent() || settled || myAttempt !== attempt) return;
+      if (isActuallyPlaying()){ onOK(myAttempt); return; }
+      settled = true; stop(); ld.style.display = 'none';
+      track('play_fail', {source:'', stage:'giveup',
+        detail:'all ' + routes.length + ' routes failed'});
+      // 自动探测失败不能弹阻断遮罩：微信/X5 可能已经在原生视频层播放，
+      // 但没有及时同步标准事件。浏览器引导只保留给用户明确点击下载/分享。
+      if (IS_WECHAT_UA) toast('若画面已播放可继续观看；仍无画面时请点视频播放键重试');
+      else toast('播放失败，请稍后重试或直接下载');
+    }, 600);
   }
 
   next();
