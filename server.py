@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """抖音无水印下载器 · Web 服务版（含代理池 + 管理后台）
 
-免登录、免签名。后端负责：短链解析 → 分享页元数据提取 → 无水印地址还原，
+无需登录抖音账号或客户端签名。后端负责：短链解析 → 分享页元数据提取 → 无水印地址还原，
 并以流式代理（支持 Range）转发视频/图片，绕过抖音 CDN 的 UA / 防盗链限制，
 让浏览器可以直接在线播放与下载。
 
@@ -11,7 +11,7 @@
   · 移动端 UA 池轮换 + Referer 伪装
   · 管理后台（密码鉴权）增删/启停/测试代理、查看出口 IP 与统计
 
-启动:  uvicorn server:app --host 0.0.0.0 --port 8000
+启动:  uvicorn server:app --host 0.0.0.0 --port 8000 --no-access-log
 环境变量:  ADMIN_PASSWORD  管理后台密码（默认 douyin-admin，生产务必修改）
 """
 
@@ -22,6 +22,7 @@ import io
 import json
 import os
 import platform
+import queue
 import random
 import re
 import secrets
@@ -45,11 +46,60 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.9.0"
+_BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    DATA_DIR.chmod(0o700)
+except OSError:
+    pass
 STORE_FILE = DATA_DIR / "config.json"
+
+
+def _load_app_secret() -> bytes:
+    """读取稳定密钥；未配置时用完整临时文件 + hard-link 原子持久化。"""
+    configured = (os.environ.get("APP_SECRET")
+                  or os.environ.get("CAPTCHA_SECRET") or "").strip()
+    if configured:
+        if len(configured.encode()) < 32:
+            raise RuntimeError("APP_SECRET/CAPTCHA_SECRET 至少需要 32 字节")
+        return configured.encode()
+    path = DATA_DIR / ".app-secret"
+    try:
+        saved = path.read_text("utf-8").strip()
+        if saved:
+            path.chmod(0o600)
+            return saved.encode()
+    except FileNotFoundError:
+        pass
+
+    candidate = secrets.token_urlsafe(48)
+    tmp = DATA_DIR / f".app-secret.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(candidate)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+    saved = path.read_text("utf-8").strip()
+    if not saved:
+        raise RuntimeError(f"应用密钥文件为空，请删除后重启或设置 APP_SECRET：{path}")
+    path.chmod(0o600)
+    return saved.encode()
+
+
+APP_SECRET = _load_app_secret()
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "douyin-admin")
 if ADMIN_PASSWORD == "douyin-admin":
@@ -60,6 +110,14 @@ if ADMIN_PASSWORD == "douyin-admin":
 # 免费使用配额（防薅羊毛）
 FREE_ANON_DAILY = int(os.environ.get("FREE_ANON_DAILY", "3"))    # 匿名：每天 3 次
 FREE_USER_DAILY = int(os.environ.get("FREE_USER_DAILY", "10"))   # 登录用户：每天 10 次
+MEDIA_TOKEN_TTL = max(300, min(86400, int(os.environ.get("MEDIA_TOKEN_TTL", "43200"))))
+MEDIA_REQUESTS_PER_MIN = max(10, int(os.environ.get("MEDIA_REQUESTS_PER_MIN", "120")))
+MEDIA_MAX_CONCURRENT = max(1, int(os.environ.get("MEDIA_MAX_CONCURRENT", "6")))
+DATA_RETENTION_DAYS = max(
+    1, min(30, int(os.environ.get("DATA_RETENTION_DAYS", "30")))
+)
+API_JOB_WORKERS = max(1, min(8, int(os.environ.get("API_JOB_WORKERS", "2"))))
+QUOTA_RESERVATION_TTL = max(300, int(os.environ.get("QUOTA_RESERVATION_TTL", "3600")))
 
 # ---------------------------------------------------------------- SQLite 数据层
 
@@ -71,6 +129,13 @@ CREATE TABLE IF NOT EXISTS usage_daily(
   day INTEGER, subject TEXT, count INTEGER DEFAULT 0,
   PRIMARY KEY(day, subject)
 );
+CREATE TABLE IF NOT EXISTS quota_reservations(
+  id TEXT PRIMARY KEY, day INTEGER, subjects TEXT, units INTEGER,
+  committed_units INTEGER DEFAULT 0, status TEXT,
+  endpoint TEXT, created INTEGER, settled INTEGER, lease_until INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_quota_reservation_lease
+  ON quota_reservations(status, lease_until);
 CREATE TABLE IF NOT EXISTS request_logs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, kind TEXT, subject TEXT,
   ip TEXT, ua TEXT, link TEXT, ok INTEGER, path TEXT, user_id INTEGER
@@ -87,19 +152,38 @@ CREATE TABLE IF NOT EXISTS users(
 CREATE TABLE IF NOT EXISTS api_keys(
   key TEXT PRIMARY KEY, user_id INTEGER, name TEXT, created INTEGER, enabled INTEGER DEFAULT 1,
   balance_cents INTEGER DEFAULT 100, spent_cents INTEGER DEFAULT 0, calls INTEGER DEFAULT 0,
-  last_used INTEGER
+  last_used INTEGER, reserved_cents INTEGER DEFAULT 0, deleted_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS jobs(
   id TEXT PRIMARY KEY, key TEXT, user_id INTEGER, status TEXT, total INTEGER, done INTEGER DEFAULT 0,
   ok INTEGER DEFAULT 0, cost_cents INTEGER DEFAULT 0, links TEXT, results TEXT,
-  created INTEGER, finished INTEGER
+  created INTEGER, finished INTEGER, price_cents INTEGER DEFAULT 0,
+  updated INTEGER, request_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_key ON jobs(key);
+CREATE TABLE IF NOT EXISTS job_items(
+  job_id TEXT, idx INTEGER, link TEXT, status TEXT DEFAULT 'pending',
+  price_cents INTEGER DEFAULT 0, reserved INTEGER DEFAULT 0,
+  result TEXT, error TEXT, attempts INTEGER DEFAULT 0,
+  lease_owner TEXT, lease_until INTEGER,
+  started INTEGER, finished INTEGER,
+  PRIMARY KEY(job_id, idx)
+);
+CREATE INDEX IF NOT EXISTS idx_job_items_status ON job_items(status, job_id);
+CREATE INDEX IF NOT EXISTS idx_job_items_claim
+  ON job_items(status, lease_until, job_id, idx);
 CREATE TABLE IF NOT EXISTS api_logs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, key TEXT, user_id INTEGER,
-  link TEXT, ok INTEGER, cost_cents INTEGER, job_id TEXT
+  link TEXT, ok INTEGER, cost_cents INTEGER, job_id TEXT, item_idx INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_apilog_ts ON api_logs(ts);
+CREATE TABLE IF NOT EXISTS api_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, key TEXT,
+  job_id TEXT, item_idx INTEGER, event TEXT,
+  balance_delta INTEGER DEFAULT 0, reserved_delta INTEGER DEFAULT 0,
+  spent_delta INTEGER DEFAULT 0, calls_delta INTEGER DEFAULT 0, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_job ON api_ledger(job_id, item_idx);
 CREATE TABLE IF NOT EXISTS app_settings(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS shares(
   id TEXT PRIMARY KEY, item_id TEXT, kind TEXT, vid TEXT,
@@ -117,9 +201,11 @@ CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_item ON shares(item_id);
 CREATE TABLE IF NOT EXISTS share_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT, kind TEXT,
-  ip TEXT, ua TEXT, referer TEXT, wechat INTEGER, fp TEXT
+  ip TEXT, ua TEXT, referer TEXT, wechat INTEGER, fp TEXT,
+  source TEXT, stage TEXT, detail TEXT, ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_share_ev ON share_events(ts, sid);
+CREATE INDEX IF NOT EXISTS idx_share_ev_kind ON share_events(kind, ts);
 CREATE TABLE IF NOT EXISTS reports(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT,
   reason TEXT, contact TEXT, ip TEXT, handled INTEGER DEFAULT 0
@@ -149,13 +235,159 @@ def db_exec(sql: str, params=(), fetch: Optional[str] = None):
             conn.close()
 
 
+def _privacy_hash(kind: str, value: str, scope: str = "") -> str:
+    """把网络标识转为本站不可逆 HMAC，避免在数据库中保存原始 IP/指纹。"""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    digest = hmac.new(APP_SECRET, f"{kind}:{scope}:{value}".encode(),
+                      hashlib.sha256).hexdigest()[:24]
+    return f"h:{digest}"
+
+
+def _safe_referer(value: str) -> str:
+    """埋点只保留来源的 scheme/host/path，丢弃可能含个人信息的 query/fragment。"""
+    try:
+        p = urlparse.urlsplit(value or "")
+        return urlparse.urlunsplit((p.scheme, p.netloc, p.path, "", ""))[:200]
+    except Exception:
+        return ""
+
+
+def _migrate_privacy_data(conn) -> None:
+    """一次性把老库中的原始网络标识就地改成带 h: 前缀的不可逆 HMAC。"""
+    columns = (("request_logs", "ip", "request-ip"),
+               ("page_views", "ip", "analytics-visitor"))
+    for table, col, kind in columns:
+        rows = conn.execute(
+            f"SELECT rowid,{col} FROM {table} "
+            f"WHERE COALESCE({col},'')<>'' AND {col} NOT LIKE 'h:%'"
+        ).fetchall()
+        for rowid, value in rows:
+            conn.execute(f"UPDATE {table} SET {col}=? WHERE rowid=?",
+                         (_privacy_hash(kind, value), rowid))
+
+    rows = conn.execute(
+        "SELECT rowid,subject FROM request_logs "
+        "WHERE COALESCE(subject,'')<>'' AND subject NOT LIKE 'h:%' "
+        "AND subject NOT LIKE 'user:%'"
+    ).fetchall()
+    for rowid, value in rows:
+        conn.execute("UPDATE request_logs SET subject=? WHERE rowid=?",
+                     (_privacy_hash("request-subject", value), rowid))
+    rows = conn.execute(
+        "SELECT rowid,link FROM request_logs WHERE COALESCE(link,'')<>'' "
+        "AND link NOT LIKE 'h:%'"
+    ).fetchall()
+    for rowid, value in rows:
+        conn.execute("UPDATE request_logs SET link=? WHERE rowid=?",
+                     (_privacy_hash("submitted-link", value)[:26], rowid))
+
+    # 这些旧字段没有业务读取用途，直接清空比继续保留可关联摘要更符合最小化原则。
+    conn.execute("UPDATE users SET reg_ip='' WHERE COALESCE(reg_ip,'')<>''")
+    conn.execute(
+        "UPDATE shares SET owner_ip='',owner_fp='' "
+        "WHERE COALESCE(owner_ip,'')<>'' OR COALESCE(owner_fp,'')<>''")
+    conn.execute(
+        "UPDATE share_events SET ip='',fp='',referer='',ua='' "
+        "WHERE COALESCE(ip,'')<>'' OR COALESCE(fp,'')<>'' "
+        "OR COALESCE(referer,'')<>'' OR COALESCE(ua,'')<>''")
+    conn.execute(
+        "UPDATE page_views SET ua='',fp='' "
+        "WHERE COALESCE(ua,'')<>'' OR COALESCE(fp,'')<>''")
+    conn.execute("UPDATE request_logs SET ua='' WHERE COALESCE(ua,'')<>''")
+    conn.execute("UPDATE reports SET ip='' WHERE COALESCE(ip,'')<>''")
+
+    # 免费额度主体也不能含原始 IP/浏览器指纹；迁移时取 MAX 防止计数被意外叠加。
+    rows = conn.execute(
+        "SELECT day,subject,count FROM usage_daily "
+        "WHERE (subject LIKE 'ip:%' AND subject NOT LIKE 'ip:h:%') "
+        "OR (subject LIKE 'fp:%' AND subject NOT LIKE 'fp:h:%')"
+    ).fetchall()
+    for day, subject, count in rows:
+        kind, raw = subject.split(":", 1)
+        new_subject = f"{kind}:{_privacy_hash(f'quota-{kind}', raw, str(day))}"
+        conn.execute(
+            "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
+            "ON CONFLICT(day,subject) DO UPDATE SET count=MAX(count,excluded.count)",
+            (day, new_subject, count))
+        conn.execute("DELETE FROM usage_daily WHERE day=? AND subject=?",
+                     (day, subject))
+
 with _db_lock:
     _c = _db()
     _c.execute("PRAGMA journal_mode=WAL")      # 允许并发读，写不阻塞读
     _c.executescript(_SCHEMA)
     _c.execute("CREATE INDEX IF NOT EXISTS idx_reqlog_user ON request_logs(user_id)")
+    # 就地补列（无迁移框架）：所有 ALTER 都按 PRAGMA 探测，老库可直接升级。
+    def _ensure_columns(table, columns):
+        have = {r[1] for r in _c.execute(f"PRAGMA table_info({table})")}
+        for col, typ in columns:
+            if col not in have:
+                _c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+
+    _ensure_columns("share_events", (
+        ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER")))
+    _ensure_columns("api_keys", (
+        ("reserved_cents", "INTEGER DEFAULT 0"), ("deleted_at", "INTEGER")))
+    _ensure_columns("jobs", (
+        ("price_cents", "INTEGER DEFAULT 0"), ("updated", "INTEGER"),
+        ("request_id", "TEXT")))
+    _ensure_columns("job_items", (
+        ("price_cents", "INTEGER DEFAULT 0"), ("reserved", "INTEGER DEFAULT 0"),
+        ("result", "TEXT"), ("error", "TEXT"),
+        ("attempts", "INTEGER DEFAULT 0"), ("lease_owner", "TEXT"),
+        ("lease_until", "INTEGER"), ("started", "INTEGER"), ("finished", "INTEGER")))
+    _ensure_columns("api_logs", (("item_idx", "INTEGER"),))
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idem ON jobs(key,request_id) "
+        "WHERE request_id IS NOT NULL")
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_apilog_item ON api_logs(job_id,item_idx) "
+        "WHERE item_idx IS NOT NULL")
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_item_reserve "
+        "ON api_ledger(job_id,item_idx) WHERE event='reserve'")
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_item_settle "
+        "ON api_ledger(job_id,item_idx) WHERE event IN ('charge','refund')")
+    _c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_job_items_claim "
+        "ON job_items(status,lease_until,job_id,idx)")
+    _migrate_privacy_data(_c)
+    _privacy_vacuum_needed = not _c.execute(
+        "SELECT 1 FROM app_settings WHERE k='privacy_v2_vacuumed'"
+    ).fetchone()
     _c.commit()
+    if _privacy_vacuum_needed:
+        try:
+            _c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            _c.execute("VACUUM")
+            _c.execute(
+                "INSERT OR REPLACE INTO app_settings(k,v) VALUES('privacy_v2_vacuumed','1')")
+            _c.commit()
+        except sqlite3.OperationalError:
+            # 滚动部署期间老进程可能仍占用 WAL；下次启动继续尝试，绝不标记为完成。
+            pass
     _c.close()
+
+
+def _secure_data_permissions() -> None:
+    """限制数据库、WAL、代理配置和应用密钥仅供服务账号读写。"""
+    try:
+        DATA_DIR.chmod(0o700)
+    except OSError:
+        pass
+    for path in (DB_FILE, Path(str(DB_FILE) + "-wal"), Path(str(DB_FILE) + "-shm"),
+                 STORE_FILE, DATA_DIR / ".app-secret"):
+        try:
+            if path.exists():
+                path.chmod(0o600)
+        except OSError:
+            pass
+
+
+_secure_data_permissions()
 
 
 # ---------------------------------------------------------------- 防薅羊毛 / 限频
@@ -167,6 +399,7 @@ def _today() -> int:
 # 只有来自可信反代时才采信 X-Forwarded-For，否则客户端可伪造头绕过所有基于 IP 的风控。
 # 设 TRUST_PROXY=1 表示部署在反代后（Nginx/Cloudflare 等），此时才读 XFF。
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
+TRUST_PROXY_HOPS = max(1, int(os.environ.get("TRUST_PROXY_HOPS", "1")))
 # 会话 cookie 是否加 Secure（仅走 HTTPS 发送）。生产（反代/HTTPS）应为真；本地 http 调试默认关。
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "").lower() in ("1", "true", "yes") or TRUST_PROXY
 
@@ -176,18 +409,46 @@ def _client_ip(request: Request) -> str:
     if TRUST_PROXY:
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            return xff.split(",")[0].strip()
-    return peer
+            # proxy_add_x_forwarded_for 会保留客户端伪造的左侧值；从右侧按可信代理层数取值。
+            parts = [p.strip() for p in xff.split(",") if p.strip()]
+            if len(parts) >= TRUST_PROXY_HOPS:
+                return parts[-TRUST_PROXY_HOPS][:64]
+    return str(peer)[:64]
 
 
 def _client_fp(request: Request) -> str:
     return (request.headers.get("x-fp") or "")[:64]
 
 
-def _usage(subject: str, day: int) -> int:
-    row = db_exec("SELECT count FROM usage_daily WHERE day=? AND subject=?",
-                  (day, subject), "one")
-    return row[0] if row else 0
+def _stored_ip(request: Request, purpose: str = "security",
+               scope: str = "") -> str:
+    return _privacy_hash(f"{purpose}-ip", _client_ip(request), scope)
+
+
+def _stored_fp(request: Request, purpose: str = "security",
+               scope: str = "") -> str:
+    return _privacy_hash(f"{purpose}-visitor", _client_fp(request), scope)
+
+
+def _coarse_ua(request: Request) -> str:
+    """只保留兼容诊断需要的粗粒度环境，不落完整 UA、机型或 build 字符串。"""
+    ua = request.headers.get("user-agent") or ""
+    os_name = "ios" if re.search(r"iphone|ipad|ipod", ua, re.I) else (
+        "android" if re.search(r"android", ua, re.I) else (
+            "windows" if re.search(r"windows", ua, re.I) else (
+                "macos" if re.search(r"mac os", ua, re.I) else "other")))
+    browser = "wechat" if re.search(r"micromessenger", ua, re.I) else (
+        "chrome" if re.search(r"(?:chrome|crios)/", ua, re.I) else (
+            "safari" if re.search(r"safari/", ua, re.I) else "other"))
+    m = re.search(r"(?:MicroMessenger|Chrome|CriOS|Version)/(\d+)", ua, re.I)
+    return f"{browser}/{m.group(1) if m else 'x'} {os_name}"
+
+
+def _log_link(value: str) -> str:
+    """运营日志只存用途隔离的短摘要，不保存用户粘贴的完整链接/文案。"""
+    if not value:
+        return ""
+    return _privacy_hash("submitted-link", value)[:26]
 
 
 def _quota_subjects(request: Request):
@@ -195,8 +456,9 @@ def _quota_subjects(request: Request):
     u = current_user(request)
     if u:
         return [f"user:{u['id']}"], FREE_USER_DAILY
-    subs = [f"ip:{_client_ip(request)}"]
-    fp = _client_fp(request)
+    scope = str(_today())
+    subs = [f"ip:{_stored_ip(request, 'quota', scope)}"]
+    fp = _stored_fp(request, "quota", scope)
     if fp:
         subs.append(f"fp:{fp}")
     return subs, FREE_ANON_DAILY
@@ -206,22 +468,136 @@ def quota_status(request: Request):
     """返回 (limit, used, remaining)。"""
     day = _today()
     subs, limit = _quota_subjects(request)
-    used = max((_usage(s, day) for s in subs), default=0)
+    marks = ",".join("?" for _ in subs)
+    with _db_lock:
+        conn = _db()
+        try:
+            rows = conn.execute(
+                f"SELECT count FROM usage_daily WHERE day=? AND subject IN ({marks})",
+                (day, *subs)).fetchall()
+        finally:
+            conn.close()
+    used = max((int(r[0]) for r in rows), default=0)
     return limit, used, max(0, limit - used)
 
 
-def reserve_quota(request: Request, n: int = 1):
-    """预占 n 次配额。返回 (ok, limit, used_after, remaining)。"""
+def reserve_quota(request: Request, n: int = 1, partial: bool = False,
+                  endpoint: str = "web") -> dict:
+    """在 BEGIN IMMEDIATE 事务中原子预占；失败调用可用 release_quota 精确退回。"""
+    n = max(0, int(n))
     day = _today()
     subs, limit = _quota_subjects(request)
-    used = max((_usage(s, day) for s in subs), default=0)
-    if used + n > limit:
-        return False, limit, used, max(0, limit - used)
-    for s in subs:
-        db_exec("INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
-                "ON CONFLICT(day,subject) DO UPDATE SET count=count+?",
-                (day, s, n, n))
-    return True, limit, used + n, limit - (used + n)
+    marks = ",".join("?" for _ in subs)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                f"SELECT count FROM usage_daily WHERE day=? AND subject IN ({marks})",
+                (day, *subs)).fetchall()
+            used = max((int(r[0]) for r in rows), default=0)
+            available = max(0, limit - used)
+            take = min(n, available) if partial else (n if n <= available else 0)
+            if take:
+                for subject in subs:
+                    conn.execute(
+                        "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
+                        "ON CONFLICT(day,subject) DO UPDATE SET count=count+excluded.count",
+                        (day, subject, take))
+                reservation_id = "qr_" + secrets.token_urlsafe(12)
+                now = int(time.time())
+                conn.execute(
+                    "INSERT INTO quota_reservations("
+                    "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
+                    ") VALUES(?,?,?,?,0,'pending',?,?,?)",
+                    (reservation_id, day, json.dumps(subs, ensure_ascii=False),
+                     take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL))
+            else:
+                reservation_id = ""
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"ok": take == n, "reserved": take, "limit": limit,
+            "used_before": used, "used_after": used + take,
+            "remaining": max(0, limit - used - take),
+            "day": day, "subjects": subs, "id": reservation_id}
+
+
+def settle_quota(reservation: Optional[dict], committed_units: int) -> None:
+    """幂等结算持久化预占：成功次数保留，失败/未处理部分原子退款。"""
+    if not reservation:
+        return
+    reservation_id = reservation.get("id", "")
+    if not reservation_id:
+        return
+    committed_units = max(0, int(committed_units))
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM quota_reservations WHERE id=? AND status='pending'",
+                (reservation_id,)).fetchone()
+            if not row:
+                conn.rollback()
+                return
+            units = int(row["units"])
+            committed = min(units, committed_units)
+            refund = units - committed
+            subjects = json.loads(row["subjects"] or "[]")
+            for subject in subjects:
+                conn.execute(
+                    "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
+                    (refund, int(row["day"]), subject))
+            status = "settled" if committed else "refunded"
+            conn.execute(
+                "UPDATE quota_reservations SET committed_units=?,status=?,settled=? "
+                "WHERE id=? AND status='pending'",
+                (committed, status, int(time.time()), reservation_id))
+            conn.commit()
+            reservation["reserved"] = committed
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def release_quota(reservation: Optional[dict]) -> None:
+    settle_quota(reservation, 0)
+
+
+def _refund_stale_quota_reservations() -> int:
+    """进程崩溃后，租约到期的网页额度预占会在后台自动全额退回。"""
+    now = int(time.time())
+    refunded = 0
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM quota_reservations "
+                "WHERE status='pending' AND lease_until<?", (now,)).fetchall()
+            for row in rows:
+                for subject in json.loads(row["subjects"] or "[]"):
+                    conn.execute(
+                        "UPDATE usage_daily SET count=MAX(0,count-?) "
+                        "WHERE day=? AND subject=?",
+                        (int(row["units"]), int(row["day"]), subject))
+                conn.execute(
+                    "UPDATE quota_reservations SET committed_units=0,status='refunded',settled=? "
+                    "WHERE id=? AND status='pending'", (now, row["id"]))
+                refunded += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return refunded
 
 
 def log_request(request: Request, kind: str, link: str, ok: bool):
@@ -230,19 +606,24 @@ def log_request(request: Request, kind: str, link: str, ok: bool):
         db_exec("INSERT INTO request_logs(ts,kind,subject,ip,ua,link,ok,path,user_id) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
                 (int(time.time()), kind,
-                 _client_fp(request) or _client_ip(request), _client_ip(request),
-                 (request.headers.get("user-agent") or "")[:200],
-                 link, 1 if ok else 0, request.url.path, u["id"] if u else None))
+                 (f"user:{u['id']}" if u else (
+                     _stored_fp(request, "request", str(_today()))
+                     or _stored_ip(request, "request", str(_today())))),
+                 _stored_ip(request, "request", str(_today())),
+                 _coarse_ua(request),
+                 _log_link(link), 1 if ok else 0, request.url.path,
+                 u["id"] if u else None))
     except Exception:
         pass
 
 
 def log_pageview(request: Request):
     try:
+        day = str(_today())
+        visitor = (_stored_fp(request, "analytics", day)
+                   or _stored_ip(request, "analytics", day))
         db_exec("INSERT INTO page_views(ts,ip,ua,path,fp) VALUES(?,?,?,?,?)",
-                (int(time.time()), _client_ip(request),
-                 (request.headers.get("user-agent") or "")[:200],
-                 request.url.path, _client_fp(request)))
+                (int(time.time()), visitor, "", request.url.path, ""))
     except Exception:
         pass
 
@@ -286,8 +667,8 @@ def current_user(request: Request):
 _captchas: dict = {}          # cid -> (gap_x, gap_y, issued_at, ip)
 CAPTCHA_W, CAPTCHA_H, PIECE = 300, 170, 50
 POW_BITS = 14                 # 工作量证明，抬高批量自动化成本
-CAPTCHA_SECRET = (os.environ.get("CAPTCHA_SECRET") or "").encode() or secrets.token_bytes(32)
-# 多 worker 部署请设 CAPTCHA_SECRET 环境变量，否则各进程密钥不一致导致令牌互不认
+CAPTCHA_SECRET = (os.environ.get("CAPTCHA_SECRET") or "").encode() or APP_SECRET
+# 未配置时使用 DATA_DIR/.app-secret；多 worker 也能共享稳定密钥。
 _passes: dict = {}            # pass_token -> expiry（一次性）
 
 
@@ -498,6 +879,27 @@ def _captcha_rate_ok(ip: str) -> bool:
     return _rate_ok(_captcha_hits, ip, 60, CAPTCHA_MAX_PER_MIN)
 
 
+# 管理后台登录防爆破：单 IP 在窗口内失败超限即临时锁定（成功登录清零）。
+# 注意与全站一致：只有 TRUST_PROXY=1 时 _client_ip 才采信 XFF，否则按直连 IP 计。
+ADMIN_LOGIN_MAX_FAILS = 5
+ADMIN_LOGIN_WINDOW = 900          # 15 分钟
+_admin_fails: dict = {}           # ip -> [失败时间戳]
+
+
+def _admin_fail_count(ip: str) -> int:
+    now = time.time()
+    fails = [t for t in _admin_fails.get(ip, []) if now - t < ADMIN_LOGIN_WINDOW]
+    if fails:
+        _admin_fails[ip] = fails
+    else:
+        _admin_fails.pop(ip, None)
+    return len(fails)
+
+
+def _admin_record_fail(ip: str):
+    _admin_fails.setdefault(ip, []).append(time.time())
+
+
 def _sweep_memory():
     """周期清理会话/令牌/限频等内存字典，防止无界增长。"""
     now = time.time()
@@ -510,13 +912,63 @@ def _sweep_memory():
     for cid, v in list(_captchas.items()):
         if now - v[2] > 300:
             _captchas.pop(cid, None)
-    for store, win in ((_auth_hits, 3600), (_captcha_hits, 60), (_share_hits, 3600)):
+    for store, win in ((_auth_hits, 3600), (_captcha_hits, 60), (_share_hits, 3600),
+                       (_admin_fails, ADMIN_LOGIN_WINDOW)):
         for ip, hits in list(store.items()):
             fresh = [t for t in hits if now - t < win]
             if fresh:
                 store[ip] = fresh
             else:
                 store.pop(ip, None)
+    _sweep_media_limits()
+
+
+_last_data_cleanup = 0.0
+
+
+def _cleanup_retained_data(force: bool = False) -> None:
+    """清理超过保留期的访问/播放/任务明细；汇总计数与账户余额不受影响。"""
+    global _last_data_cleanup
+    now = time.time()
+    if not force and now - _last_data_cleanup < 300:
+        return
+    cutoff = int(now) - DATA_RETENTION_DAYS * 86400
+    cutoff_day = _today() - DATA_RETENTION_DAYS
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for table in ("request_logs", "page_views", "share_events", "api_logs"):
+                conn.execute(f"DELETE FROM {table} WHERE ts<?", (cutoff,))
+            # 投诉中的可选联系方式同样受保留期约束，不能因“未处理”而无限保存。
+            conn.execute("DELETE FROM reports WHERE ts<?", (cutoff,))
+            # 含今天在内只保留 30 个自然日桶，不能多留第 31 天。
+            conn.execute("DELETE FROM usage_daily WHERE day<=?", (cutoff_day,))
+            conn.execute(
+                "DELETE FROM quota_reservations "
+                "WHERE status<>'pending' AND COALESCE(settled,created)<?", (cutoff,))
+            conn.execute(
+                "DELETE FROM job_items WHERE job_id IN "
+                "(SELECT id FROM jobs WHERE finished IS NOT NULL AND finished<?)",
+                (cutoff,))
+            conn.execute("DELETE FROM jobs WHERE finished IS NOT NULL AND finished<?",
+                         (cutoff,))
+            conn.execute("DELETE FROM api_ledger WHERE ts<?", (cutoff,))
+            conn.execute(
+                "DELETE FROM shares WHERE expires_at>0 AND expires_at<?",
+                (int(now),))
+            conn.execute(
+                "DELETE FROM api_keys WHERE enabled=0 AND deleted_at IS NOT NULL "
+                "AND deleted_at<? AND COALESCE(reserved_cents,0)=0 "
+                "AND NOT EXISTS(SELECT 1 FROM jobs WHERE jobs.key=api_keys.key)",
+                (cutoff,))
+            conn.commit()
+            _last_data_cleanup = now
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _sweeper():
@@ -524,6 +976,8 @@ def _sweeper():
         time.sleep(300)
         try:
             _sweep_memory()
+            _refund_stale_quota_reservations()
+            _cleanup_retained_data()
         except Exception:
             pass
 
@@ -602,9 +1056,15 @@ class ProxyManager:
                 pass
 
     def _save(self):
-        STORE_FILE.write_text(json.dumps(
+        tmp = STORE_FILE.with_name(STORE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(
             {"proxies": self.proxies, "settings": self.settings},
             ensure_ascii=False, indent=2), "utf-8")
+        try:
+            tmp.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(tmp, STORE_FILE)
 
     # ---- 解析：兼容多种代理书写格式 ----
     @staticmethod
@@ -1150,6 +1610,30 @@ def _mask_secret(s: str) -> str:
     return s[:18] + "***" + s[-6:]
 
 
+def _proxy_public_label(proxy: Optional[dict]) -> str:
+    """公开错误中只显示协议和节点，不回显 userinfo/密码。"""
+    if not proxy:
+        return "direct"
+    try:
+        p = urlparse.urlsplit(proxy.get("url", ""))
+        host = p.hostname or "unknown"
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return f"{p.scheme or 'proxy'}://{host}{':' + str(p.port) if p.port else ''}"
+    except Exception:
+        return "proxy"
+
+
+def _redact_proxy_error(value) -> str:
+    text = str(value or "")
+    # 异常库有时会把完整代理 URL 带回来，先替换已知配置，再兜底清理任意 URL userinfo。
+    for proxy in getattr(proxy_mgr, "proxies", []):
+        raw = proxy.get("url", "")
+        if raw:
+            text = text.replace(raw, _proxy_public_label(proxy))
+    return re.sub(r"([a-zA-Z][\w+.-]*://)[^/@\s]+@", r"\1***@", text)[:180]
+
+
 mihomo_mgr = MihomoManager()
 
 
@@ -1177,9 +1661,26 @@ def api_price_cents() -> int:
 
 def create_api_key(user_id: Optional[int], name: str) -> dict:
     key = "dy_" + secrets.token_urlsafe(24)
-    db_exec("INSERT INTO api_keys(key,user_id,name,created,enabled,balance_cents,spent_cents,calls) "
-            "VALUES(?,?,?,?,1,?,0,0)",
-            (key, user_id, (name or "未命名")[:60], int(time.time()), NEW_KEY_BALANCE))
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO api_keys("
+                "key,user_id,name,created,enabled,balance_cents,spent_cents,calls,reserved_cents"
+                ") VALUES(?,?,?,?,1,?,0,0,0)",
+                (key, user_id, (name or "未命名")[:60], now, NEW_KEY_BALANCE))
+            conn.execute(
+                "INSERT INTO api_ledger(ts,key,event,balance_delta,reason) "
+                "VALUES(?,?,?,?,?)",
+                (now, key, "opening", NEW_KEY_BALANCE, "new_key_balance"))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return get_api_key(key)
 
 
@@ -1192,8 +1693,10 @@ def list_api_keys(user_id: Optional[int] = None) -> list:
     if user_id is None:
         rows = db_exec("SELECT * FROM api_keys ORDER BY created DESC", (), "all")
     else:
-        rows = db_exec("SELECT * FROM api_keys WHERE user_id=? ORDER BY created DESC",
-                       (user_id,), "all")
+        rows = db_exec(
+            "SELECT * FROM api_keys WHERE user_id=? AND enabled=1 "
+            "AND deleted_at IS NULL ORDER BY created DESC",
+            (user_id,), "all")
     return [dict(r) for r in rows]
 
 
@@ -1201,48 +1704,46 @@ def revoke_api_key(key: str, user_id: Optional[int] = None) -> bool:
     k = get_api_key(key)
     if not k or (user_id is not None and k["user_id"] != user_id):
         return False
-    db_exec("DELETE FROM api_keys WHERE key=?", (key,))
+    db_exec("UPDATE api_keys SET enabled=0,deleted_at=? WHERE key=?",
+            (int(time.time()), key))
     return True
 
 
 def recharge_key(key: str, cents: int) -> bool:
     if not get_api_key(key):
         return False
-    db_exec("UPDATE api_keys SET balance_cents=balance_cents+? WHERE key=?", (int(cents), key))
+    cents = int(cents)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            n = conn.execute(
+                "UPDATE api_keys SET balance_cents=balance_cents+? WHERE key=?",
+                (cents, key)).rowcount
+            if not n:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO api_ledger(ts,key,event,balance_delta,reason) "
+                "VALUES(?,?,?,?,?)",
+                (int(time.time()), key, "recharge", cents, "admin_recharge"))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return True
 
 
 def api_key_check(key: str):
     """校验 key（不扣费）。返回 (rec, error)。"""
     if not key:
-        return None, "缺少 API Key（请在 X-API-Key 头或 ?key= 传入）"
+        return None, "缺少 API Key（请通过 X-API-Key 请求头传入）"
     rec = get_api_key(key)
-    if not rec or not rec["enabled"]:
+    if not rec or not rec["enabled"] or rec.get("deleted_at"):
         return None, "无效或已禁用的 API Key"
     return rec, None
-
-
-def try_reserve(key: str, price: int) -> bool:
-    """原子扣减余额（仅当余额足够）。返回是否成功——避免并发任务把余额扣成负数。"""
-    if price <= 0:
-        return True
-    n = db_exec("UPDATE api_keys SET balance_cents=balance_cents-? "
-                "WHERE key=? AND balance_cents>=?", (price, key, price), "rowcount")
-    return bool(n)
-
-
-def api_settle(key: str, link: str, ok: bool, price: int, job_id: str = ""):
-    """结算一次调用：成功则计入 spent/calls，失败则退回已预扣的余额；两种情况都记日志。"""
-    uid = (get_api_key(key) or {}).get("user_id")
-    if ok:
-        if price:
-            db_exec("UPDATE api_keys SET spent_cents=spent_cents+?, calls=calls+1, last_used=? "
-                    "WHERE key=?", (price, int(time.time()), key))
-    else:
-        if price:
-            db_exec("UPDATE api_keys SET balance_cents=balance_cents+? WHERE key=?", (price, key))
-    db_exec("INSERT INTO api_logs(ts,key,user_id,link,ok,cost_cents,job_id) VALUES(?,?,?,?,?,?,?)",
-            (int(time.time()), key, uid, link, 1 if ok else 0, price if ok else 0, job_id))
 
 
 # ---------------------------------------------------------------- HTTP 出站层
@@ -1321,7 +1822,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
         except urlerr.HTTPError as e:
             if e.code in (403, 401):                # 抖音封禁该代理 IP → 落库+禁用+换代理
                 proxy_mgr.mark_banned(p, f"抖音返回 {e.code}，IP 被封禁")
-                errors.append(f"{p['url']} → 被封禁(HTTP {e.code})")
+                errors.append(f"{_proxy_public_label(p)} → 被封禁(HTTP {e.code})")
                 continue
             # 其他 4xx/5xx 是源站问题，不怪代理，直接上抛
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
@@ -1330,15 +1831,17 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             msg = str(e).lower()
             if "403" in msg or "forbidden" in msg or "tunnel connection failed" in msg:
                 proxy_mgr.mark_banned(p, "代理无法连接抖音（403/被封禁）")
-                errors.append(f"{p['url']} → 被封禁(403)")
+                errors.append(f"{_proxy_public_label(p)} → 被封禁(403)")
             else:
                 proxy_mgr.mark_fail(p)
-                errors.append(f"{p['url']} → {type(e).__name__}: {e}")
+                errors.append(
+                    f"{_proxy_public_label(p)} → {type(e).__name__}: "
+                    f"{_redact_proxy_error(e)}")
 
     # 所有代理都连不通
     if proxy_mgr.force_proxy:
-        raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音（防止暴露服务器 IP）。"
-                            "请在管理后台检查代理。明细：" + " | ".join(errors[:3]))
+        raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音。"
+                            "请在管理后台检查代理状态。")
     r = _raw_open(url, follow, hdrs, timeout, None)   # 仅在管理员显式允许时直连
     proxy_mgr.mark_ok(None)
     return r, None
@@ -1349,20 +1852,40 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
 app = FastAPI(title="抖音无水印下载器", version=APP_VERSION)
 
 
+@app.middleware("http")
+async def _private_api_responses(request: Request, call_next):
+    """API 响应可能含签名地址、账号或密钥，禁止浏览器与共享代理持久化。"""
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 class ApiError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, headers: Optional[dict] = None):
         self.status, self.message = status, message
+        self.headers = headers or {}
 
 
 @app.exception_handler(ApiError)
 async def _api_error(_: Request, exc: ApiError):
-    return JSONResponse(status_code=exc.status, content={"error": exc.message})
+    return JSONResponse(status_code=exc.status, content={"error": exc.message},
+                        headers=exc.headers)
 
 
 def _host_allowed(url: str) -> bool:
-    if not url.startswith(("http://", "https://")):
+    if not isinstance(url, str) or len(url) > 4096:
         return False
-    host = urlparse.urlsplit(url).hostname or ""
+    try:
+        p = urlparse.urlsplit(url)
+        if p.scheme not in ("http", "https") or p.username or p.password:
+            return False
+        if p.port not in (None, 80, 443):
+            return False
+        host = (p.hostname or "").lower().rstrip(".")
+    except (ValueError, TypeError):
+        return False
     return any(host == s or host.endswith("." + s) for s in ALLOWED_HOST_SUFFIXES)
 
 
@@ -1383,16 +1906,32 @@ def _safe_name(desc: str, fallback: str) -> str:
     return (name or fallback)[:60]
 
 
-def _proxy_url(upstream: str, name: str = "", download: bool = False) -> str:
-    q = {"url": upstream}
-    if name:
-        q["name"] = name
-    if download:
-        q["dl"] = "1"
-    return "/api/media?" + urlparse.urlencode(q)
+def _media_signature(kind: str, resource: str, exp: int) -> str:
+    payload = f"media:v1\n{kind}\n{resource}\n{int(exp)}".encode()
+    return hmac.new(APP_SECRET, payload, hashlib.sha256).hexdigest()
 
 
-def _stream(resp, chunk=256 * 1024):
+def _media_token(kind: str, resource: str, ttl: int = MEDIA_TOKEN_TTL) -> tuple:
+    exp = int(time.time()) + max(60, int(ttl))
+    return exp, _media_signature(kind, resource, exp)
+
+
+def _require_media_token(kind: str, resource: str, exp: int, sig: str) -> None:
+    now = int(time.time())
+    if (not re.fullmatch(r"[0-9a-f]{64}", sig or "")
+            or exp < now or exp > now + MEDIA_TOKEN_TTL + 300):
+        raise ApiError(403, "媒体链接已过期，请重新解析或刷新页面")
+    expected = _media_signature(kind, resource, exp)
+    if not hmac.compare_digest(sig, expected):
+        raise ApiError(403, "媒体链接签名无效")
+
+
+def _video_proxy_url(vid: str) -> str:
+    exp, sig = _media_token("video", vid)
+    return f"/api/video/{vid}?" + urlparse.urlencode({"exp": exp, "sig": sig})
+
+
+def _stream(resp, chunk=256 * 1024, on_close=None):
     try:
         while True:
             block = resp.read(chunk)
@@ -1400,7 +1939,111 @@ def _stream(resp, chunk=256 * 1024):
                 break
             yield block
     finally:
-        resp.close()
+        if on_close:
+            on_close()
+        else:
+            resp.close()
+
+
+_media_limit_lock = threading.Lock()
+_media_hits: dict = {}
+_media_active: dict = {}
+
+
+class _MediaLease:
+    def __init__(self, key: str):
+        self.key = key
+        self.released = False
+
+
+def _media_lease(request: Request) -> _MediaLease:
+    """为一次媒体流申请 IP 级请求/并发租约；仅在流关闭时释放并发计数。"""
+    key = _client_ip(request)
+    now = time.time()
+    with _media_limit_lock:
+        hits = [t for t in _media_hits.get(key, []) if now - t < 60]
+        if len(hits) >= MEDIA_REQUESTS_PER_MIN:
+            raise ApiError(429, "媒体请求过于频繁，请稍后再试",
+                           {"Retry-After": "60"})
+        if _media_active.get(key, 0) >= MEDIA_MAX_CONCURRENT:
+            raise ApiError(429, "同时播放或下载的媒体过多，请稍后再试",
+                           {"Retry-After": "2"})
+        hits.append(now)
+        _media_hits[key] = hits
+        _media_active[key] = _media_active.get(key, 0) + 1
+    return _MediaLease(key)
+
+
+def _media_release(lease: _MediaLease) -> None:
+    with _media_limit_lock:
+        if lease.released:
+            return
+        lease.released = True
+        active = _media_active.get(lease.key, 0) - 1
+        if active > 0:
+            _media_active[lease.key] = active
+        else:
+            _media_active.pop(lease.key, None)
+
+
+class _MediaStreamingResponse(StreamingResponse):
+    """无论 ASGI 在响应头、首块或流中何处中断，都释放媒体并发租约。"""
+    def __init__(self, *args, finalize, **kwargs):
+        self._media_finalize = finalize
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._media_finalize()
+
+
+def _media_finalizer(upstream, lease: _MediaLease):
+    """返回线程安全、幂等的上游关闭 + 并发租约释放函数。"""
+    lock = threading.Lock()
+    closed = False
+
+    def finalize():
+        nonlocal closed
+        with lock:
+            if closed:
+                return
+            closed = True
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        finally:
+            _media_release(lease)
+
+    return finalize
+
+
+def _sweep_media_limits() -> None:
+    now = time.time()
+    with _media_limit_lock:
+        for key, hits in list(_media_hits.items()):
+            fresh = [t for t in hits if now - t < 60]
+            if fresh:
+                _media_hits[key] = fresh
+            else:
+                _media_hits.pop(key, None)
+
+
+def _valid_single_range(value: str) -> bool:
+    """仅接受单段 bytes Range，拒绝多段请求放大与异常长请求头。"""
+    if not value:
+        return True
+    value = value.strip()
+    if len(value) > 100:
+        return False
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value)
+    if not match or not any(match.groups()):
+        return False
+    start, end = match.groups()
+    return not ((start and end and int(start) > int(end))
+                or (not start and int(end) <= 0))
 
 
 def _content_disposition(name: str) -> str:
@@ -1419,11 +2062,61 @@ def _play_api(vid: str) -> str:
     """无水印播放接口地址。交给用户浏览器直接请求：
 
     浏览器 GET 该地址 → 302 → 跟随到 CDN 直链（按浏览器自身 IP/地区解析）→ 播放。
-    这样视频字节不经过本服务器（省带宽、不暴露服务器 IP），且 CDN 直链与浏览器
-    同 IP，避免"服务器/代理 IP 解析的直链换个 IP 打不开"的问题。
+    普通浏览器优先用它，让视频字节不经过本服务器（省带宽、不暴露服务器 IP），
+    且 CDN 直链与浏览器同 IP，避免"服务器/代理 IP 解析的直链换个 IP 打不开"。
     实测该接口对桌面 UA / 无 UA 均返回 200，浏览器可直连。
     """
     return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
+
+
+def _play_api_alt(vid: str) -> str:
+    """备用播放域名。与 aweme.snssdk.com 互为备份（见 docs/产品文档.md §风险表）。
+
+    微信内不同机型/内核对这两个域名的可达性不一致（部分环境 snssdk 被拦、
+    iesdouyin 可播，反之亦然）。普通浏览器在服务器代理前尝试此线路以节省带宽；
+    微信内则把它留作同源代理失败后的备线。
+    """
+    return f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
+
+
+def _video_download_url(vid: str, filename: str = "video.mp4") -> str:
+    """同源下载地址：直连下载受 CORS/Content-Disposition 限制时由服务器流式兜底。"""
+    exp, sig = _media_token("video", vid)
+    return f"/api/video/{vid}?" + urlparse.urlencode({
+        "exp": exp,
+        "sig": sig,
+        "dl": "1",
+        "name": filename or "video.mp4",
+    })
+
+
+def _card_cover(cover: str) -> str:
+    """把抖音封面直链转成"适合当社交卡片图"的形式：**去签名 + 转 JPEG**。
+
+    抖音给的封面是 `https://p26-sign.douyinpic.com/...webp?x-expires=...&x-signature=...`，
+    当 og:image 有两个硬伤：① `.webp` 微信卡片缩略图支持不稳定；② 签名 ~14 天过期，
+    过期后存量分享页全变无图卡片。
+
+    实测（见 README 更新日志 v1.7.0）：把主机的 `-sign` 去掉、扩展名换成 `.jpeg`，
+    抖音会返回 **无签名、不过期的 JPEG**（同一张图，体积略大）。签名覆盖了路径，
+    所以只换扩展名不去 -sign 主机会 403，两步必须一起做。
+
+    只认白名单内的抖音图床，转换失败就原样返回（宁可用 webp，也不要吐出个坏链接）。
+    """
+    if not cover or not cover.startswith("https://"):
+        return cover
+    try:
+        if not _host_allowed(cover):
+            return cover
+        p = urlparse.urlsplit(cover)
+        host, path = p.netloc, p.path
+        if "-sign." not in host or not path.lower().endswith((".webp", ".jpeg", ".jpg")):
+            return cover
+        host = host.replace("-sign.", ".", 1)
+        path = re.sub(r"\.webp$", ".jpeg", path, flags=re.I)
+        return f"https://{host}{path}"        # 丢掉 query（签名参数），无签名主机不需要
+    except Exception:
+        return cover
 
 
 def _parse_share(text: str) -> dict:
@@ -1564,8 +2257,10 @@ def _parse_item(kind: str, item_id: str) -> dict:
         "cover": cover_list[0] if cover_list else "",
         "video": {
             "url": _play_api(vid),                    # 浏览器直连播放/下载（自行跟随 302）
-            "proxy_url": f"/api/video/{vid}",         # 兜底：直连失败时改走服务器代理
+            "alt_url": _play_api_alt(vid),            # 备用抖音域名（线路顺序由前端按运行环境决定）
+            "proxy_url": _video_proxy_url(vid),       # 同源签名流：微信优先，普通浏览器兜底
             "filename": f"{base}.mp4",
+            "download_url": _video_download_url(vid, f"{base}.mp4"),
             "width": video.get("width"),
             "height": video.get("height"),
         },
@@ -1688,7 +2383,12 @@ def _share_view(row: dict, origin: str = "") -> dict:
     if row["kind"] != "note" and row["vid"]:
         data.setdefault("video", {})
         data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
-        data["video"]["proxy_url"] = f"/api/video/{row['vid']}"
+        data["video"]["alt_url"] = _play_api_alt(row["vid"])   # 备用抖音域名
+        data["video"]["proxy_url"] = _video_proxy_url(row["vid"])
+        filename = data["video"].get("filename") or (
+            _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
+        data["video"]["filename"] = filename
+        data["video"]["download_url"] = _video_download_url(row["vid"], filename)
     return {
         "sid": row["id"],
         "kind": row["kind"],
@@ -1697,6 +2397,8 @@ def _share_view(row: dict, origin: str = "") -> dict:
         "author": row["author"] or "",
         "avatar": row["avatar"] or "",
         "cover": row["cover"] or "",
+        # 社交分享用的封面（无签名 JPEG、不过期）——JS-SDK 卡片图与海报都用它
+        "card_cover": _card_cover(row["cover"] or ""),
         "created": row["created"],
         "expires_at": row["expires_at"],
         "state": _share_state(row),
@@ -1719,7 +2421,7 @@ def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
         "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
         "refreshed_at,status,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sid, data.get("item_id", ""), data.get("kind", "video"), vid,
-         u["id"] if u else None, _client_fp(request), _client_ip(request),
+         u["id"] if u else None, "", "",
          (data.get("title") or "")[:300], (data.get("author") or "")[:100],
          data.get("avatar", ""), data.get("cover", ""),
          json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
@@ -1728,18 +2430,20 @@ def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
     return _share_view(row, _share_origin(request))      # 新链接按域名池分配
 
 
-def _share_event(request: Request, sid: str, kind: str):
+def _share_event(request: Request, sid: str, kind: str, source: str = "",
+                 stage: str = "", detail: str = "", ms: int = 0):
+    """记录分享页埋点。播放类事件额外带 source/stage/detail/ms，用于诊断
+    「微信里哪些视频能播、走的哪条线路、失败在哪一步」（后台「播放诊断」看板）。"""
     col = {"view": "views", "play": "plays",
            "download": "downloads", "cta": "cta_clicks"}.get(kind)
     try:
         if col:
             db_exec(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
-        db_exec("INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (int(time.time()), sid, kind, _client_ip(request),
-                 (request.headers.get("user-agent") or "")[:200],
-                 (request.headers.get("referer") or "")[:200],
-                 1 if _is_wechat(request) else 0, _client_fp(request)))
+        db_exec("INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp,"
+                "source,stage,detail,ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (int(time.time()), sid, kind, "", _coarse_ua(request), "",
+                 1 if _is_wechat(request) else 0, "",
+                 source[:24], stage[:24], detail[:120], int(ms or 0)))
     except Exception:
         pass
 
@@ -1770,11 +2474,15 @@ def api_share_create(body: ShareBody, request: Request):
     if data is None:
         if not body.text.strip():
             raise ApiError(400, "解析结果已过期，请重新粘贴链接后再生成分享页")
-        limit, used, remaining = quota_status(request)      # 需要真解析才计配额
-        if remaining <= 0:
-            raise _quota_error(limit)
-        data = _parse_cached(body.text)
-        reserve_quota(request, 1)
+        reservation = reserve_quota(request, 1, endpoint="share_parse")
+        if not reservation["ok"]:
+            raise _quota_error(reservation["limit"])
+        try:
+            data = _parse_cached(body.text)
+        except Exception:
+            release_quota(reservation)
+            raise
+        settle_quota(reservation, 1)
     if not data.get("item_id"):
         raise ApiError(400, "解析数据不完整，无法生成分享页")
     return _share_create(request, data, body.title)
@@ -1790,12 +2498,23 @@ def api_share_get(sid: str, request: Request):
 
 class ShareEventBody(BaseModel):
     kind: str
+    source: str = ""            # 播放线路：dy1(aweme.snssdk) / dy2(iesdouyin) / proxy(服务器兜底)
+    stage: str = ""             # 该线路的结果：start / ok / error / timeout / giveup
+    detail: str = ""            # 失败细节（media error code、readyState 等）
+    ms: int = 0                 # 从该线路开始到出结果的耗时
+
+
+# 播放诊断事件：play_try/play_ok/play_fail 只写 share_events，不累加 shares 计数，
+# 避免把「尝试次数」混进 plays（plays 仍只由 play 事件累加，代表一次成功起播）。
+SHARE_EVENT_KINDS = ("view", "play", "download", "cta", "fallback",
+                     "play_try", "play_ok", "play_fail")
 
 
 @app.post("/api/share/{sid}/event")
 def api_share_event(sid: str, body: ShareEventBody, request: Request):
-    if body.kind in ("view", "play", "download", "cta", "fallback"):
-        _share_event(request, sid, body.kind)
+    if body.kind in SHARE_EVENT_KINDS:
+        _share_event(request, sid, body.kind, body.source, body.stage,
+                     body.detail, body.ms)
     return {"ok": True}
 
 
@@ -1858,7 +2577,7 @@ def api_report(body: ReportBody, request: Request):
         raise ApiError(400, "请填写投诉理由")
     db_exec("INSERT INTO reports(ts,sid,reason,contact,ip) VALUES(?,?,?,?,?)",
             (int(time.time()), body.sid[:32], body.reason[:1000],
-             body.contact[:200], _client_ip(request)))
+             body.contact[:200], ""))
     return {"ok": True, "message": "已收到，我们会尽快处理"}
 
 
@@ -1940,15 +2659,16 @@ def _quota_error(limit: int):
 
 @app.post("/api/parse")
 def api_parse(body: ParseBody, request: Request):
-    limit, used, remaining = quota_status(request)
-    if remaining <= 0:
-        raise _quota_error(limit)
+    reservation = reserve_quota(request, 1, endpoint="parse")
+    if not reservation["ok"]:
+        raise _quota_error(reservation["limit"])
     try:
         data = _parse_cached(body.text)
-    except ApiError:
+    except Exception:
+        release_quota(reservation)
         log_request(request, "web", body.text[:100], False)
         raise
-    reserve_quota(request, 1)                 # 成功才计一次
+    settle_quota(reservation, 1)
     log_request(request, "web", body.text[:100], True)
     return data
 
@@ -1965,36 +2685,472 @@ def _extract_links(text: str) -> list:
     return uniq
 
 
-def _run_job(job_id: str, key: str, links: list):
-    """后台线程：逐条『先原子预扣、再解析、失败退款』，并发安全，不会把余额扣成负。"""
-    results, ok_n, cost = [], 0, 0
-    price = api_price_cents()
-    for i, l in enumerate(links):
-        if not try_reserve(key, price):                    # 原子预扣，余额不足即停
-            results.append({"link": l, "ok": False, "error": "余额不足，已停止",
-                            "code": "insufficient_balance"})
-            db_exec("UPDATE jobs SET done=done+1, results=? WHERE id=?",
-                    (json.dumps(results, ensure_ascii=False), job_id))
+API_JOB_LEASE_SECONDS = max(120, int(os.environ.get("API_JOB_LEASE_SECONDS", "600")))
+API_JOB_HEARTBEAT_SECONDS = max(
+    10, min(API_JOB_LEASE_SECONDS // 3,
+            int(os.environ.get("API_JOB_HEARTBEAT_SECONDS", "30"))))
+_JOB_TERMINAL = ("succeeded", "failed", "cancelled")
+_job_stop = threading.Event()
+_job_wakeup = queue.Queue(maxsize=1)
+_job_threads: list[threading.Thread] = []
+_job_workers_guard = threading.Lock()
+_job_instance = "jw_" + secrets.token_urlsafe(9)
+
+
+def _api_price_from_conn(conn) -> int:
+    row = conn.execute(
+        "SELECT v FROM app_settings WHERE k='api_price_cents'").fetchone()
+    try:
+        return max(0, int(row["v"] if row else "1"))
+    except Exception:
+        return 1
+
+
+def _json_list(value) -> list:
+    try:
+        out = json.loads(value or "[]")
+        return out if isinstance(out, list) else []
+    except Exception:
+        return []
+
+
+def _job_item_result(row) -> Optional[dict]:
+    item = dict(row)
+    status = item.get("status")
+    if status == "succeeded":
+        try:
+            data = json.loads(item.get("result") or "{}")
+        except Exception:
+            data = {}
+        out = {"link": item.get("link") or "", "ok": True, "data": data}
+        if item.get("error"):
+            out["warning"] = item["error"]
+        return out
+    if status in ("failed", "cancelled"):
+        out = {"link": item.get("link") or "", "ok": False,
+               "error": item.get("error") or "解析失败"}
+        if status == "cancelled":
+            out["code"] = "cancelled"
+        return out
+    return None
+
+
+def _refresh_job_aggregate(conn, job_id: str, now: Optional[int] = None) -> None:
+    """在调用者事务内，从 item 事实表重建 job 聚合；只在完成时写一次 results 快照。"""
+    now = int(now or time.time())
+    job = conn.execute("SELECT total FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not job:
+        return
+    agg = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN status IN ('succeeded','failed','cancelled') THEN 1 ELSE 0 END) done,"
+        "SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) ok,"
+        "COALESCE(SUM(CASE WHEN status='succeeded' THEN price_cents ELSE 0 END),0) cost,"
+        "SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) running "
+        "FROM job_items WHERE job_id=?", (job_id,)).fetchone()
+    done = int(agg["done"] or 0)
+    ok_n = int(agg["ok"] or 0)
+    cost = int(agg["cost"] or 0)
+    total = int(job["total"] or 0)
+    if done >= total:
+        status, finished = "done", now
+        rows = conn.execute(
+            "SELECT * FROM job_items WHERE job_id=? ORDER BY idx", (job_id,)).fetchall()
+        results = [r for r in (_job_item_result(x) for x in rows) if r is not None]
+        conn.execute(
+            "UPDATE jobs SET status=?,done=?,ok=?,cost_cents=?,results=?,"
+            "updated=?,finished=COALESCE(finished,?) WHERE id=?",
+            (status, done, ok_n, cost, json.dumps(results, ensure_ascii=False),
+             now, finished, job_id))
+    else:
+        status = "running" if int(agg["running"] or 0) or done else "pending"
+        conn.execute(
+            "UPDATE jobs SET status=?,done=?,ok=?,cost_cents=?,updated=?,finished=NULL "
+            "WHERE id=?", (status, done, ok_n, cost, now, job_id))
+
+
+def _claim_job_item(owner: str) -> Optional[dict]:
+    """用数据库租约/CAS 领取一项；过期 running 可恢复，但绝不再次预扣。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT ji.*,j.key,j.user_id FROM job_items ji "
+                "JOIN jobs j ON j.id=ji.job_id "
+                "WHERE ji.reserved=1 AND j.status IN ('pending','running') AND "
+                "(ji.status IN ('pending','reserved') OR "
+                "(ji.status='running' AND COALESCE(ji.lease_until,0)<?)) "
+                # 持久性异常导致某项重复出租约时，先让未重试项继续前进，避免队首饥饿。
+                "ORDER BY COALESCE(ji.attempts,0),j.created,ji.idx LIMIT 1",
+                (now,)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            n = conn.execute(
+                "UPDATE job_items SET status='running',lease_owner=?,lease_until=?,"
+                "attempts=COALESCE(attempts,0)+1,started=COALESCE(started,?) "
+                "WHERE job_id=? AND idx=? AND reserved=1 AND "
+                "(status IN ('pending','reserved') OR "
+                "(status='running' AND COALESCE(lease_until,0)<?))",
+                (owner, now + API_JOB_LEASE_SECONDS, now,
+                 row["job_id"], row["idx"], now)).rowcount
+            if n != 1:
+                conn.rollback()
+                return None
+            conn.execute(
+                "UPDATE jobs SET status='running',updated=? "
+                "WHERE id=? AND status<>'done'", (now, row["job_id"]))
+            conn.commit()
+            item = dict(row)
+            item["lease_owner"] = owner
+            item["attempts"] = int(row["attempts"] or 0) + 1
+            return item
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _release_job_lease(item: dict) -> None:
+    """本进程遇到临时内部错误时立即让出租约，避免 heartbeat 把孤儿项永久续租。"""
+    db_exec(
+        "UPDATE job_items SET lease_until=0 WHERE job_id=? AND idx=? "
+        "AND status='running' AND lease_owner=?",
+        (item["job_id"], item["idx"], item["lease_owner"]))
+    _wake_job_workers()
+
+
+def _finish_job_item(item: dict, ok: bool, data: Optional[dict] = None,
+                     error_message: str = "") -> bool:
+    """CAS 完成 item，并在同一事务内扣 reserved/入 spent 或精确退款、写账本和日志。"""
+    now = int(time.time())
+    terminal = "succeeded" if ok else "failed"
+    result_json = json.dumps(data or {}, ensure_ascii=False) if ok else None
+    error_message = (error_message or "")[:300]
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT ji.*,j.key,j.user_id FROM job_items ji "
+                "JOIN jobs j ON j.id=ji.job_id "
+                "WHERE ji.job_id=? AND ji.idx=? AND ji.status='running' "
+                "AND ji.reserved=1 AND ji.lease_owner=?",
+                (item["job_id"], item["idx"], item["lease_owner"])).fetchone()
+            if not row:
+                conn.rollback()       # 租约已被别的 worker 接管或已经结算
+                return False
+            changed = conn.execute(
+                "UPDATE job_items SET status=?,reserved=0,result=?,error=?,finished=?,"
+                "lease_owner=NULL,lease_until=NULL WHERE job_id=? AND idx=? "
+                "AND status='running' AND reserved=1 AND lease_owner=?",
+                (terminal, result_json, error_message or None, now,
+                 row["job_id"], row["idx"], item["lease_owner"])).rowcount
+            if changed != 1:
+                conn.rollback()
+                return False
+
+            price = max(0, int(row["price_cents"] or 0))
+            if ok:
+                account_changed = conn.execute(
+                    "UPDATE api_keys SET reserved_cents=reserved_cents-?,"
+                    "spent_cents=spent_cents+?,calls=calls+1,last_used=? "
+                    "WHERE key=? AND COALESCE(reserved_cents,0)>=?",
+                    (price, price, now, row["key"], price)).rowcount
+                event, balance_delta, reserved_delta = "charge", 0, -price
+                spent_delta, calls_delta, reason = price, 1, "parse_succeeded"
+            else:
+                account_changed = conn.execute(
+                    "UPDATE api_keys SET reserved_cents=reserved_cents-?,"
+                    "balance_cents=balance_cents+? "
+                    "WHERE key=? AND COALESCE(reserved_cents,0)>=?",
+                    (price, price, row["key"], price)).rowcount
+                event, balance_delta, reserved_delta = "refund", price, -price
+                spent_delta, calls_delta, reason = 0, 0, "parse_failed"
+            if account_changed != 1:
+                raise RuntimeError("API 预授权账户不存在或 reserved_cents 对账失败")
+
+            conn.execute(
+                "INSERT INTO api_ledger("
+                "ts,key,job_id,item_idx,event,balance_delta,reserved_delta,"
+                "spent_delta,calls_delta,reason) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (now, row["key"], row["job_id"], row["idx"], event,
+                 balance_delta, reserved_delta, spent_delta, calls_delta, reason))
+            conn.execute(
+                "INSERT INTO api_logs("
+                "ts,key,user_id,link,ok,cost_cents,job_id,item_idx"
+                ") VALUES(?,?,?,?,?,?,?,?)",
+                (now, row["key"], row["user_id"], row["link"], 1 if ok else 0,
+                 price if ok else 0, row["job_id"], row["idx"]))
+            _refresh_job_aggregate(conn, row["job_id"], now)
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _run_claimed_job_item(item: dict) -> None:
+    try:
+        data = _parse_cached(item["link"])
+    except ApiError as e:
+        _finish_job_item(item, False, error_message=e.message)
+    except Exception as e:
+        _finish_job_item(
+            item, False,
+            error_message="内部解析错误：" + _redact_proxy_error(e))
+    else:
+        _finish_job_item(item, True, data=data)
+
+
+def _wake_job_workers() -> None:
+    try:
+        _job_wakeup.put_nowait(True)
+    except queue.Full:
+        pass
+
+
+def _job_worker_loop(worker_no: int) -> None:
+    owner = f"{_job_instance}:{worker_no}"
+    while not _job_stop.is_set():
+        try:
+            item = _claim_job_item(owner)
+        except Exception:
+            _job_stop.wait(1)
+            continue
+        if item is None:
+            try:
+                _job_wakeup.get(timeout=1)
+            except queue.Empty:
+                pass
             continue
         try:
-            data = _parse_cached(l)
-            results.append({"link": l, "ok": True, "data": data})
-            api_settle(key, l, True, price, job_id)
-            ok_n += 1
-            cost += price
-        except ApiError as e:
-            results.append({"link": l, "ok": False, "error": e.message})
-            api_settle(key, l, False, price, job_id)       # 失败退回预扣
-        except Exception as e:
-            results.append({"link": l, "ok": False, "error": str(e)})
-            api_settle(key, l, False, price, job_id)
-        # 结果较大时降低写库频率（每 5 条或最后一条落一次），避免 O(n²) 序列化
-        if (i + 1) % 5 == 0 or i + 1 == len(links):
-            db_exec("UPDATE jobs SET done=?, ok=?, cost_cents=?, results=? WHERE id=?",
-                    (len(results), ok_n, cost, json.dumps(results, ensure_ascii=False), job_id))
-    db_exec("UPDATE jobs SET status='done', done=?, ok=?, cost_cents=?, results=?, finished=? WHERE id=?",
-            (len(results), ok_n, cost, json.dumps(results, ensure_ascii=False),
-             int(time.time()), job_id))
+            _run_claimed_job_item(item)
+        except Exception:
+            # 数据库瞬时故障时不改变预授权；释放租约后由本/下一进程重试。
+            try:
+                _release_job_lease(item)
+            except Exception:
+                pass
+            _job_stop.wait(0.5)
+
+
+def _job_heartbeat_loop() -> None:
+    owner_prefix = _job_instance + ":"
+    while not _job_stop.wait(API_JOB_HEARTBEAT_SECONDS):
+        try:
+            db_exec(
+                "UPDATE job_items SET lease_until=? WHERE status='running' "
+                "AND substr(lease_owner,1,?)=?",
+                (int(time.time()) + API_JOB_LEASE_SECONDS,
+                 len(owner_prefix), owner_prefix))
+        except Exception:
+            pass
+
+
+def _recover_legacy_api_jobs() -> dict:
+    """一次性终结旧 daemon 遗留任务；无法证明的至多一笔预扣按用户有利原则退款。"""
+    now = int(time.time())
+    recovered = refunded = 0
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            legacy = conn.execute(
+                "SELECT j.* FROM jobs j WHERE j.status<>'done' AND NOT EXISTS "
+                "(SELECT 1 FROM job_items ji WHERE ji.job_id=j.id) "
+                "ORDER BY j.created").fetchall()
+            current_price = _api_price_from_conn(conn)
+            for job in legacy:
+                links = [str(x) for x in _json_list(job["links"])]
+                old_results = _json_list(job["results"])
+                logs = conn.execute(
+                    "SELECT * FROM api_logs WHERE job_id=? ORDER BY id",
+                    (job["id"],)).fetchall()
+                total = max(int(job["total"] or 0), len(links),
+                            len(old_results), len(logs))
+                positive_prices = [int(x["cost_cents"] or 0) for x in logs
+                                   if int(x["cost_cents"] or 0) > 0]
+                fallback_price = max(
+                    [int(job["price_cents"] or 0), current_price, *positive_prices])
+                built = []
+                for idx in range(total):
+                    prior = old_results[idx] if idx < len(old_results) else None
+                    log = logs[idx] if idx < len(logs) else None
+                    link = (links[idx] if idx < len(links) else
+                            (prior.get("link", "") if isinstance(prior, dict) else
+                             (log["link"] if log else "")))
+                    if isinstance(prior, dict):
+                        succeeded = bool(prior.get("ok"))
+                        result = prior.get("data") if succeeded else None
+                        err = "" if succeeded else str(prior.get("error") or "解析失败")
+                    elif log is not None:
+                        succeeded = bool(log["ok"])
+                        result = {} if succeeded else None
+                        err = ("旧任务已计费，但结果在重启前未完整落库"
+                               if succeeded else "旧任务解析失败")
+                    else:
+                        succeeded, result = False, None
+                        err = "服务升级时任务尚未完成，已取消并执行保守退款"
+                    status = "succeeded" if succeeded else (
+                        "failed" if log is not None or prior is not None else "cancelled")
+                    item_price = (int(log["cost_cents"] or 0)
+                                  if succeeded and log is not None else fallback_price)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO job_items("
+                        "job_id,idx,link,status,price_cents,reserved,result,error,"
+                        "attempts,started,finished) VALUES(?,?,?,?,?,0,?,?,0,?,?)",
+                        (job["id"], idx, link, status, item_price,
+                         json.dumps(result or {}, ensure_ascii=False) if succeeded else None,
+                         err or None, job["created"], now))
+                    if log is not None and log["item_idx"] is None:
+                        conn.execute(
+                            "UPDATE api_logs SET item_idx=? WHERE id=? AND item_idx IS NULL",
+                            (idx, log["id"]))
+                    built.append(_job_item_result({
+                        "link": link, "status": status,
+                        "result": (json.dumps(result or {}, ensure_ascii=False)
+                                   if succeeded else None),
+                        "error": err or None,
+                    }))
+
+                # 旧执行器逐项串行，同一 job 在崩溃点至多有一笔“已扣余额但未结算”。
+                # 旧 schema 没有证据能区分它是否发生，故只做一次、偏向用户的安全退款。
+                key_row = conn.execute(
+                    "SELECT 1 FROM api_keys WHERE key=?", (job["key"],)).fetchone()
+                if key_row and fallback_price > 0:
+                    conn.execute(
+                        "UPDATE api_keys SET balance_cents=balance_cents+? WHERE key=?",
+                        (fallback_price, job["key"]))
+                    conn.execute(
+                        "INSERT INTO api_ledger("
+                        "ts,key,job_id,event,balance_delta,reason"
+                        ") VALUES(?,?,?,?,?,?)",
+                        (now, job["key"], job["id"], "legacy_safety_refund",
+                         fallback_price, "legacy_daemon_state_ambiguous"))
+                    refunded += fallback_price
+                conn.execute(
+                    "UPDATE jobs SET total=?,status='done',updated=?,finished=?,"
+                    "results=? WHERE id=?",
+                    (total, now, now,
+                     json.dumps([x for x in built if x], ensure_ascii=False), job["id"]))
+                _refresh_job_aggregate(conn, job["id"], now)
+                recovered += 1
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings(k,v) "
+                "VALUES('api_jobs_v2_legacy_recovered',?)", (str(now),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"jobs": recovered, "refunded_cents": refunded}
+
+
+def _reconcile_api_job_accounts() -> dict:
+    """启动对账：item 是预授权事实源；差异只按“不让用户少余额”的方向修复并记账。"""
+    now = int(time.time())
+    repaired = 0
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            keys = conn.execute(
+                "SELECT key,COALESCE(balance_cents,0) balance_cents,"
+                "COALESCE(reserved_cents,0) reserved_cents FROM api_keys").fetchall()
+            for key_row in keys:
+                expected_row = conn.execute(
+                    "SELECT COALESCE(SUM(ji.price_cents),0) n FROM job_items ji "
+                    "JOIN jobs j ON j.id=ji.job_id WHERE j.key=? AND ji.reserved=1 "
+                    "AND ji.status IN ('pending','reserved','running')",
+                    (key_row["key"],)).fetchone()
+                expected = int(expected_row["n"] or 0)
+                actual = int(key_row["reserved_cents"] or 0)
+                if actual > expected:
+                    delta = actual - expected
+                    conn.execute(
+                        "UPDATE api_keys SET reserved_cents=?,balance_cents=balance_cents+? "
+                        "WHERE key=?", (expected, delta, key_row["key"]))
+                    conn.execute(
+                        "INSERT INTO api_ledger("
+                        "ts,key,event,balance_delta,reserved_delta,reason"
+                        ") VALUES(?,?,?,?,?,?)",
+                        (now, key_row["key"], "reconcile_refund",
+                         delta, -delta, "orphan_reserved_surplus"))
+                    repaired += 1
+                elif actual < expected:
+                    # 正常事务不可能走到这里；若磁盘/人工改库造成差额，补足 reserved
+                    # 而不再扣 available，避免恢复过程让用户二次付费。
+                    delta = expected - actual
+                    conn.execute(
+                        "UPDATE api_keys SET reserved_cents=? WHERE key=?",
+                        (expected, key_row["key"]))
+                    conn.execute(
+                        "INSERT INTO api_ledger("
+                        "ts,key,event,reserved_delta,reason) VALUES(?,?,?,?,?)",
+                        (now, key_row["key"], "reconcile_reserve",
+                         delta, "missing_reserve_repaired_user_favor"))
+                    repaired += 1
+            job_ids = conn.execute(
+                "SELECT DISTINCT job_id FROM job_items").fetchall()
+            for row in job_ids:
+                _refresh_job_aggregate(conn, row["job_id"], now)
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings(k,v) "
+                "VALUES('api_jobs_last_reconciled',?)", (str(now),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"accounts_repaired": repaired}
+
+
+def _prepare_api_jobs() -> None:
+    """启动线程前完成会依赖旧 api_logs 的恢复与账户对账。"""
+    _recover_legacy_api_jobs()
+    _reconcile_api_job_accounts()
+
+
+def _start_api_job_workers(prepared: bool = False) -> None:
+    with _job_workers_guard:
+        _job_threads[:] = [t for t in _job_threads if t.is_alive()]
+        if any(t.is_alive() for t in _job_threads):
+            return
+        if not prepared:
+            _prepare_api_jobs()
+        _job_stop.clear()
+        while True:
+            try:
+                _job_wakeup.get_nowait()
+            except queue.Empty:
+                break
+        heartbeat = threading.Thread(
+            target=_job_heartbeat_loop, name="api-job-heartbeat", daemon=False)
+        _job_threads.append(heartbeat)
+        for i in range(API_JOB_WORKERS):
+            _job_threads.append(threading.Thread(
+                target=_job_worker_loop, args=(i,),
+                name=f"api-job-worker-{i}", daemon=False))
+        for thread in _job_threads:
+            thread.start()
+        _wake_job_workers()
+
+
+def _stop_api_job_workers() -> None:
+    with _job_workers_guard:
+        _job_stop.set()
+        _wake_job_workers()
+        for thread in list(_job_threads):
+            thread.join(timeout=API_JOB_LEASE_SECONDS + 5)
+        _job_threads[:] = [t for t in _job_threads if t.is_alive()]
 
 
 class JobBody(BaseModel):
@@ -2003,32 +3159,93 @@ class JobBody(BaseModel):
 
 
 def _api_key_from(request: Request) -> str:
-    return request.headers.get("X-API-Key") or request.query_params.get("key", "")
+    # API Key 是长期计费凭据，只允许请求头；查询参数会泄露到 URL 历史和代理访问日志。
+    return request.headers.get("X-API-Key") or ""
 
 
 @app.post("/api/v1/jobs")
 def api_v1_create_job(body: JobBody, request: Request):
-    """提交批量解析任务（异步）。请求体：{links:[...]} 或 {text:"..."}。返回 job_id。"""
-    rec, err = api_key_check(_api_key_from(request))
+    """原子预授权整批费用并持久化 item；Idempotency-Key 重放返回同一任务。"""
+    key = _api_key_from(request)
+    rec, err = api_key_check(key)
     if err:
         raise ApiError(401, err)
     links = list(body.links or []) or _extract_links(body.text)
-    links = [l for l in links if re.match(r"https://v\.douyin\.com/[\w-]+", str(l))][:100]
+    links = [str(l) for l in links
+             if re.match(r"https://v\.douyin\.com/[\w-]+", str(l))][:100]
     if not links:
         raise ApiError(400, "links 为空或没有合法的 v.douyin.com 链接")
-    price = api_price_cents()
-    if rec["balance_cents"] < price:
-        raise ApiError(402, f"余额不足（当前 {rec['balance_cents']} 分，单价 {price} 分/条），请充值")
-    job_id = "job_" + secrets.token_urlsafe(12)
-    db_exec("INSERT INTO jobs(id,key,user_id,status,total,done,ok,cost_cents,links,results,created) "
-            "VALUES(?,?,?,?,?,0,0,0,?,?,?)",
-            (job_id, rec["key"], rec["user_id"], "pending", len(links),
-             json.dumps(links, ensure_ascii=False), "[]", int(time.time())))
-    threading.Thread(target=_run_job, args=(job_id, rec["key"], links), daemon=True).start()
+    request_id = (request.headers.get("Idempotency-Key") or "").strip() or None
+    if request_id and len(request_id) > 128:
+        raise ApiError(400, "Idempotency-Key 最长 128 个字符")
+    links_json = json.dumps(links, ensure_ascii=False)
+    now = int(time.time())
+    replay = None
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if request_id:
+                replay = conn.execute(
+                    "SELECT * FROM jobs WHERE key=? AND request_id=?",
+                    (key, request_id)).fetchone()
+                if replay:
+                    if _json_list(replay["links"]) != links:
+                        raise ApiError(409, "同一 Idempotency-Key 不能提交不同链接")
+                    conn.commit()
+                else:
+                    replay = None
+            if not replay:
+                key_row = conn.execute(
+                    "SELECT * FROM api_keys WHERE key=?", (key,)).fetchone()
+                if (not key_row or not key_row["enabled"]
+                        or key_row["deleted_at"] is not None):
+                    raise ApiError(401, "无效或已禁用的 API Key")
+                price = _api_price_from_conn(conn)
+                total_cost = price * len(links)
+                if int(key_row["balance_cents"] or 0) < total_cost:
+                    raise ApiError(
+                        402, f"余额不足（当前 {key_row['balance_cents']} 分，"
+                        f"本任务需预授权 {total_cost} 分），请充值")
+                job_id = "job_" + secrets.token_urlsafe(12)
+                conn.execute(
+                    "UPDATE api_keys SET balance_cents=balance_cents-?,"
+                    "reserved_cents=COALESCE(reserved_cents,0)+? WHERE key=?",
+                    (total_cost, total_cost, key))
+                conn.execute(
+                    "INSERT INTO jobs("
+                    "id,key,user_id,status,total,done,ok,cost_cents,links,results,"
+                    "created,price_cents,updated,request_id"
+                    ") VALUES(?,?,?,?,?,0,0,0,?,'[]',?,?,?,?)",
+                    (job_id, key, key_row["user_id"], "pending", len(links),
+                     links_json, now, price, now, request_id))
+                for idx, link in enumerate(links):
+                    conn.execute(
+                        "INSERT INTO job_items("
+                        "job_id,idx,link,status,price_cents,reserved,attempts"
+                        ") VALUES(?,?,?,'reserved',?,1,0)",
+                        (job_id, idx, link, price))
+                    conn.execute(
+                        "INSERT INTO api_ledger("
+                        "ts,key,job_id,item_idx,event,balance_delta,reserved_delta,reason"
+                        ") VALUES(?,?,?,?,?,?,?,?)",
+                        (now, key, job_id, idx, "reserve",
+                         -price, price, "job_pre_authorized"))
+                conn.commit()
+                replay = conn.execute(
+                    "SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    _wake_job_workers()
+    j = dict(replay)
     return {"code": 0, "message": "accepted", "data": {
-        "job_id": job_id, "total": len(links), "status": "pending",
-        "price_cents": price, "estimated_cost_cents": price * len(links),
-        "query_url": f"/api/v1/jobs/{job_id}"}}
+        "job_id": j["id"], "total": j["total"], "status": j["status"],
+        "price_cents": j["price_cents"],
+        "estimated_cost_cents": int(j["price_cents"] or 0) * int(j["total"] or 0),
+        "query_url": f"/api/v1/jobs/{j['id']}"}}
 
 
 @app.get("/api/v1/jobs/{job_id}")
@@ -2037,15 +3254,38 @@ def api_v1_get_job(job_id: str, request: Request):
     rec, err = api_key_check(_api_key_from(request))
     if err:
         raise ApiError(401, err)
-    row = db_exec("SELECT * FROM jobs WHERE id=? AND key=?", (job_id, rec["key"]), "one")
-    if not row:
-        raise ApiError(404, "任务不存在或无权访问")
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE id=? AND key=?",
+                (job_id, rec["key"])).fetchone()
+            if not row:
+                raise ApiError(404, "任务不存在或无权访问")
+            items = conn.execute(
+                "SELECT * FROM job_items WHERE job_id=? ORDER BY idx",
+                (job_id,)).fetchall()
+        finally:
+            conn.close()
     j = dict(row)
+    if items:
+        terminal = [x for x in items if x["status"] in _JOB_TERMINAL]
+        done = len(terminal)
+        ok_n = sum(1 for x in terminal if x["status"] == "succeeded")
+        cost = sum(int(x["price_cents"] or 0) for x in terminal
+                   if x["status"] == "succeeded")
+        status = ("done" if done >= int(j["total"] or 0) else
+                  ("running" if done or any(x["status"] == "running" for x in items)
+                   else "pending"))
+        results = [r for r in (_job_item_result(x) for x in items) if r is not None]
+    else:                       # v1 已完成任务仍可按旧 results 快照查询
+        done, ok_n, cost, status = j["done"], j["ok"], j["cost_cents"], j["status"]
+        results = _json_list(j["results"])
     return {"code": 0, "message": "ok", "data": {
-        "job_id": j["id"], "status": j["status"], "total": j["total"],
-        "done": j["done"], "ok": j["ok"], "cost_cents": j["cost_cents"],
+        "job_id": j["id"], "status": status, "total": j["total"],
+        "done": done, "ok": ok_n, "cost_cents": cost,
         "created": j["created"], "finished": j["finished"],
-        "results": json.loads(j["results"] or "[]")}}
+        "results": results}}
 
 
 @app.get("/api/v1/balance")
@@ -2056,6 +3296,7 @@ def api_v1_balance(request: Request):
         raise ApiError(401, err)
     return {"code": 0, "data": {
         "balance_cents": rec["balance_cents"], "spent_cents": rec["spent_cents"],
+        "reserved_cents": int(rec.get("reserved_cents") or 0),
         "calls": rec["calls"], "price_cents": api_price_cents()}}
 
 
@@ -2123,11 +3364,14 @@ def api_parse_batch(body: BatchBody, request: Request):
     if not uniq:
         raise ApiError(400, "未找到任何 v.douyin.com 分享链接")
 
-    limit, used, remaining = quota_status(request)
-    if remaining <= 0:
-        raise _quota_error(limit)
     uniq = uniq[:50]
-    process, over = uniq[:remaining], uniq[remaining:]   # 超额部分不解析
+    reservation = reserve_quota(
+        request, len(uniq), partial=True, endpoint="parse_batch")
+    if reservation["reserved"] <= 0:
+        raise _quota_error(reservation["limit"])
+    limit = reservation["limit"]
+    process = uniq[:reservation["reserved"]]
+    over = uniq[reservation["reserved"]:]   # 超额部分不解析
 
     out, spent = [], 0
     for l in process:
@@ -2138,15 +3382,16 @@ def api_parse_batch(body: BatchBody, request: Request):
         except ApiError as e:
             out.append({"ok": False, "link": l, "error": e.message})
             log_request(request, "web", l, False)
-        except Exception as e:
-            out.append({"ok": False, "link": l, "error": str(e)})
+        except Exception:
+            out.append({"ok": False, "link": l, "error": "内部解析错误，请稍后重试"})
+            log_request(request, "web", l, False)
     for l in over:
         out.append({"ok": False, "link": l,
                     "error": f"今日免费次数不足未解析（每天 {limit} 次，登录后 {FREE_USER_DAILY} 次）"})
-    if spent:
-        reserve_quota(request, spent)
+    settle_quota(reservation, spent)
+    remaining = quota_status(request)[2]
     return {"count": len(out), "results": out,
-            "quota": {"limit": limit, "remaining": max(0, remaining - spent)}}
+            "quota": {"limit": limit, "remaining": remaining}}
 
 
 class ExportBody(BaseModel):
@@ -2207,59 +3452,49 @@ def export_xlsx(body: ExportBody):
 
 
 @app.get("/api/video/{vid}")
-def api_video(vid: str, request: Request, dl: str = "", name: str = "video.mp4"):
+def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
+              dl: str = "", name: str = "video.mp4"):
     if not re.fullmatch(r"[\w-]{8,120}", vid):
         raise ApiError(400, "非法的视频 ID")
+    _require_media_token("video", vid, exp, sig)
+    range_header = request.headers.get("range", "")
+    if not _valid_single_range(range_header):
+        raise ApiError(416, "仅支持单段 bytes Range 请求")
+    lease = _media_lease(request)
     upstream = f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
     extra = dict(CDN_HEADERS)
-    if request.headers.get("range"):
-        extra["Range"] = request.headers["range"]
+    if range_header:
+        extra["Range"] = range_header
     try:
-        # 播放兜底（浏览器直连失败时才走这里）：经代理，绝不暴露服务器 IP
+        # 同源播放/下载线路（微信优先、普通浏览器兜底）：经代理，绝不直连暴露服务器 IP
         resp, _ = open_url(upstream, headers=extra)
     except ApiError:
+        _media_release(lease)
         raise
     except urlerr.HTTPError as e:
+        _media_release(lease)
         raise ApiError(502, f"视频源返回 {e.code}，链接可能已过期，请重新解析")
     except Exception:
+        _media_release(lease)
         raise ApiError(502, "拉取视频失败，请重试")
 
     status = resp.status if hasattr(resp, "status") else resp.getcode()
-    headers = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
     for h in ("Content-Length", "Content-Range"):
         v = resp.headers.get(h)
         if v:
             headers[h] = v
     if dl:
         headers["Content-Disposition"] = _content_disposition(name or "video.mp4")
-    return StreamingResponse(_stream(resp), status_code=status,
-                             media_type="video/mp4", headers=headers)
-
-
-@app.get("/api/media")
-def api_media(url: str, name: str = "", dl: str = ""):
-    if not _host_allowed(url):
-        raise ApiError(403, "该资源域名不在允许范围内")
-    try:
-        resp, _ = open_url(url, headers=CDN_HEADERS)   # 图片兜底代理：经代理，不暴露服务器 IP
-    except ApiError:
-        raise
-    except Exception:
-        raise ApiError(502, "拉取资源失败，请重试")
-    final = getattr(resp, "url", "") or url             # 跟随重定向后复核最终 host，防 SSRF 绕过白名单
-    if not _host_allowed(final):
-        try:
-            resp.close()
-        except Exception:
-            pass
-        raise ApiError(403, "资源重定向到了不允许的域名")
-    ctype = resp.headers.get("Content-Type", "image/jpeg")
-    headers = {"Cache-Control": "public, max-age=3600"}
-    if resp.headers.get("Content-Length"):
-        headers["Content-Length"] = resp.headers["Content-Length"]
-    if dl:
-        headers["Content-Disposition"] = _content_disposition(name or "image.jpeg")
-    return StreamingResponse(_stream(resp), media_type=ctype, headers=headers)
+    finalize = _media_finalizer(resp, lease)
+    return _MediaStreamingResponse(
+        _stream(resp, on_close=finalize),
+        finalize=finalize, status_code=status,
+        media_type="video/mp4", headers=headers)
 
 
 # 注：图集打包 ZIP 需服务器逐张下载再压缩，会走服务器 IP/带宽，
@@ -2291,9 +3526,16 @@ class LoginBody(BaseModel):
 
 
 @app.post("/api/admin/login")
-def admin_login(body: LoginBody):
+def admin_login(body: LoginBody, request: Request):
+    ip = _client_ip(request)
+    if _admin_fail_count(ip) >= ADMIN_LOGIN_MAX_FAILS:
+        raise ApiError(429, "登录失败次数过多，账号已临时锁定，请 15 分钟后再试")
     if not secrets.compare_digest(body.password, ADMIN_PASSWORD):
-        raise ApiError(403, "密码错误")
+        _admin_record_fail(ip)
+        left = ADMIN_LOGIN_MAX_FAILS - _admin_fail_count(ip)
+        raise ApiError(403, f"密码错误，还可尝试 {left} 次" if left > 0
+                       else "密码错误，账号已临时锁定，请 15 分钟后再试")
+    _admin_fails.pop(ip, None)          # 成功登录 → 清零失败计数
     tok = _new_session()
     resp = JSONResponse({"ok": True})
     resp.set_cookie("admin_session", tok, httponly=True, samesite="lax",
@@ -2484,24 +3726,28 @@ def admin_create_key(body: NewKeyBody, request: Request):
     return create_api_key(None, body.name)
 
 
-@app.delete("/api/admin/apikeys/{key}")
-def admin_revoke_key(key: str, request: Request):
+class KeyBody(BaseModel):
+    key: str
+
+
+@app.post("/api/admin/apikeys/revoke")
+def admin_revoke_key(body: KeyBody, request: Request):
     _require_admin(request)
-    if not revoke_api_key(key):
+    if not revoke_api_key(body.key):
         raise ApiError(404, "API Key 不存在")
     return {"ok": True}
 
 
-class RechargeBody(BaseModel):
+class RechargeBody(KeyBody):
     cents: int
 
 
-@app.post("/api/admin/apikeys/{key}/recharge")
-def admin_recharge_key(key: str, body: RechargeBody, request: Request):
+@app.post("/api/admin/apikeys/recharge")
+def admin_recharge_key(body: RechargeBody, request: Request):
     _require_admin(request)
-    if not recharge_key(key, body.cents):
+    if not recharge_key(body.key, body.cents):
         raise ApiError(404, "API Key 不存在")
-    return {"ok": True, "key": get_api_key(key)}
+    return {"ok": True, "key": get_api_key(body.key)}
 
 
 class PriceBody(BaseModel):
@@ -2640,6 +3886,69 @@ def admin_del_share(sid: str, request: Request):
     return {"ok": True}
 
 
+@app.get("/api/admin/play-stats")
+def admin_play_stats(request: Request, hours: int = 24, limit: int = 60):
+    """播放诊断看板：看清「微信内哪些视频能播、走的哪条线路、失败在哪一步」。
+
+    普通浏览器播放链路是 dy1 → dy2 → proxy；微信内为 proxy → dy1 → dy2。
+    每条线路的 ok/fail 都会上报，带宽分析需要按微信内/外分别观察。"""
+    _require_admin(request)
+    hours = max(1, min(24 * 30, hours))
+    limit = max(1, min(300, limit))
+    since = int(time.time()) - hours * 3600
+
+    # 按 微信内/外 × 线路 汇总成功率。排除 giveup —— 它是「三条都挂了」的汇总事件，
+    # 没有 source，混进来会多出一行空线路并把失败数重复计一遍。
+    rows = db_exec(
+        "SELECT wechat, COALESCE(source,'') source, kind, COUNT(*) n, "
+        "CAST(AVG(ms) AS INTEGER) avg_ms FROM share_events "
+        "WHERE ts>=? AND kind IN ('play_ok','play_fail') AND COALESCE(stage,'')<>'giveup' "
+        "GROUP BY wechat, source, kind", (since,), "all")
+    agg: dict = {}
+    for r in rows:
+        k = (r["wechat"], r["source"])
+        cur = agg.setdefault(k, {"wechat": r["wechat"], "source": r["source"],
+                                 "ok": 0, "fail": 0, "ok_ms": 0})
+        if r["kind"] == "play_ok":
+            cur["ok"] = r["n"]
+            cur["ok_ms"] = r["avg_ms"] or 0
+        else:
+            cur["fail"] = r["n"]
+    lines = sorted(agg.values(), key=lambda x: (-x["wechat"], x["source"]))
+    for x in lines:
+        t = x["ok"] + x["fail"]
+        x["total"] = t
+        x["rate"] = round(x["ok"] * 100.0 / t, 1) if t else 0.0
+
+    # 彻底放弃（三条线路全挂）的次数，微信内外分开
+    gv = db_exec("SELECT wechat, COUNT(*) n FROM share_events "
+                 "WHERE ts>=? AND kind='play_fail' AND stage='giveup' "
+                 "GROUP BY wechat", (since,), "all")
+    giveup = {("wechat" if r["wechat"] else "other"): r["n"] for r in gv}
+
+    # 按作品维度：微信内失败最多的分享页（就是「哪些视频播不了」）。
+    # 同样排除 giveup 汇总事件，并单列 giveup 次数 —— 那才是「彻底放不出来」的次数。
+    bad = db_exec(
+        "SELECT e.sid, COALESCE(s.title,'(已删除)') title, COALESCE(s.kind,'') vkind, "
+        "SUM(CASE WHEN e.kind='play_ok' THEN 1 ELSE 0 END) ok, "
+        "SUM(CASE WHEN e.kind='play_fail' AND COALESCE(e.stage,'')<>'giveup' THEN 1 ELSE 0 END) fail, "
+        "SUM(CASE WHEN COALESCE(e.stage,'')='giveup' THEN 1 ELSE 0 END) giveup "
+        "FROM share_events e LEFT JOIN shares s ON s.id=e.sid "
+        "WHERE e.ts>=? AND e.wechat=1 AND e.kind IN ('play_ok','play_fail') "
+        "GROUP BY e.sid HAVING fail>0 ORDER BY giveup DESC, fail DESC, ok ASC LIMIT ?",
+        (since, limit), "all")
+
+    # 最近失败明细，带 UA —— 定位是哪个机型/内核播不了
+    recent = db_exec(
+        "SELECT ts,sid,COALESCE(source,'') source,COALESCE(stage,'') stage,"
+        "COALESCE(detail,'') detail,ms,wechat,ua FROM share_events "
+        "WHERE ts>=? AND kind='play_fail' ORDER BY ts DESC LIMIT ?",
+        (since, limit), "all")
+
+    return {"hours": hours, "lines": lines, "giveup": giveup,
+            "bad": [dict(r) for r in bad], "recent": [dict(r) for r in recent]}
+
+
 @app.get("/api/admin/reports")
 def admin_reports(request: Request, limit: int = 100):
     _require_admin(request)
@@ -2744,12 +4053,12 @@ def user_create_key(body: NewKeyBody, request: Request):
     return create_api_key(u["id"], body.name)
 
 
-@app.delete("/api/keys/{key}")
-def user_revoke_key(key: str, request: Request):
+@app.post("/api/keys/revoke")
+def user_revoke_key(body: KeyBody, request: Request):
     u = current_user(request)
     if not u:
         raise ApiError(401, "请先登录")
-    if not revoke_api_key(key, u["id"]):
+    if not revoke_api_key(body.key, u["id"]):
         raise ApiError(404, "密钥不存在或无权删除")
     return {"ok": True}
 
@@ -2771,12 +4080,20 @@ def _health_loop():
 
 @app.on_event("startup")
 def _start_health():
+    # 崩溃遗留的网页配额先退款；API 作业先恢复/对账，再清理过期明细。
+    # cleanup 放在 legacy recovery 后，避免提前删掉旧 api_logs 导致无法重建已结算项。
+    _refund_stale_quota_reservations()
+    _prepare_api_jobs()
+    _cleanup_retained_data(force=True)
+    # 所有可能阻断 startup 的迁移/清理完成后才启动非 daemon worker，避免半启动悬挂。
+    _start_api_job_workers(prepared=True)
     threading.Thread(target=_health_loop, daemon=True).start()
     threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
 
 
 @app.on_event("shutdown")
 def _stop_mihomo():
+    _stop_api_job_workers()
     # 关服务时杀掉内置 mihomo 子进程，避免留下孤儿进程占用端口
     try:
         mihomo_mgr.stop()
@@ -2814,61 +4131,73 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
     canon = base if zh else f"{base}?lang=en"
     meta = {
         "zh": {
-            "title": "抖音无水印下载器 · 粘贴链接即下",
-            "desc": "免费的抖音无水印下载工具：粘贴分享链接，即可在线预览并下载抖音视频与图集的无水印原片。开源可信、零隐私采集、无需登录、永不接广告，由你的浏览器直连下载。",
-            "kw": "抖音下载,抖音无水印下载,抖音视频下载,抖音去水印,douyin downloader,抖音图集下载,抖音解析,无水印下载器,抖音下载器在线,抖音API",
+            "title": "抖音无水印下载器 · 粘贴链接即下 · 一键分享给微信好友",
+            "desc": "免费的抖音无水印下载与分享工具：粘贴分享链接，即可在线预览、下载抖音视频与图集的无水印原片，或一键生成分享页发给微信好友——对方点开就能看，无需安装抖音 App。开源可审查、不保存媒体文件、站内账号可选、永不接广告。",
+            "kw": "抖音下载,抖音无水印下载,抖音视频下载,抖音去水印,douyin downloader,抖音图集下载,抖音解析,无水印下载器,抖音下载器在线,抖音API,抖音视频分享,抖音怎么分享到微信,抖音视频发微信,抖音分享链接生成,抖音视频免App观看,微信打开抖音视频",
             "site": "抖音无水印下载器",
-            "ogt": "抖音无水印下载器 · 开源可信 · 永不接广告",
-            "ogd": "粘贴抖音分享链接，浏览器直连拿走无水印原片。开源、零隐私采集、无需登录、永不接广告，并提供开发者 API。",
+            "ogt": "抖音无水印下载器 · 下载原片 + 一键分享给微信好友",
+            "ogd": "粘贴抖音分享链接，可靠下载无水印原片；还能一键生成分享页发到微信，好友点开即看、无需装 App。开源可审查、不保存媒体文件、账号可选、永不接广告。",
             "locale": "zh_CN",
         },
         "en": {
-            "title": "Douyin Downloader — No Watermark, Free & Open Source",
-            "desc": "Free Douyin (Chinese TikTok) no-watermark downloader. Paste a share link to preview and download original videos & photo galleries — open-source, no login, no ads, browser-direct. Developer API available.",
-            "kw": "douyin downloader,douyin video download,no watermark,tiktok downloader,save douyin video,douyin photo download,douyin api,open source downloader",
+            "title": "Douyin Downloader & Share — No Watermark, Free & Open Source",
+            "desc": "Free Douyin (Chinese TikTok) no-watermark downloader and share tool. Paste a link to download original videos and galleries, or create a WeChat-friendly share page. Open source and auditable, no media-file storage, optional site account, and no ads.",
+            "kw": "douyin downloader,douyin video download,no watermark,tiktok downloader,save douyin video,douyin photo download,douyin api,open source downloader,share douyin video,send douyin video to wechat,douyin share link,watch douyin without app",
             "site": "Douyin Downloader",
-            "ogt": "Douyin Downloader — No Watermark, Open Source, No Ads",
-            "ogd": "Paste a Douyin share link and download the original no-watermark video directly in your browser. Open-source, no login, no ads. Developer API available.",
+            "ogt": "Douyin Downloader — Download No-Watermark Originals & Share to WeChat",
+            "ogd": "Download a no-watermark Douyin original or create a share page friends can watch on WeChat. Open source, no media-file storage, optional account, and no ads.",
             "locale": "en_US",
         },
     }[lang]
 
     ld = {
         "zh": {
-            "app_desc": "免登录、免签名的抖音视频与图集无水印下载工具，粘贴分享链接即可在线预览与下载，浏览器直连、开源、零隐私、永不接广告，并提供开发者 API。",
-            "features": ["抖音视频无水印下载", "抖音图集下载", "在线预览播放", "批量解析", "浏览器直连不落地", "开发者 API"],
+            "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。直连优先、签名流式兜底，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
+            "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "直连优先且不落地", "开发者 API"],
             "faq": [
-                ("这个抖音下载器安全吗？会收集我的隐私吗？", "安全。前端代码完全开源、任何人可审查，不嵌入任何危险代码、不采集也不上传你的任何隐私。无需登录、不记录账号，视频由你的浏览器直连获取，我们不存储任何内容。"),
-                ("需要登录或安装软件吗？", "不需要。纯网页工具，无需登录抖音账号、无需安装任何 App 或插件，粘贴分享链接即可使用。"),
+                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；媒体直连时抖音会收到请求方网络与浏览器信息。"),
+                ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
+                ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
+                ("需要登录或安装软件吗？", "无需登录抖音账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
                 ("下载的抖音视频有水印吗？", "没有水印。下载的是无水印原片，也不会加入本站自己的二次水印。"),
                 ("支持图集（图片作品）下载吗？", "支持。图集作品会自动识别，可逐张下载原图，也可批量下载。"),
                 ("有没有 API 可以批量调用？", "有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。"),
             ],
-            "howto": ("如何下载抖音无水印视频", [
+            "howto": ("如何下载抖音无水印视频并分享给微信好友", [
                 ("复制分享链接", "在抖音 App 里点分享，复制作品链接或整段分享文案。"),
                 ("粘贴并解析", "把链接粘贴到本站输入框，点击解析。"),
-                ("预览并下载", "在线预览后，一键下载无水印原片到本地。")]),
+                ("下载或生成分享页", "一键下载无水印原片；或生成分享页发到微信。直接粘贴显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。")]),
         },
         "en": {
-            "app_desc": "Login-free, signature-free Douyin video & photo-gallery downloader with no watermark. Paste a share link to preview and download in the browser. Open-source, privacy-first, no ads, with a developer API.",
-            "features": ["Douyin no-watermark video download", "Photo gallery download", "In-browser preview", "Batch parsing", "Browser-direct (nothing stored)", "Developer API"],
+            "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. It is browser-direct first with a signed streaming fallback, open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
+            "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Browser-direct (nothing stored)", "Developer API"],
             "faq": [
-                ("Is this Douyin downloader safe? Does it collect my data?", "Yes, it's safe. The front-end is fully open-source and auditable; it embeds no malicious code and collects nothing. No login, no account logging — videos are fetched directly by your browser and nothing is stored on our servers."),
-                ("Do I need to log in or install anything?", "No. It's a pure web tool — no Douyin login, no app or extension. Just paste a share link."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Browser-direct media requests disclose network and browser information to Douyin."),
+                ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
+                ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
+                ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
                 ("Do downloaded videos have a watermark?", "No. You get the original video with no watermark, and we never add our own."),
                 ("Can I download photo galleries (image posts)?", "Yes. Image posts are detected automatically; download each original image or batch-download them."),
                 ("Is there an API for bulk use?", "Yes. After signing in you can create an API key in the console, submit links in bulk via the async API and poll for results, billed per request."),
             ],
-            "howto": ("How to download a Douyin video without watermark", [
+            "howto": ("How to download a Douyin video without watermark and share it on WeChat", [
                 ("Copy the share link", "In the Douyin app tap Share and copy the link or the whole share text."),
                 ("Paste and parse", "Paste the link into the input box and click Parse."),
-                ("Preview and download", "Preview it, then download the original no-watermark file with one click.")]),
+                ("Download or create a share page", "Download the original file, or create a share page for WeChat. A pasted URL remains a plain link; open the page in WeChat and forward it from the top-right menu to send a card.")]),
         },
     }[lang]
 
+    org_id = f"{origin}/#org"
+    site_id = f"{origin}/#website"
     graph = [
+        {"@type": "Organization", "@id": org_id, "name": meta["site"],
+         "url": f"{origin}/", "logo": f"{origin}/og.png"},
+        {"@type": "WebSite", "@id": site_id, "name": meta["site"],
+         "url": f"{origin}/", "publisher": {"@id": org_id},
+         "inLanguage": ["zh-CN", "en"]},
         {"@type": "WebApplication", "name": meta["site"], "url": f"{origin}/",
          "applicationCategory": "MultimediaApplication", "operatingSystem": "All",
+         "isPartOf": {"@id": site_id}, "publisher": {"@id": org_id},
          "offers": {"@type": "Offer", "price": "0", "priceCurrency": "CNY"},
          "description": ld["app_desc"], "featureList": ld["features"]},
         {"@type": "FAQPage", "mainEntity": [
@@ -2887,7 +4216,14 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
 <meta name="description" content="{esc(meta["desc"])}">
 <meta name="keywords" content="{esc(meta["kw"])}">
 <meta name="robots" content="index,follow,max-image-preview:large">
-<meta name="theme-color" content="#0E1013">
+<meta name="theme-color" content="#0E1013" media="(prefers-color-scheme:dark)">
+<meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme:light)">
+<meta name="author" content="{esc(meta["site"])}">
+<meta name="application-name" content="{esc(meta["site"])}">
+<meta name="apple-mobile-web-app-title" content="{esc(meta["site"])}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="preconnect" href="https://aweme.snssdk.com" crossorigin>
+<link rel="dns-prefetch" href="https://aweme.snssdk.com">
 <link rel="canonical" href="{canon}">
 <link rel="alternate" hreflang="zh-CN" href="{base}">
 <link rel="alternate" hreflang="en" href="{base}?lang=en">
@@ -2897,14 +4233,16 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
 <meta property="og:title" content="{esc(meta["ogt"])}">
 <meta property="og:description" content="{esc(meta["ogd"])}">
 <meta property="og:url" content="{canon}">
-<meta property="og:image" content="{origin}/og.svg">
+<meta property="og:image" content="{origin}/og.png">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="{esc(meta["site"])}">
 <meta property="og:locale" content="{meta["locale"]}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{esc(meta["ogt"])}">
 <meta name="twitter:description" content="{esc(meta["ogd"])}">
-<meta name="twitter:image" content="{origin}/og.svg">
+<meta name="twitter:image" content="{origin}/og.png">
 <script type="application/ld+json">{jsonld}</script>
 <script>window.__LANG={lang!r};window.__ORIGIN={origin!r};</script>'''
 
@@ -2939,7 +4277,9 @@ def _share_head(view: Optional[dict], origin: str) -> str:
     title = (view["title"] or "抖音作品")[:60]
     author = view["author"] or "抖音创作者"
     desc = f"@{author} 的抖音作品 · 点开即可观看，无需安装 App"
-    cover = view["cover"] or f"{origin}/og.svg"
+    # 卡片图：抖音封面转成无签名 JPEG（webp 微信缩略图支持不稳定、签名 14 天过期）；
+    # 兜底用 og.png 而非 og.svg —— 微信不渲染 SVG，会退化成无图的纯链接。
+    cover = _card_cover(view["cover"]) or f"{origin}/og.png"
     return f'''<title>{esc(title)}</title>
 <meta name="description" content="{esc(desc)}">
 <meta name="robots" content="noindex,nofollow">
@@ -2949,6 +4289,8 @@ def _share_head(view: Optional[dict], origin: str) -> str:
 <meta property="og:title" content="{esc(title)}">
 <meta property="og:description" content="{esc(desc)}">
 <meta property="og:image" content="{esc(cover)}">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:alt" content="{esc(title)}">
 <meta property="og:url" content="{esc(view['url'])}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{esc(title)}">
@@ -3080,7 +4422,7 @@ def auth_register(body: RegisterBody, request: Request):
     salt, h = hash_pw(body.password)
     uid = db_exec("INSERT INTO users(email,pw_salt,pw_hash,created_at,last_login,reg_ip) "
                   "VALUES(?,?,?,?,?,?)",
-                  (email, salt, h, int(time.time()), int(time.time()), _client_ip(request)))
+                  (email, salt, h, int(time.time()), int(time.time()), ""))
     return _issue_session(uid)
 
 
@@ -3119,8 +4461,54 @@ def admin_page():
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def robots(request: Request):
     # /s/ 是用户生成的他人作品分享页，一律不收录（详见 docs/分享页功能规划.md §3.1）
-    return (f"User-agent: *\nAllow: /\nDisallow: /admin_d\nDisallow: /api/\nDisallow: /s/\n\n"
-            f"Sitemap: {_origin(request)}/sitemap.xml\n")
+    o = _origin(request)
+    rules = "Allow: /\nDisallow: /admin_d\nDisallow: /api/\nDisallow: /s/\n"
+    # 生成式引擎（GEO）：显式放行主流 AI 抓取器，规则同普通爬虫
+    ai_bots = ["GPTBot", "OAI-SearchBot", "ChatGPT-User", "PerplexityBot",
+               "ClaudeBot", "Claude-Web", "Google-Extended", "Applebot-Extended", "CCBot"]
+    blocks = [f"User-agent: *\n{rules}"] + [f"User-agent: {b}\n{rules}" for b in ai_bots]
+    return ("\n".join(blocks) + f"\nLLM: {o}/llms.txt\nSitemap: {o}/sitemap.xml\n")
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse)
+def llms_txt(request: Request):
+    # 面向大模型/生成式引擎的站点说明（llmstxt.org 约定），帮助其准确引用本站
+    o = _origin(request)
+    return f"""# 抖音无水印下载器（Douyin Downloader）
+
+> 免费、开源的抖音视频与图集**下载 + 分享**工具。粘贴抖音分享链接即可在线预览并下载无水印原片；也可生成分享页，好友无需安装抖音 App 即可观看。在微信聊天中直接粘贴会显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。媒体优先由浏览器直连，受限或微信内播放时使用带有效期授权的同源流式转发；本站不落地保存媒体文件。基础解析无需账号，站内账号与开发者 API 可选，永不接广告。
+
+## 核心特性
+- 抖音视频无水印下载：解析分享链接，去除水印，下载原始清晰度视频。
+- 图集（图片作品）下载：自动识别多图作品，可逐张或批量下载原图。
+- **一键生成分享页**：把抖音作品变成一个网页，发给朋友点开即看。
+- **分享到微信显示为卡片**：在微信内打开分享页，点右上角 ··· 转发，好友收到带封面标题的卡片（直接粘贴网址则是纯链接，这是微信机制）。
+- **免 App 观看**：接收方无需安装抖音、无需登录，微信内置浏览器直接播放。
+- **分享海报**：前端合成带二维码的海报图，长按保存后可发朋友圈；链接被拦截时的传播兜底。
+- 在线预览：下载前可直接在网页中预览播放。
+- 可靠媒体链路：浏览器直连优先，受限时走同源流式转发，本站不缓存、不留存。
+- 开源可审查、数据最小化：不保存媒体文件；免费额度和诊断只处理必要的用途化摘要、粗粒度环境与事件，保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；站内账号可选。
+- 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
+
+## 使用方式
+1. 在抖音 App 点「分享 → 复制链接」，得到分享文案或短链。
+2. 打开 {o}/ ，把链接粘贴进输入框并解析。
+3. 在线预览后一键下载无水印原片；**或点「生成分享页」，把链接发给微信好友，对方点开即可观看**。
+
+## 常见问答
+- 会处理和保留哪些数据？——不保存视频或图片文件。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连抖音时，抖音会收到请求方网络与浏览器信息。
+- 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
+- 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，仅保存标题封面等元数据，不存储视频文件。
+- 需要登录或装软件吗？——无需登录抖音或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。
+- 下载的视频有水印吗？——没有，是无水印原片，也不加本站二次水印。
+- 支持图集吗？——支持，自动识别并可批量下载原图。
+- 有批量 API 吗？——有，登录后在 API 控制台生成密钥调用。
+
+## 相关链接
+- 首页（下载 + 生成分享页）：{o}/
+- API 文档：{o}/api-docs
+- API 控制台：{o}/api-console
+"""
 
 
 @app.get("/sitemap.xml")
@@ -3131,6 +4519,7 @@ def sitemap(request: Request):
         return (f'  <url><loc>{o}{path}</loc>'
                 f'<xhtml:link rel="alternate" hreflang="zh-CN" href="{o}{path}"/>'
                 f'<xhtml:link rel="alternate" hreflang="en" href="{o}{path}?lang=en"/>'
+                f'<lastmod>{_BUILD_DATE}</lastmod>'
                 f'<changefreq>daily</changefreq><priority>{pri}</priority></url>\n')
 
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -3143,25 +4532,16 @@ def sitemap(request: Request):
 
 @app.get("/og.svg")
 def og_image():
-    svg = '''<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
-<defs>
-<radialGradient id="g1" cx="18%" cy="20%" r="60%"><stop offset="0" stop-color="#FE2C55" stop-opacity=".55"/><stop offset="1" stop-color="#FE2C55" stop-opacity="0"/></radialGradient>
-<radialGradient id="g2" cx="86%" cy="18%" r="55%"><stop offset="0" stop-color="#25F4EE" stop-opacity=".45"/><stop offset="1" stop-color="#25F4EE" stop-opacity="0"/></radialGradient>
-<linearGradient id="t" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#FE2C55"/><stop offset="1" stop-color="#25F4EE"/></linearGradient>
-</defs>
-<rect width="1200" height="630" fill="#0E1013"/>
-<rect width="1200" height="630" fill="url(#g1)"/><rect width="1200" height="630" fill="url(#g2)"/>
-<g transform="translate(90,150)" fill="none" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
-<path d="M40 0 V70 M8 45 l32 32 32-32" stroke="#25F4EE" transform="translate(-4 0)"/>
-<path d="M40 0 V70 M8 45 l32 32 32-32" stroke="#FE2C55" transform="translate(4 0)"/>
-<path d="M40 0 V70 M8 45 l32 32 32-32" stroke="#fff"/><path d="M0 92 h80" stroke="#fff"/>
-</g>
-<text x="90" y="360" font-family="PingFang SC,Noto Sans SC,sans-serif" font-size="96" font-weight="800" fill="#fff">抖音无水印下载器</text>
-<text x="94" y="450" font-family="PingFang SC,Noto Sans SC,sans-serif" font-size="42" font-weight="700" fill="url(#t)">开源可信 · 零隐私 · 永不接广告 · 稳定下载</text>
-<text x="94" y="524" font-family="PingFang SC,Noto Sans SC,sans-serif" font-size="34" fill="#8A93A0">粘贴分享链接，浏览器直连拿走无水印原片</text>
-</svg>'''
-    return Response(svg, media_type="image/svg+xml",
-                    headers={"Cache-Control": "public, max-age=86400"})
+    # SVG 是可维护源；static/og.png 由 tools/render_og.swift 从同一文件生成。
+    return FileResponse("static/og.svg", media_type="image/svg+xml",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/og.png")
+def og_png():
+    # 社交/微信卡片首选位图：微信、多数抓取器不渲染 SVG，PNG 才能出图（og.svg 保留兜底）
+    return FileResponse("static/og.png", media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/healthz")

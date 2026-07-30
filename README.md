@@ -1,17 +1,17 @@
 # 抖音无水印下载器
 
-**当前版本：v1.2.0**（线上版本可通过 `GET /healthz` 的 `version` 字段确认）
+**当前版本：v1.9.0**（线上版本可通过 `GET /healthz` 的 `version` 字段确认）
 
-免登录、免签名的抖音视频 / 图集下载工具。粘贴分享链接，在线预览并下载无水印原片。内置**代理 IP 池 + 管理后台 + 用户体系 + 按次计费开放 API**，所有出站请求轮换走代理，防止服务器 IP 被封。
+无需登录抖音账号、基础解析无需注册本站账号的抖音视频 / 图集下载工具。粘贴分享链接，在线预览并下载无水印原片。内置**代理 IP 池 + 管理后台 + 可选用户体系 + 按次计费开放 API**，所有出站请求轮换走代理，防止服务器 IP 被封。
 
 ## 功能
 
-- 🎬 **视频下载**：自动去水印（720P / MP4），在线播放（可拖动进度条）
+- 🎬 **可靠视频下载**：自动去水印（720P / MP4）；直连保存失败时自动切换同源流式下载
 - 🔗 **分享页**：抖音链接发微信打不开？一键生成 `/s/{短码}` 分享页，**微信里点开就能看**，不用装 App；带二维码与分享海报、访问数据统计，默认 noindex 且强制署名回链原作者
 - 🖼 **图集下载**：逐张原图浏览器直连下载
-- ⚡ **省流不暴露 IP**：解析信息才走服务器（+代理），**播放与下载由用户浏览器直连抖音 CDN**，视频字节不经过服务器；直连失败可一键切服务器代理兜底
+- ⚡ **直连优先、兼容兜底**：普通浏览器优先直连抖音 CDN；下载受跨域限制或微信内播放时自动切换 `/api/video/{vid}` 流式转发，服务器不落地保存媒体
 - 📋 **粘贴即用**：直接粘贴整段分享文案，自动提取短链；支持批量解析、结果导出 Excel
-- 👤 **用户体系 + 免费配额**：匿名/登录用户每日免费额度，自研滑块验证码防批量薅取
+- 👤 **可选账号 + 免费配额**：匿名/登录用户每日免费额度采用原子预占防并发超用；注册、登录使用滑块验证码防机器人
 - 💰 **开放 API**：`/api/v1/*` 按次计费（API Key + 余额预扣），异步批量任务 + 轮询查询，文档见 `/api-docs`，用户控制台 `/api-console`
 - 🛡 **代理池防封**：socks5/socks5h/socks4/socks4a/http/https，轮换（轮询/随机/最少失败）+ 失败自动转移 + 强制代理防真实 IP 泄露
 - ✈️ **内置机场加速**：后台粘贴机场订阅（vmess/trojan 等），自动下载 mihomo 内核落地为本地代理，多节点测速/切换全自动；随机端口 + 账号密码鉴权，**仅本项目可用、不影响服务器其他程序**，机场全挂时 fail-closed 绝不直连
@@ -37,13 +37,14 @@
 ./run.sh                       # 默认端口 3344，首次自动建 venv + 装依赖
 PORT=8010 ./run.sh             # 换端口
 ADMIN_PASSWORD=your-secret ./run.sh
+HOST=0.0.0.0 ADMIN_PASSWORD=your-secret ./run.sh  # 明确允许局域网访问
 ```
 
 手动方式：
 
 ```bash
 pip install -r requirements.txt
-ADMIN_PASSWORD=your-secret uvicorn server:app --host 0.0.0.0 --port 3344
+ADMIN_PASSWORD=your-secret uvicorn server:app --host 0.0.0.0 --port 3344 --no-access-log
 ```
 
 命令行版（不起服务，纯标准库）：
@@ -65,7 +66,7 @@ docker run -d --name douyin-dl \
   -p 127.0.0.1:3344:8000 \
   -e ADMIN_PASSWORD=换成强密码 \
   -e TRUST_PROXY=1 \
-  -e CAPTCHA_SECRET=$(openssl rand -hex 32) \
+  -e APP_SECRET=$(openssl rand -hex 32) \
   -v /srv/douyin-dl/data:/data \
   douyin-dl
 ```
@@ -95,8 +96,8 @@ After=network.target
 WorkingDirectory=/srv/douyin-dl
 Environment=ADMIN_PASSWORD=换成强密码
 Environment=TRUST_PROXY=1
-Environment=CAPTCHA_SECRET=换成随机长字符串
-ExecStart=/srv/douyin-dl/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 3344
+Environment=APP_SECRET=换成至少32字节的随机长字符串
+ExecStart=/srv/douyin-dl/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 3344 --no-access-log
 Restart=always
 RestartSec=3
 
@@ -112,19 +113,44 @@ curl -s http://127.0.0.1:3344/healthz    # 验证存活
 ### Nginx 反向代理 + HTTPS
 
 ```nginx
+# 放在 nginx.conf 的 http {} 内；应用层仍会做签名、限频和并发限制，
+# 这里再增加一层共享限流，避免多进程/多实例绕过内存计数。
+limit_req_zone  $binary_remote_addr zone=douyin_media_req:10m rate=2r/s;
+limit_conn_zone $binary_remote_addr zone=douyin_media_conn:10m;
+
 server {
     listen 443 ssl http2;
     server_name your-domain.com;
+    # 默认不保存原始 IP、UA、Referer 或含短时媒体签名的完整请求地址。
+    access_log off;
+    error_log /var/log/nginx/douyin-dl-error.log crit;
     # 证书可用 certbot 签发：certbot --nginx -d your-domain.com
+
+    # 视频播放/下载需要透传 Range，关闭 Nginx 响应缓冲，避免大文件先缓存后返回
+    location /api/video/ {
+        limit_req zone=douyin_media_req burst=20 nodelay;
+        limit_conn douyin_media_conn 6;
+        proxy_pass http://127.0.0.1:3344;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_set_header Host $host;
+        # 覆盖而非追加，防止客户端预置左侧 XFF 绕过 IP 限制。
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:3344;
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
 ```
+
+若 Nginx 前面还有 Cloudflare/CDN，先用 Nginx `real_ip` 模块把 `$remote_addr`
+还原为真实客户端地址，再设置 `TRUST_PROXY_HOPS`；不要直接信任公网传入的 XFF。
 
 分享域名（`SHARE_DOMAINS` 里的每个域名）各自加一个同样配置的 `server` 块，反代到同一个服务即可。
 
@@ -133,13 +159,24 @@ server {
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `ADMIN_PASSWORD` | `douyin-admin` | 管理后台密码，**生产必改** |
+| `HOST` | `127.0.0.1` | 仅 `run.sh` 使用；需局域网监听时在改强密码后显式设 `0.0.0.0` |
 | `DATA_DIR` | `data` | 数据目录（SQLite + 代理池配置） |
 | `TRUST_PROXY` | 关 | 在 Nginx/Cloudflare 等反代后设 `1`，采信 XFF 并给 Cookie 加 Secure |
+| `TRUST_PROXY_HOPS` | `1` | 从 XFF 右侧计算客户端地址时跨过的可信代理层数 |
 | `COOKIE_SECURE` | 跟随 `TRUST_PROXY` | 单独控制会话 Cookie 的 Secure 标记 |
-| `CAPTCHA_SECRET` | 随机生成 | 验证码/令牌签名密钥；**生产建议固定**，否则重启后未消费的令牌全部失效 |
+| `APP_SECRET` | 自动生成到 `data/.app-secret` | 标识摘要、媒体令牌与验证码签名的稳定密钥；可在生产环境显式设置，并应随 `data/` 一起备份 |
+| `CAPTCHA_SECRET` | 跟随 `APP_SECRET` | 旧部署兼容项；只需单独覆盖验证码签名时设置 |
 | `FREE_ANON_DAILY` | `3` | 匿名用户每日免费解析次数 |
 | `FREE_USER_DAILY` | `10` | 登录用户每日免费解析次数 |
+| `QUOTA_RESERVATION_TTL` | `3600` | 崩溃后未结算网页额度预占的自动退款等待秒数 |
 | `NEW_KEY_BALANCE` | `100` | 新 API Key 试用余额（单位：分） |
+| `API_JOB_WORKERS` | `2` | 单进程内持久化 API 任务 worker 数（1–8） |
+| `API_JOB_LEASE_SECONDS` | `600` | API 任务项的数据库租约时长 |
+| `API_JOB_HEARTBEAT_SECONDS` | `30` | 执行中任务租约续期间隔 |
+| `MEDIA_TOKEN_TTL` | `43200` | 签名媒体地址有效秒数 |
+| `MEDIA_REQUESTS_PER_MIN` | `120` | 单 IP 每分钟媒体请求上限 |
+| `MEDIA_MAX_CONCURRENT` | `6` | 单 IP 同时播放/下载的媒体流上限 |
+| `DATA_RETENTION_DAYS` | `30` | 访问/解析/播放事件及已完成 API 任务明细的保留天数；强制限制在 1–30 天 |
 | `SHARE_DOMAINS` | 空 | 分享页专用域名池，逗号分隔，如 `https://s1.example.com,https://s2.example.com` |
 | `SHARE_TTL_ANON_DAYS` | `7` | 匿名用户分享链接有效期（天） |
 | `SHARE_TTL_USER_DAYS` | `30` | 登录用户分享链接有效期（天） |
@@ -153,16 +190,16 @@ API 单价与微信公众号 AppID/Secret 不走环境变量，在管理后台�
 
 - **必须单 worker 运行**（默认即是）。会话、验证码、限频计数都在进程内存里，多 worker 互不相认会导致登录/验证码随机失效。也因此**重启会掉登录态**，属预期行为。
 - **上线后第一件事**：打开 `/admin_d` 登录，在「代理」里添加代理 IP。默认强制走代理，**没有可用代理时解析会直接 503**——这是防止服务器真实 IP 被抖音封禁的底线设计，不要关。
-- **备份**：定期备份整个 `data/` 目录即可（`app.db` + `config.json`）。
+- **备份**：定期备份整个 `data/` 目录即可（`app.db`、`config.json`、`.app-secret`）；旧备份也可能含用户/API 明细，应加密并按不超过 30 天的周期轮换删除。
 - **分享域名与主站域名物理隔离**：分享域名被微信封是日常消耗品，主站域名被牵连是灾难。`SHARE_DOMAINS` 里不要填主站域名。
-- 监控可用 `/healthz` 做存活探针；服务器带宽异常时先看分享页 `fallback` 埋点（浏览器直连失败转服务器代理的比例）。
+- 监控可用 `/healthz` 做存活探针；微信播放默认优先同源代理，下载仅在浏览器直连失败时走代理，因此应按微信内/外分别观察后台播放诊断与服务器带宽。
 
 ## 分享页（微信可直开）
 
 解析成功后点「🔗 生成分享页」，得到一个可直接发微信的短链。设计要点见 [docs/分享页功能规划.md](docs/分享页功能规划.md)：
 
 - **服务器不落地任何媒体**：只存元数据 + `video_id`，播放地址每次重拼；图集直链过期时按作品 ID 惰性刷新
-- **播放三级降级**：浏览器直连抖音 CDN → 服务器代理兜底 → 微信内引导「用浏览器打开」
+- **按环境选择播放线路**：普通浏览器 `dy1 → dy2 → proxy`；微信内 `proxy → dy1 → dy2`；全部失败才引导「用浏览器打开」
 - **合规默认值**：`noindex` 不被搜索引擎收录、有有效期（匿名 7 天 / 登录 30 天）、强制署名并回链原作者、页脚常驻侵权投诉入口，后台可一键下架
 - **抗封**：分享域名与主站物理隔离，`SHARE_DOMAINS` 配置域名池并轮换；短码与域名解耦，某域名被封时后台停用即可，存量链接换域名照常打开；海报图作为链接被封时的传播兜底
 
@@ -192,12 +229,29 @@ python3 tools/testproxy.py 8899          # 另开一个终端，会打印每条�
 
 短链 302 解析 → 抖音 H5 分享页 `_ROUTER_DATA` 元数据提取 → `playwm→play` 去水印。
 
-**分工**：解析（短链 + 分享页）在服务器完成、走代理防封；播放/下载的无水印地址交给用户浏览器直连抖音（浏览器自行跟随 302 到 CDN，按自身 IP 解析直链，实测该接口对桌面 UA 无 UA 均放行、CDN 返回 `Access-Control-Allow-Origin: *`）。浏览器直连失败时可切换 `/api/video/{vid}` 走服务器代理兜底。抖音的限制机制与本项目对策详见 [docs/产品文档.md](docs/产品文档.md)。
+**分工**：解析（短链 + 分享页）在服务器完成、走代理防封；普通浏览器播放和下载仍优先直连抖音（浏览器自行跟随 302 到 CDN）。视频下载若被 CORS/重定向策略阻止保存，会自动改用带 `Content-Disposition` 的 `/api/video/{vid}?exp=...&sig=...&dl=1&name=...` 同源流式响应；媒体授权带 HMAC 有效期签名、单 IP 限频与并发限制，只允许单段 Range，服务器只转发字节、不落地文件。播放线路按环境调整：普通浏览器先试两个抖音域名再走代理，微信 WebView 则优先同源代理，避免直连域名被拦后等待约 14 秒并丢失播放手势。每条线路的成败都进后台「播放诊断」看板。抖音的限制机制与本项目对策详见 [docs/产品文档.md](docs/产品文档.md)。
+
+## 隐私与数据边界
+
+- **不保存媒体文件**：服务器不落地保存视频或图片；兼容线路仅流式转发媒体字节。分享页会按有效期保存标题、封面、作者、作品 ID 等必要元数据。
+- **站内账号可选**：基础解析无需注册，也无需登录抖音。注册本站账号时会保存邮箱与加盐密码哈希；账号资料随账号保留。
+- **不做浏览器指纹**：前端仅生成一个 30 天有效的随机第一方匿名 ID，并主动清除旧版 `dyfp`。服务端把 IP 与该 ID 转换为按用途隔离的摘要，用于免费额度与防滥用。
+- **明细保留期最多设为 30 天**：用途化标识摘要、粗粒度浏览器信息、访问/解析/播放事件，以及 API 任务与结果按配置保留 1–30 天；到期数据由每 5 分钟运行的清理任务删除。
+- **默认最小化基础设施日志**：项目提供的启动脚本、Docker、systemd 与 Nginx 示例均关闭 Uvicorn/Nginx access log，Nginx 示例只保留 critical 级错误。运行时错误日志仍可能带请求上下文；若自行启用云平台/反向代理日志，应只记 `$uri` 等必要字段、避免 query/原始 IP/完整 UA/Referer，并设置不超过 30 天的清理策略。这类外部日志不由应用数据库清理。
+- **投诉联系方式可选**：侵权投诉可留联系方式，仅用于跟进处理；保留期最多设为 30 天，到期后进入同一 5 分钟清理周期。
+- **直连会向抖音发出请求**：浏览器直连抖音媒体地址时，抖音会接收到请求方的 IP 等网络信息与浏览器信息；同源兼容线路则由本站服务器代为请求。
 
 ## 更新日志
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.9.0 | 2026-07-30 | 安全与可靠性收口：修复首页缺失 `apiTabBtn`；代理失败响应不再泄露带凭据 URL；移除未使用的 `/api/media`，`/api/video` 改用限时 HMAC 授权、单 IP 限频/并发和单段 Range；网页额度改为持久化原子预占与失败退款；开放 API 改为整批预授权、逐项幂等结算、数据库租约恢复与账本对账，不再依赖 daemon 任务线程，API Key 仅允许请求头传递且管理操作不再把密钥放进 URL；前端移除 Canvas/硬件指纹与未使用的本地历史，使用 30 天随机第一方匿名 ID，旧敏感明细迁移清理，数据保留期强制为 1–30 天并每 5 分钟清理到期项；默认关闭访问日志，中英文页面、SEO、分享图和文档同步真实数据边界 |
+| v1.8.0 | 2026-07-30 | 修复视频无法下载与微信内无法播放：视频结果新增同源 `download_url`，前端仍优先浏览器直连，遇到 CORS/重定向限制后自动切换 `/api/video/{vid}?dl=1&name=...` 流式附件下载，覆盖单条、批量及分享页且不落地文件；微信内播放顺序改为 `proxy → dy1 → dy2`，首页与分享页补齐 `playsinline`/X5 属性，普通浏览器继续 `dy1 → dy2 → proxy` 节省带宽；Nginx 示例补 Range 流式配置；同时修复首页缺少 `apiTabBtn` 导致初始化脚本中断的问题 |
+| v1.7.0 | 2026-07-27 | 微信分享卡片修复：① 卡片图改用 `_card_cover()` 归一化——抖音封面 `p26-sign.douyinpic.com/....webp?x-signature=…` 去 `-sign` 主机 + 换 `.jpeg` 扩展名后，抖音会返回<b>无签名、不过期的 JPEG</b>（原 webp 微信缩略图支持不稳定、签名约 14 天过期，过期后存量分享页全变无图卡片），仅对白名单内抖音图床生效、转换失败原样返回；分享页 `og:image` 兜底由 `og.svg` 改为 `og.png`（微信不渲染 SVG），并补 `og:image:type`/`:alt`；JS-SDK 卡片图与海报封面同步改用 `card_cover`。② 修正「粘贴链接会自动变卡片」的错误说法——微信不展开粘贴的网址，只有在微信内打开页面后点右上角 ··· 转发才出卡片；首页分享成功弹窗、分享页「发送给好友」引导、FAQ（中英 + JSON-LD FAQPage）、`llms.txt` 四处文案统一更正，并在「发送给好友」引导里隐藏「复制本页链接」按钮（避免把用户引向只会得到纯链接的路径） |
+| v1.6.0 | 2026-07-27 | 播放优先走抖音域名 + 后台播放诊断：分享页播放链路由「直连 → 服务器代理」扩为 <b>dy1 `aweme.snssdk.com` → dy2 `www.iesdouyin.com` → proxy 服务器兜底 → 微信引导</b>，微信内两个抖音域名的可达性因机型/内核而异，多试一个免费域名可显著减少走服务器带宽的比例；每条线路的成功/失败都上报埋点（`play_ok`/`play_fail`，带线路、阶段 error/timeout/giveup、耗时与 media error code），`share_events` 表新增 `source`/`stage`/`detail`/`ms` 四列（启动时 `PRAGMA table_info` 就地补列，老库兼容）；后台「分享页」页签新增「播放诊断」看板——按 微信内/外 × 线路 看成功率与平均起播耗时、微信内播放失败的作品排行、最近失败明细（带 UA 定位机型内核） |
+| v1.5.0 | 2026-07-27 | 修复分享海报在微信内无法保存/转发：canvas 导出由 `toBlob`+`createObjectURL` 改为 `toDataURL()`，微信 WebView 不认 `blob:` 图片（长按无「保存图片/发送给朋友」），改用 `data:` URI 后可正常长按保存与转发；站点定位升级为「下载 + 分享」双卖点：首屏新增分享副标题与「↗ 一键分享」徽章、信任区新增「一键分享给好友」卡片、步骤 3 改为「下载原片 · 或生成分享页发给好友」；SEO/GEO 全面补充分享语义——zh/en 标题描述关键词新增「抖音视频分享/怎么分享到微信/免 App 观看」等词，FAQ 新增 2 条分享问答（页面与 JSON-LD FAQPage 同步共 7 条）、HowTo 第三步与 `featureList` 补分享能力、`llms.txt` 改写为下载+分享双主线 |
+| v1.4.0 | 2026-07-27 | 管理后台登录防爆破：单 IP 在 15 分钟内密码错误达 5 次即临时锁定（返回 429、剩余次数提示，成功登录清零，内存计数随 `_sweeper` 清理）；分享页新增「↗ 分享给好友」按钮——微信内引导用户点右上角 ··· 转发（发出去是带封面标题的卡片而非纯地址，卡片文案由 JS-SDK `setupWxShare` 定制），微信外调用 Web Share API、不支持则退回复制链接；微信卡片图兜底由 `og.svg` 改为 `og.png`（微信不渲染 SVG） |
+| v1.3.0 | 2026-07-27 | SEO/GEO 优化：社交卡片改用位图 `og.png`（微信/多数抓取器不渲染 SVG，`og.svg` 保留兜底），补 `og:image:type`/`:alt`；JSON-LD `@graph` 新增 `Organization`+`WebSite` 节点并与 `WebApplication` 交叉引用；新增面向大模型的 `/llms.txt`，`robots.txt` 显式放行 GPTBot/PerplexityBot/ClaudeBot 等 AI 抓取器并声明 `LLM:`；`sitemap.xml` 补 `lastmod`；补 `author`/`application-name`/苹果 PWA 头、明/暗双 `theme-color`、抖音接口 `preconnect`/`dns-prefetch`；图集结果图补 `loading=lazy`/`decoding=async` |
 | v1.2.0 | 2026-07-27 | 分享链接支持在后台设置「主分享域名」（即时生效、无需重启），所有新链接固定落在指定的可微信打开域名上；优化微信分享卡片：卡片标题改为抖音文案原文、作者进描述行，`_share_head` 补 `og:site_name`/`twitter:description`，JS-SDK 分享文案与网页抓取卡片保持一致；`/api/wx/jssdk` 签名白名单纳入主域名，反代头缺失时仍可签名 |
 | v1.1.0 | 2026-07-27 | 内置机场加速：后台一键接入机场订阅，自动下载 mihomo 内核落地为本地代理并注入代理池；随机端口+鉴权+仅绑 127.0.0.1 做到项目独占、不影响同机其他程序，机场无可用节点时 fail-closed 绝不退回直连；详见 [docs/机场代理接入.md](docs/机场代理接入.md) |
 | v1.0.0 | 2026-07-27 | 引入版本号机制（`APP_VERSION`，`/healthz` 可查）；README 新增服务器部署章节（Docker / systemd / Nginx / 环境变量一览）；修正 `run.sh` 打印的后台入口为 `/admin_d` |
@@ -211,4 +265,4 @@ python3 tools/testproxy.py 8899          # 另开一个终端，会打印每条�
 
 ## 免责声明
 
-仅供个人学习、收藏及获得授权的素材备份使用。内容版权归原作者所有，未经授权请勿二次发布或商用。本工具不存储任何视频与账号数据；代理仅用于分散请求来源，请遵守当地法律与抖音用户协议。
+仅供个人学习、收藏及获得授权的素材备份使用。内容版权归原作者所有，未经授权请勿二次发布或商用。本站不保存视频或图片文件；站内账号为可选，数据处理与保留范围见上方「隐私与数据边界」。代理仅用于分散请求来源，请遵守当地法律与抖音用户协议。

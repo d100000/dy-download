@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """抖音无水印下载器 · 开源基础版 (Douyin Downloader · Open-Source Edition)
 
-免登录、免签名，粘贴分享链接即可在线预览并下载无水印视频 / 图集。
-视频与图片由用户浏览器直连抖音 CDN，服务器不落地、不暴露内容。
+免登录，粘贴分享链接即可在线预览并下载无水印视频 / 图集。
+视频与图片优先由用户浏览器直连抖音 CDN；直连受限时由服务器流式转发，
+全程不落地、不存储内容。
 
-启动:  uvicorn server:app --host 0.0.0.0 --port 8000
+启动:  uvicorn server:app --host 0.0.0.0 --port 8000 --no-access-log
 可选:  环境变量 PROXY=socks5://user:pass@host:port 让服务器解析走代理（防封 IP）
 
 > 这是最小可用的开源版。完整版（管理后台、代理池、用户体系、异步计费 API、
 > 数据分析）不在本仓库开源，如需请联系作者，见 README。
 """
+import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
+import threading
+import time
 from pathlib import Path
 from urllib import error as urlerr
 from urllib import parse as urlparse
@@ -27,20 +33,87 @@ UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.
       "(KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1")
 CDN_HEADERS = {"Referer": "https://www.douyin.com/"}
 PROXY = os.environ.get("PROXY", "").strip()
-ALLOWED = ("douyinpic.com", "douyinvod.com", "iesdouyin.com", "snssdk.com",
-           "byteimg.com", "zjcdn.com", "douyin.com", "pstatp.com", "amemv.com")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    DATA_DIR.chmod(0o700)
+except OSError:
+    pass
+
+
+def _load_app_secret() -> bytes:
+    """读取稳定密钥；未配置时以完整临时文件 + hard-link 原子落盘。"""
+    configured = (os.environ.get("APP_SECRET") or "").strip()
+    if configured:
+        if len(configured.encode()) < 32:
+            raise RuntimeError("APP_SECRET 至少需要 32 字节")
+        return configured.encode()
+
+    path = DATA_DIR / ".app-secret"
+    try:
+        saved = path.read_text("utf-8").strip()
+        if saved:
+            path.chmod(0o600)
+            return saved.encode()
+    except FileNotFoundError:
+        pass
+
+    candidate = secrets.token_urlsafe(48)
+    tmp = DATA_DIR / f".app-secret.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(candidate)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            # 同目录 hard-link：目标只会指向已经完整写入的 inode，多进程竞争时仅一个成功。
+            os.link(tmp, path)
+        except FileExistsError:
+            pass
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+    saved = path.read_text("utf-8").strip()
+    if not saved:
+        raise RuntimeError(f"应用密钥文件为空，请删除后重启或设置 APP_SECRET：{path}")
+    path.chmod(0o600)
+    return saved.encode()
+
+
+APP_SECRET = _load_app_secret()
+MEDIA_TOKEN_TTL = max(300, min(86400, int(os.environ.get("MEDIA_TOKEN_TTL", "43200"))))
+MEDIA_REQUESTS_PER_MIN = max(1, int(os.environ.get("MEDIA_REQUESTS_PER_MIN", "120")))
+MEDIA_MAX_CONCURRENT = max(1, int(os.environ.get("MEDIA_MAX_CONCURRENT", "6")))
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
+TRUST_PROXY_HOPS = max(1, int(os.environ.get("TRUST_PROXY_HOPS", "1")))
 
 app = FastAPI(title="抖音无水印下载器 · 开源版")
 
 
+@app.middleware("http")
+async def _private_api_responses(request: Request, call_next):
+    """解析与媒体 API 含短时签名地址，禁止浏览器或共享代理持久化。"""
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 class ApiError(Exception):
-    def __init__(self, status, message):
+    def __init__(self, status, message, headers=None):
         self.status, self.message = status, message
+        self.headers = headers or {}
 
 
 @app.exception_handler(ApiError)
 async def _err(_, exc):
-    return JSONResponse(status_code=exc.status, content={"error": exc.message})
+    return JSONResponse(status_code=exc.status, content={"error": exc.message},
+                        headers=exc.headers)
 
 
 def _opener(follow=True):
@@ -92,6 +165,149 @@ def _safe(desc, fb):
     return (n or fb)[:60]
 
 
+def _video_signature(vid: str, exp: int) -> str:
+    """签名只绑定资源和过期时间；dl/name 可由前端追加，不影响验签。"""
+    payload = f"media:v1\nvideo\n{vid}\n{exp}".encode()
+    return hmac.new(APP_SECRET, payload, hashlib.sha256).hexdigest()
+
+
+def _video_url(vid: str, filename: str = "", download: bool = False) -> str:
+    exp = int(time.time()) + MEDIA_TOKEN_TTL
+    query = {"exp": str(exp), "sig": _video_signature(vid, exp)}
+    if download:
+        query["dl"] = "1"
+        query["name"] = filename or "video.mp4"
+    return f"/api/video/{urlparse.quote(vid, safe='_-')}?" + urlparse.urlencode(query)
+
+
+def _require_video_token(vid: str, exp: str, sig: str) -> None:
+    try:
+        expiry = int(exp)
+    except (TypeError, ValueError):
+        expiry = 0
+    expected = _video_signature(vid, expiry)
+    now = int(time.time())
+    if (expiry < now or expiry > now + MEDIA_TOKEN_TTL + 300
+            or not re.fullmatch(r"[0-9a-f]{64}", sig or "")
+            or not hmac.compare_digest(sig, expected)):
+        raise ApiError(403, "媒体链接无效或已过期，请重新解析")
+
+
+def _client_ip(request: Request) -> str:
+    """仅在显式信任反代时读取 XFF，并从右侧按可信代理层数取客户端地址。"""
+    peer = request.client.host if request.client else "?"
+    if TRUST_PROXY:
+        parts = [p.strip() for p in
+                 (request.headers.get("x-forwarded-for") or "").split(",") if p.strip()]
+        if len(parts) >= TRUST_PROXY_HOPS:
+            return parts[-TRUST_PROXY_HOPS][:64]
+    return str(peer)[:64]
+
+
+_media_lock = threading.Lock()
+_media_hits: dict[str, list[float]] = {}
+_media_active: dict[str, int] = {}
+_media_last_sweep = 0.0
+
+
+class _MediaLease:
+    def __init__(self, ip: str):
+        self.ip = ip
+        self.released = False
+
+
+def _media_acquire(request: Request) -> _MediaLease:
+    """按 IP 预占一次媒体请求和一个流式并发槽；返回释放租约所需的 IP。"""
+    global _media_last_sweep
+    ip = _client_ip(request)
+    now = time.monotonic()
+    with _media_lock:
+        if now - _media_last_sweep >= 60:
+            for key, values in list(_media_hits.items()):
+                fresh = [t for t in values if now - t < 60]
+                if fresh:
+                    _media_hits[key] = fresh
+                elif not _media_active.get(key):
+                    _media_hits.pop(key, None)
+            _media_last_sweep = now
+
+        hits = [t for t in _media_hits.get(ip, []) if now - t < 60]
+        if len(hits) >= MEDIA_REQUESTS_PER_MIN:
+            _media_hits[ip] = hits
+            raise ApiError(429, "媒体请求过于频繁，请稍后重试",
+                           {"Retry-After": "60"})
+        if _media_active.get(ip, 0) >= MEDIA_MAX_CONCURRENT:
+            raise ApiError(429, "同时播放或下载数量过多，请稍后重试",
+                           {"Retry-After": "2"})
+        hits.append(now)
+        _media_hits[ip] = hits
+        _media_active[ip] = _media_active.get(ip, 0) + 1
+    return _MediaLease(ip)
+
+
+def _media_release(lease: _MediaLease) -> None:
+    with _media_lock:
+        if lease.released:
+            return
+        lease.released = True
+        active = _media_active.get(lease.ip, 0) - 1
+        if active > 0:
+            _media_active[lease.ip] = active
+        else:
+            _media_active.pop(lease.ip, None)
+
+
+class _MediaStreamingResponse(StreamingResponse):
+    """确保响应头发送失败或流中断时也释放媒体并发租约。"""
+    def __init__(self, *args, finalize, **kwargs):
+        self._media_finalize = finalize
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._media_finalize()
+
+
+def _media_finalizer(upstream, lease: _MediaLease):
+    """返回线程安全、幂等的上游关闭 + 并发租约释放函数。"""
+    lock = threading.Lock()
+    closed = False
+
+    def finalize():
+        nonlocal closed
+        with lock:
+            if closed:
+                return
+            closed = True
+        try:
+            upstream.close()
+        except Exception:
+            pass
+        finally:
+            _media_release(lease)
+
+    return finalize
+
+
+def _single_range(request: Request) -> str:
+    """只接受浏览器常用的单段 bytes Range，拒绝多段请求放大。"""
+    value = (request.headers.get("range") or "").strip()
+    if not value:
+        return ""
+    if len(value) > 80:
+        raise ApiError(416, "仅支持单段 Range 请求", {"Accept-Ranges": "bytes"})
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value)
+    if not match or not any(match.groups()):
+        raise ApiError(416, "仅支持单段 Range 请求", {"Accept-Ranges": "bytes"})
+    start, end = match.groups()
+    if ((start and end and int(start) > int(end))
+            or (not start and int(end) <= 0)):
+        raise ApiError(416, "Range 范围无效", {"Accept-Ranges": "bytes"})
+    return value
+
+
 def parse_share(text):
     m = re.search(r"https://v\.douyin\.com/[\w-]+/?", text or "")
     if not m:
@@ -124,12 +340,16 @@ def parse_share(text):
         return res
     v = item.get("video") or {}
     play = (next(_find(v.get("play_addr") or {}, "url_list"), None) or [""])[0]
-    vid = re.search(r"video_id=([\w-]+)", play)
+    vid = re.search(r"video_id=([A-Za-z0-9_-]+)", play)
+    vid_value = vid.group(1) if vid else ""
+    filename = f"{base}.mp4"
     cover = (next(_find(v.get("cover") or {}, "url_list"), None) or [""])[0]
     res.update({"duration_ms": v.get("duration") or 0, "cover": cover,
-                "video": {"url": f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid.group(1)}&ratio=720p&line=0" if vid else "",
-                          "proxy_url": f"/api/video/{vid.group(1)}" if vid else "",
-                          "filename": f"{base}.mp4", "width": v.get("width"), "height": v.get("height")}})
+                "video": {"url": f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid_value}&ratio=720p&line=0" if vid_value else "",
+                          "proxy_url": _video_url(vid_value) if vid_value else "",
+                          "download_url": _video_url(
+                              vid_value, filename, download=True) if vid_value else "",
+                          "filename": filename, "width": v.get("width"), "height": v.get("height")}})
     return res
 
 
@@ -142,7 +362,7 @@ def api_parse(body: Body):
     return parse_share(body.text)
 
 
-def _stream(r, chunk=256 * 1024):
+def _stream(r, finalize, chunk=256 * 1024):
     try:
         while True:
             b = r.read(chunk)
@@ -150,40 +370,46 @@ def _stream(r, chunk=256 * 1024):
                 break
             yield b
     finally:
-        r.close()
+        finalize()
 
 
 @app.get("/api/video/{vid}")
-def api_video(vid, request: Request, dl: str = "", name: str = "video.mp4"):
-    if not re.fullmatch(r"[\w-]{8,120}", vid):
+def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
+              dl: str = "", name: str = "video.mp4"):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,120}", vid):
         raise ApiError(400, "非法的视频 ID")
+    _require_video_token(vid, exp, sig)
+    range_header = _single_range(request)
+    lease = _media_acquire(request)
     extra = dict(CDN_HEADERS)
-    if request.headers.get("range"):
-        extra["Range"] = request.headers["range"]
+    if range_header:
+        extra["Range"] = range_header
+    r = None
     try:
         r = _open(f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0", headers=extra)
+        h = {"Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
+             "X-Content-Type-Options": "nosniff"}
+        for k in ("Content-Length", "Content-Range"):
+            if r.headers.get(k):
+                h[k] = r.headers[k]
+        if dl:
+            safe_name = re.sub(r'[\\/:*?"<>|\r\n]+', "_",
+                               (name or "video.mp4"))[:80]
+            h["Content-Disposition"] = (
+                "attachment; filename*=UTF-8''" + urlparse.quote(safe_name))
+        status = r.status if hasattr(r, "status") else r.getcode()
     except Exception:
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
+        _media_release(lease)
         raise ApiError(502, "拉取视频失败")
-    h = {"Accept-Ranges": "bytes", "Cache-Control": "no-store"}
-    for k in ("Content-Length", "Content-Range"):
-        if r.headers.get(k):
-            h[k] = r.headers[k]
-    if dl:
-        h["Content-Disposition"] = f"attachment; filename*=UTF-8''{urlparse.quote(name)}"
-    status = r.status if hasattr(r, "status") else 200
-    return StreamingResponse(_stream(r), status_code=status, media_type="video/mp4", headers=h)
-
-
-@app.get("/api/media")
-def api_media(url: str):
-    host = urlparse.urlsplit(url).hostname or ""
-    if not any(host == s or host.endswith("." + s) for s in ALLOWED):
-        raise ApiError(403, "域名不在允许范围")
-    try:
-        r = _open(url, headers=CDN_HEADERS)
-    except Exception:
-        raise ApiError(502, "拉取失败")
-    return StreamingResponse(_stream(r), media_type=r.headers.get("Content-Type", "image/jpeg"))
+    finalize = _media_finalizer(r, lease)
+    return _MediaStreamingResponse(
+        _stream(r, finalize), finalize=finalize, status_code=status,
+        media_type="video/mp4", headers=h)
 
 
 # ---------------------------------------------------------------- 多语言 + SEO
@@ -213,18 +439,18 @@ def _seo_head(lang: str, origin: str) -> str:
     canon = f"{origin}/" if zh else f"{origin}/?lang=en"
     m = {
         "zh": {"t": "抖音无水印下载器 · 开源版",
-               "d": "免费开源的抖音无水印下载工具：粘贴分享链接即可在线预览并下载抖音视频与图集的无水印原片。免登录、无广告、浏览器直连、可自建。",
+               "d": "免费开源的抖音无水印下载工具：粘贴分享链接即可在线预览并下载抖音视频与图集的无水印原片。免登录、无广告、直连优先且支持流式兜底、可自建。",
                "k": "抖音下载,抖音无水印下载,抖音视频下载,douyin downloader,抖音图集下载,开源,自建",
                "s": "抖音无水印下载器", "l": "zh_CN"},
         "en": {"t": "Douyin Downloader — No Watermark, Free & Open Source",
-               "d": "Free, open-source Douyin (Chinese TikTok) no-watermark downloader. Paste a share link to preview and download original videos & photo galleries. No login, no ads, browser-direct, self-hostable.",
+               "d": "Free, open-source Douyin (Chinese TikTok) no-watermark downloader. Paste a share link to preview and download original videos & photo galleries. No login, no ads, browser-direct with streaming fallback, self-hostable.",
                "k": "douyin downloader,douyin video download,no watermark,tiktok downloader,open source,self-hosted",
                "s": "Douyin Downloader", "l": "en_US"},
     }[lang]
-    faq = {"zh": [("这个抖音下载器安全吗？", "安全。前端完全开源可审查，不采集隐私、无需登录，视频由你的浏览器直连获取，服务器不存储。"),
+    faq = {"zh": [("这个抖音下载器如何处理数据？", "基础版无需登录，不建立用户或分析数据库，也不保存媒体文件。解析和兼容转发时，服务器或反向代理会处理完成网络请求所需的 IP、浏览器信息和请求地址；IP 仅在进程内存中用于媒体限频。"),
                   ("下载的视频有水印吗？", "没有水印，是无水印原片，也不加二次水印。"),
                   ("支持图集吗？", "支持，图集会自动识别，可逐张下载原图。")],
-           "en": [("Is this downloader safe?", "Yes. The front-end is fully open-source and auditable — no data collection, no login; your browser fetches the video and the server stores nothing."),
+           "en": [("How does this downloader handle data?", "This edition requires no login, creates no user or analytics database, and stores no media files. During parsing or streaming fallback, the server or reverse proxy processes the IP address, browser information, and request URL required for network transport; IPs are used only in process memory for media rate limits."),
                   ("Do downloads have a watermark?", "No — you get the original with no watermark, and we never add our own."),
                   ("Are photo galleries supported?", "Yes — image posts are auto-detected and each original image can be downloaded.")]}[lang]
     graph = [{"@type": "WebApplication", "name": m["s"], "url": f"{origin}/",

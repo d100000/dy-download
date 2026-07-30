@@ -9,13 +9,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 ./run.sh                                   # 本地启动（首次自动建 .venv 并装依赖），默认 :3344
 PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
-.venv/bin/uvicorn server:app --reload --port 3344   # 开发热重载（手动方式）
+.venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
 docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v $(pwd)/data:/data douyin-dl
 ```
 
-页面：`/` 下载器 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露）。
+页面：`/` 下载器 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露） · `/s/{sid}` 分享页。
+站点级路由（改站点文案/新增可收录页面时要一并同步）：`/robots.txt`、`/llms.txt`、`/sitemap.xml`、`/og.svg`（内联 SVG 卡片图）、`/og.png`（`static/og.png` 位图，微信/多数抓取器不渲染 SVG，卡片兜底必须用它）。
+
+依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。Dockerfile 只 `COPY server.py` + `COPY static`——新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
 无测试套件、无 lint 配置，验证靠手动跑服务 + 真实链接解析（抖音接口随时可变，改解析逻辑必须实测）。`/healthz` 可做存活探针（含 `version` 字段）。
 
@@ -27,9 +30,9 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 ### 单文件后端 + 单文件前端
 
-`server.py`（~2770 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。新增功能应放进对应分区，不要拆包。
+`server.py`（3000+ 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 内置 mihomo 内核 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。定位代码用 `grep -n "^# -----" server.py` 列分隔线，不要记行号。新增功能应放进对应分区，不要拆包。
 
-注意用户体系被拆成了相距很远的两块：**底层**（`hash_pw`/`current_user`/滑块验证码，约 242 行起）在文件前部，**路由**（`/api/auth/*`）在文件**最末尾**。改用户相关功能时两处都要看。
+注意用户体系被拆成了相距很远的两块：**底层**（`hash_pw`/`current_user`/滑块验证码，在「用户鉴权 / 防机器人」分区）在文件前部，**路由**（`/api/auth/*`）在文件**最末尾**的同名分区。改用户相关功能时两处都要看。
 
 `static/*.html` 每个页面是自包含单文件（内联 CSS + 原生 JS，无构建、无框架、无依赖）。没有 `StaticFiles` 挂载，每个页面都有独立路由，分两类：
 - **模板替换型**：`index.html` / `api-docs.html`（替换 `{{HTMLLANG}}` / `{{SEO_HEAD}}` / `{{ORIGIN}}`）、`share.html`（见分享页一节）。
@@ -43,15 +46,13 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 这套链路在仓库里有**三份互不共享代码的实现**，改动时要想清楚同步范围：`server.py`（主服务，且内部还有 `_parse_share` / `_parse_item` 两个入口）、`oss/server.py`（开源精简版）、`douyin_dl.py`（纯标准库 CLI）。抖音改页面结构时三份都会坏，但只有主服务是必须立刻修的。
 
-### 流量分工：服务器只解析，字节走浏览器直连
+### 流量分工：浏览器直连优先，同源流式兜底
 
-这是全项目的核心设计取舍，改动前先理解：解析（短链 + 分享页）在服务器完成并走代理；**视频/图片字节由用户浏览器直连抖音 CDN**（`result.video.url` 是可直接 GET 的播放接口，浏览器自行跟 302）。`/api/video/{vid}` 与 `/api/media` 只是直连失败时的服务器兜底，会消耗服务器带宽并暴露服务器/代理 IP。因此已刻意去掉"图集打包 ZIP"这类必须服务器下载的功能——不要重新引入。
+这是全项目的核心设计取舍，改动前先理解：解析（短链 + 分享页）在服务器完成并走代理；普通浏览器的媒体字节仍优先直连抖音 CDN（`result.video.url` 是可直接 GET 的播放接口，浏览器自行跟 302）。视频下载受 CORS/重定向限制时，前端自动使用 `video.download_url`（带 `exp`/`sig` 的 `/api/video/{vid}`）流式兜底；微信内播放也优先同源签名地址，避免抖音域名被 WebView 拦截。`_media_signature()` 绑定 `kind/resource/exp`，但刻意不绑定 `dl/name`，因此前端可追加下载参数；入口还必须经过单 IP 限频、流生命周期并发租约和单段 Range 校验。未使用的通用 `/api/media` 已删除，不得重新引入任意 URL 代理。兜底会消耗服务器带宽并暴露服务器/代理 IP，但只转发、不落地保存。图集仍逐张浏览器直连，已刻意去掉"图集打包 ZIP"这类必须服务器下载的功能——不要重新引入。
 
 ### 出站请求：一律经 `open_url()`
 
 `open_url()` 是唯一允许的出站入口（基于 `urllib` + `PySocks`，无 requests）。它按 `ProxyManager.candidates()` 的轮换策略依次尝试代理，失败自动转移，403/401 或验证页判定为 IP 被封 → `mark_banned()` 落库 + 禁用 + 换下一个。`force_proxy=True`（默认）时没有可用代理就直接报 503，**绝不直连**——这是防止服务器真实 IP 暴露/被封的底线。任何新代码不得直接 `urlopen`/`requests` 请求抖音。
-
-`/api/media` 有 SSRF 白名单 `ALLOWED_HOST_SUFFIXES`，且跟随重定向后会**复核最终 host**，新增代理型端点必须照做。
 
 ### 代理池
 
@@ -69,36 +70,50 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 分享页 SEO 走 `_share_head()`（per-share OG）而非 `_seo_head()`，且**一律 noindex**，`robots.txt` 也 Disallow `/s/`——不收录他人作品是合规底线，不要"优化"掉。
 
-播放走三级降级：浏览器直连 CDN → `/api/video/{vid}` 服务器代理 → 微信内引导"用浏览器打开"。每次降级上报 `fallback` 埋点，**这是服务器带宽成本的核心监控指标**。
+播放线路按环境排序：普通浏览器走 **`dy1`（`video.url`）→ `dy2`（`video.alt_url`）→ `proxy`（`video.proxy_url`）→ 失败提示**，优先节省服务器带宽；微信内走 **`proxy → dy1 → dy2 → 引导“用浏览器打开”`**，确保首次点击立即进入同源线路，不先空等两个 7 秒超时。`alt_url` 仍必须保留，它是代理故障时的重要备线。每级切换上报 `fallback`，每级成败上报 `play_ok`/`play_fail`（带 `source`=dy1/dy2/proxy、`stage`=ok/error/timeout/giveup、`detail`=media error code、`ms`），落 `share_events` 的 `source/stage/detail/ms` 四列，后台「分享页 → 播放诊断」看板按 微信内/外 × 线路 看成功率；微信内 `proxy` 占比升高是预期，带宽分析要分环境看。注意 `share_events` 这四列是启动时用 `PRAGMA table_info` + `ALTER TABLE` 就地补的（无迁移框架），再加列照此办理。
 
 **域名池**：`_share_origin()` 给新链接分配域名，优先级为 **后台主域名（`app_settings.share_primary_domain`，即时生效不重启）→ `SHARE_DOMAINS` 环境变量域名池（轮换）→ 请求来源**。短码与域名解耦，某域名被微信封了在后台停用即可（`share_domains_off` 也对主域名生效，会自动退回池子/来源），存量链接换域名照样打开。主站域名与分享域名要物理隔离——分享域名被封是日常，主站被牵连是灾难。
 
+**微信卡片**：两条完全不同的机制，别混。① **粘贴链接进聊天窗口 → 永远是纯文字链**，微信不做 URL 展开，任何 og 标签都改不了这一点；② **在微信内打开页面 → 点右上角 ··· 转发 → 才是卡片**。网页无法用按钮唤起微信分享面板，只能引导用户去点 ···。所以产品文案不要承诺「发到微信会自动变成卡片」——首页弹窗、分享页引导、FAQ（中英 + JSON-LD）、`llms.txt` 里的说法必须一致，改一处要四处同步。
+
+卡片图走 `_card_cover()`：抖音封面原始直链是 `p26-sign.douyinpic.com/….webp?x-signature=…&x-expires=…`，**去掉主机的 `-sign` 并把扩展名换成 `.jpeg`**，抖音会返回同一张图的**无签名、不过期 JPEG**（签名覆盖路径，只换扩展名不去 `-sign` 会 403，两步必须一起做）。这解决 webp 在微信缩略图上支持不稳定、以及签名约 14 天过期后存量分享页全变无图卡片两个问题。无封面时兜底 `og.png` 而**不是 `og.svg`**——微信不渲染 SVG。
+
 **微信 JS-SDK**：`/api/wx/jssdk` 出签名，未配置公众号时返回 `enabled:false`，前端静默降级到微信默认卡片。`jsapi_ticket` **存 app_settings 表**（全局唯一 + 有频次上限，存内存会导致多 worker 互相顶掉）。这里的出站请求**刻意不走 `open_url()`**：公众号要求服务器出口 IP 在白名单内，走代理反而失败。
 
-**海报**在前端用 canvas 合成（封面走 CDN 的 `ACAO:*` 跨域绘制，二维码用同源 PNG——SVG 在部分内核会污染画布导致 `toBlob` 抛 SecurityError），服务器同样不参与、不落地。微信封图片远少于封链接，海报是链接被封时的传播兜底。
+**海报**在前端用 canvas 合成（封面走 CDN 的 `ACAO:*` 跨域绘制，二维码用同源 PNG——SVG 在部分内核会污染画布导致导出抛 SecurityError），服务器同样不参与、不落地。微信封图片远少于封链接，海报是链接被封时的传播兜底。导出**必须用 `toDataURL()` 出 `data:` URI，不要用 `toBlob`+`createObjectURL`**：微信 WebView 对 `blob:` 图片长按不弹「保存图片／发送给朋友」，海报就既存不下也发不出去。
 
 ### 滑块验证码与 `pass_token` 门禁
 
 自研的防机器人链路（无 Pillow、无第三方库）：`_png()` 是手写的极简 PNG 编码器（stdlib `zlib`+`struct`），`make_captcha()` 服务端生成带缺口的背景图。**缺口坐标只存在服务端 `_captchas` 与像素里**，绝不出现在响应体中——抓包拿不到答案，改这段时别把坐标漏进返回值。`verify_captcha()` 校验落点 + 行为轨迹 + PoW（`POW_BITS=14`，抬高批量自动化成本）+ 蜜罐字段。
 
-关键耦合：**`/api/parse` 硬性要求一个一次性 `pass_token`**（`issue_pass()` 签发 → `consume_pass()` 消费，缺则必拒）。因此任何新的网页端解析入口都要先走滑块拿令牌；而开放 API `/api/v1/*` 用 API Key 计费，**不经过**这套门禁。验证码接口本身有 `_captcha_rate_ok()` 限频，防的是生成图片的 CPU-DoS。
+关键边界：滑块签发的 `pass_token` **只保护 `/api/auth/register` 与 `/api/auth/login`**，由 `_do_auth_guard()` 一次性消费。`/api/parse`、`/api/parse/batch` 与 `/api/share` 不经过滑块；网页解析靠原子免费额度预占保护，开放 API `/api/v1/*` 则用 API Key 原子计费。新增注册/登录入口必须复用滑块令牌；新增解析入口必须复用额度预占与失败退款，不能把两套门禁混在一起。验证码接口本身有 `_captcha_rate_ok()` 限频，防的是生成图片的 CPU-DoS。
 
+### 配额与计费
 
+- **网页免费配额**：`usage_daily` 表按 subject 计数，登录用户按 `user:{id}`（`FREE_USER_DAILY`），匿名按用途化 HMAC 后的 `ip:` + 30 天随机第一方匿名 ID `fp:`（取最大值，`FREE_ANON_DAILY`）。解析前必须通过 `reserve_quota()` 在 `BEGIN IMMEDIATE` 事务里原子预占；成功用 `settle_quota()` 结算实际条数，失败或未处理部分必须 `release_quota()` / 结算退款，过期预占由后台清理。
+- **开放 API 计费**（分为单位）：创建 `/api/v1/jobs` 时在同一个 `BEGIN IMMEDIATE` 事务里快照单价、整批扣减 `balance_cents`、增加 `reserved_cents`，并写入 `jobs`、逐条 `job_items` 与 `api_ledger reserve`；余额不够则整批拒绝。`Idempotency-Key` 可安全重放。非 daemon 的有界 worker 通过 `_claim_job_item()` 获取数据库租约，`_finish_job_item()` 用 CAS 在同一事务里把成功项从 reserved 转入 spent/calls，失败项精确退回 balance，同时写账本和唯一 `api_logs`。启动时 `_recover_legacy_api_jobs()`、`_reconcile_api_job_accounts()` 恢复旧任务并对账，重启不会丢任务或重复计费。`job_items` 是事实源，`jobs` 只是聚合/结果快照；不要退回“一请求一条 daemon 线程”的实现。
 
-- **网页免费配额**：`usage_daily` 表按 subject 计数，登录用户按 `user:{id}`（`FREE_USER_DAILY`），匿名按 `ip:` + 前端指纹 `fp:`（取最大值，`FREE_ANON_DAILY`）。仅解析**成功**才 `reserve_quota`。
-- **开放 API 计费**（分为单位）：`try_reserve()` 用带条件的 `UPDATE ... WHERE balance_cents>=?` 做原子预扣，`api_settle()` 成功计入 spent/calls、失败退款并写 `api_logs`。`/api/v1/jobs` 提交后在 **daemon 线程**里跑 `_run_job`，客户端轮询 `/api/v1/jobs/{id}`；结果每 5 条落一次库以免 O(n²) 序列化。
+### 隐私与数据最小化
+
+- 前端只允许使用 `dyanon`：16 字节随机第一方匿名 ID，固定 30 天过期；加载时主动删除旧 `dyfp`。**不得重新引入 Canvas、硬件参数、屏幕、字体等浏览器指纹。** 请求头继续用 `X-FP` 只是为了后端兼容。
+- 服务端持久化网络标识前必须经 `APP_SECRET` 做按用途、按周期隔离的 HMAC 摘要；浏览器信息只保留诊断所需的粗粒度字段。访问、解析、播放事件与 API 任务/结果的保留期为 `DATA_RETENTION_DAYS`（强制 1–30 天，默认 30 天），到期数据由每 5 分钟执行的清理任务删除。
+- 默认部署必须关闭 Uvicorn/Nginx access log；不得让原始 IP、完整 UA/Referer、媒体签名、下载文件名或 API Key 进入 URL/日志。开放 API 只从 `X-API-Key` 读取密钥，吊销和充值等管理操作把密钥放 JSON body。
+- 站内账号是可选功能；注册会保存邮箱与加盐密码哈希，账号资料随账号保留。服务器不落地保存视频或图片文件，兼容线路只做流式转发；浏览器直连抖音媒体时，抖音会接收到请求方的 IP 等网络信息与浏览器信息。
+- 对外文案不得使用“零隐私采集”“不采集任何数据”“不记录账号”等绝对说法。中英文页面与 README 应明确以上数据范围、保留期和第三方直连边界。
 
 ### 状态存储与部署约束
 
 SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lock`；schema 在 `_SCHEMA` 里用 `CREATE TABLE IF NOT EXISTS` 就地演进（无迁移框架，改表要自行考虑既有库的兼容）。
 
-**会话与验证码状态都在进程内存字典**（`_user_sessions`、`_sessions`、`_captchas`、`_passes`、限频计数），由 `_sweeper` 线程每 5 分钟清理。后果：重启即掉线；**多 worker 部署会话不互认**——默认按单 worker 运行，多进程时至少要设 `CAPTCHA_SECRET`，会话仍需改造为共享存储。
+**会话与验证码状态仍在进程内存字典**（`_user_sessions`、`_sessions`、`_captchas`、`_passes`、限频计数），由 `_sweeper` 线程每 5 分钟清理。后果：重启即掉线；**多 worker 部署会话不互认**——默认按单 worker 运行，会话仍需改造为共享存储。开放 API 作业及计费已持久化，不受该限制。签名与摘要密钥默认原子持久化到权限 `0600` 的 `data/.app-secret`，生产/多实例也可显式设置同一个 `APP_SECRET`。
 
-`TRUST_PROXY=1` 才采信 `X-Forwarded-For`（否则客户端可伪造头绕过所有基于 IP 的风控），并连带开启 Cookie `Secure`。
+`TRUST_PROXY=1` 才采信 `X-Forwarded-For`（否则客户端可伪造头绕过所有基于 IP 的风控），并连带开启 Cookie `Secure`；从右侧按 `TRUST_PROXY_HOPS` 取值。Nginx 应覆盖为 `$remote_addr`，不要用会保留客户端伪造左侧值的 `$proxy_add_x_forwarded_for`。
 
 ### 环境变量
 
-`ADMIN_PASSWORD`(默认 douyin-admin，生产必改) · `DATA_DIR`(默认 `data`) · `FREE_ANON_DAILY`(3) · `FREE_USER_DAILY`(10) · `NEW_KEY_BALANCE`(新 Key 试用余额，分) · `TRUST_PROXY` · `COOKIE_SECURE` · `CAPTCHA_SECRET` · `SHARE_DOMAINS`(分享域名池，逗号分隔) · `SHARE_TTL_ANON_DAYS`(7) · `SHARE_TTL_USER_DAYS`(30)。API 单价与微信公众号密钥存在 `app_settings` 表（`api_price_cents` / `wx_appid` / `wx_secret`，后台可改），不是环境变量。
+`ADMIN_PASSWORD`(默认 douyin-admin，生产必改) · `DATA_DIR`(默认 `data`) · `APP_SECRET`(可选；未设则原子生成 `data/.app-secret`) · `CAPTCHA_SECRET`(旧部署兼容/可单独覆盖) · `DATA_RETENTION_DAYS`(1–30，默认 30) · `FREE_ANON_DAILY`(3) · `FREE_USER_DAILY`(10) · `QUOTA_RESERVATION_TTL`(3600 秒) · `NEW_KEY_BALANCE`(新 Key 试用余额，分) · `API_JOB_WORKERS`(2) · `API_JOB_LEASE_SECONDS`(600) · `API_JOB_HEARTBEAT_SECONDS`(30) · `MEDIA_TOKEN_TTL`(43200) · `MEDIA_REQUESTS_PER_MIN`(120) · `MEDIA_MAX_CONCURRENT`(6) · `TRUST_PROXY` · `TRUST_PROXY_HOPS`(1) · `COOKIE_SECURE` · `SHARE_DOMAINS`(分享域名池，逗号分隔) · `SHARE_TTL_ANON_DAYS`(7) · `SHARE_TTL_USER_DAYS`(30) · `MIHOMO_VERSION` / `MIHOMO_DL_BASE` / `MIHOMO_OFF`(内置内核版本/下载源/总开关) · `HOST`(run.sh 默认 127.0.0.1) · `PORT`(仅 `run.sh` 用)。
+
+**运行时可改的配置不走环境变量**：API 单价、微信公众号密钥、机场订阅、分享主域名都在 `app_settings` 表（`api_price_cents` / `wx_appid` / `wx_secret` / `mihomo_sub_url` / `share_primary_domain`，后台改、即时生效）；代理列表与轮换策略在 `data/config.json`。新增"运营要随时调"的开关优先进 `app_settings` + 后台，而不是加环境变量。
 
 ### 前端 i18n / SEO
 

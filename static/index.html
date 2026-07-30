@@ -89,6 +89,9 @@ h1 .hl{
   -webkit-background-clip:text; background-clip:text; color:transparent;
 }
 .hero p{color:var(--muted); margin-top:14px; font-size:16px; animation:riseIn .7s .08s cubic-bezier(.2,.7,.3,1) both}
+/* 第二卖点：分享（与下载并列，弱于主标题但强于信任徽章） */
+.hero p.hero-share{margin-top:8px; font-size:14.5px; animation-delay:.14s}
+.hero p.hero-share strong{color:var(--text); font-weight:650}
 @keyframes riseIn{from{opacity:0; transform:translateY(14px)}to{opacity:1; transform:translateY(0)}}
 @media (prefers-reduced-motion:reduce){h1,.hero p{animation:none}}
 
@@ -534,7 +537,7 @@ footer{
     <button class="nav-user" id="authBtn" data-i18n="nav_login">登录 / 注册</button>
     <div class="user-menu" id="userMenu" style="display:none">
       <button class="nav-link" id="mySharesBtn">我的分享</button>
-      <a class="nav-link" href="/api-console" data-i18n="nav_console">API 控制台</a>
+      <a class="nav-link" id="apiTabBtn" href="/api-console" data-i18n="nav_console">API 控制台</a>
       <span class="user-email" id="userEmail"></span>
       <button class="nav-link" id="logoutBtn" data-i18n="nav_logout">退出</button>
     </div>
@@ -608,13 +611,15 @@ footer{
 <main>
 <section class="hero">
   <h1 data-i18n-html="hero_h1">粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
-  <p data-i18n="hero_sub">开源可信 · 零隐私采集 · 承诺永不接广告 · 稳定下载</p>
+  <p data-i18n="hero_sub">开源可审查 · 不保存媒体文件 · 承诺永不接广告 · 稳定下载</p>
+  <p class="hero-share" data-i18n-html="hero_share">还能<strong>一键生成分享页</strong>——发给微信好友点开即看，无需安装抖音 App</p>
   <div class="trust-badges">
     <span class="tb" data-i18n="b_opensource">🔓 完全开源</span>
-    <span class="tb" data-i18n="b_privacy">🔒 不碰你的隐私</span>
+    <span class="tb" data-i18n="b_privacy">🔒 最少必要数据</span>
     <span class="tb" data-i18n="b_noads">🚫 永不接广告</span>
     <span class="tb" data-i18n="b_stable">🛡 稳定可靠</span>
-    <span class="tb" data-i18n="b_nologin">👤 无需登录</span>
+    <span class="tb" data-i18n="b_nologin">👤 站内账号可选</span>
+    <span class="tb" data-i18n="b_share">↗ 一键分享</span>
   </div>
 
   <div class="composer">
@@ -638,7 +643,7 @@ footer{
   <div class="steps">
     <span class="step-chip"><b>1</b><span data-i18n="step1">粘贴 / 上传单条或多条链接</span></span>
     <span class="step-chip"><b>2</b><span data-i18n="step2">点击解析（多条自动批量）</span></span>
-    <span class="step-chip"><b>3</b><span data-i18n="step3">表格查看 · 下载 · 导出 Excel</span></span>
+    <span class="step-chip"><b>3</b><span data-i18n="step3">下载原片 · 或生成分享页发给好友</span></span>
   </div>
 
   <div class="alert" id="alert" role="alert">
@@ -657,8 +662,8 @@ footer{
   <div class="trust-grid">
     <div class="trust-card reveal">
       <div class="tc-icon">🔓</div>
-      <h3 data-i18n="tc1_h">完全开源 · 零隐私</h3>
-      <p data-i18n-html="tc1_p">前端代码完全开源，任何人都能审查——<strong>不嵌入任何危险代码、不采集、不上传你的任何隐私</strong>。无需登录、不记录你的账号，视频由你的浏览器直连获取，我们不存储任何内容。</p>
+      <h3 data-i18n="tc1_h">开源可审查 · 数据最小化</h3>
+      <p data-i18n-html="tc1_p">前端代码开源可审查。本站<strong>不保存视频或图片文件</strong>，兼容线路只做流式转发；基础解析无需登录抖音，站内账号可选。免费额度、防滥用与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的清理任务删除；注册账号资料随账号保留。</p>
     </div>
     <div class="trust-card reveal">
       <div class="tc-icon">🛡</div>
@@ -669,6 +674,11 @@ footer{
       <div class="tc-icon">🚫</div>
       <h3 data-i18n="tc3_h">永不接广告</h3>
       <p data-i18n-html="tc3_p">我们的承诺很简单——<strong>永远不会接入任何广告</strong>。没有弹窗、没有 15 秒插播、不给你的下载加二次水印。干净，就是干净。</p>
+    </div>
+    <div class="trust-card reveal">
+      <div class="tc-icon">↗</div>
+      <h3 data-i18n="tc4_h">一键分享给好友</h3>
+      <p data-i18n-html="tc4_p">解析后可<strong>一键生成分享页</strong>：发到微信、QQ、朋友圈，好友<strong>点开就能直接观看</strong>，无需安装抖音 App、不用跳转、不用复制口令。还能生成海报图，长按即可保存转发。</p>
     </div>
   </div>
 </section>
@@ -705,15 +715,23 @@ GET /api/v1/jobs/job_xxx
 
 <section class="faq" aria-labelledby="faq-title">
   <h2 class="faq-title reveal" id="faq-title" data-i18n="faq_title">常见问题</h2>
-  <p class="faq-lead reveal" data-i18n="faq_lead">抖音无水印下载：在抖音 App 复制作品分享链接，粘贴到本站点击解析，即可在线预览并下载无水印原片。全程免登录、免安装、由你的浏览器直连下载。</p>
+  <p class="faq-lead reveal" data-i18n="faq_lead">抖音无水印下载与分享：在抖音 App 复制作品分享链接，粘贴到本站点击解析，即可在线预览、下载无水印原片，或一键生成分享页发给微信好友——对方点开即可观看，无需安装抖音 App。无需登录抖音账号；基础解析不要求注册本站账号，也无需安装应用。</p>
   <div class="faq-list">
     <details class="faq-item reveal">
-      <summary data-i18n="faq_q1">这个抖音下载器安全吗？会收集我的隐私吗？</summary>
-      <p data-i18n-html="faq_a1">安全。前端代码<strong>完全开源</strong>、任何人都能审查，<strong>不嵌入任何危险代码、不采集、不上传你的任何隐私</strong>。无需登录、不记录账号，视频由你的浏览器直连获取，我们不存储任何内容。</p>
+      <summary data-i18n="faq_q1">这个抖音下载器会处理和保留哪些数据？</summary>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。媒体直连抖音时，抖音会收到你的 IP 等网络信息与浏览器信息。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
+      <p data-i18n-html="faq_a6">解析后点<strong>生成分享页</strong>，得到一条链接。想让好友收到<strong>带封面和标题的卡片</strong>，要在<strong>微信里打开这个页面</strong>，再点右上角 <strong>···</strong> →「发送给朋友」——这样转发出去才是卡片。如果只是复制链接、粘贴到聊天窗口，微信不会把网址展开成卡片，会显示成一条普通网址（这是微信的机制，任何网站都一样）。两种方式好友点开都能<strong>直接观看无水印原片</strong>，无需安装抖音 App、不用复制口令跳转。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q7">分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？</summary>
+      <p data-i18n-html="faq_a7">不需要装任何 App，用微信内置浏览器点开就能看。分享页<strong>匿名有效期 7 天、登录后 30 天</strong>；页面只保存作品的标题封面等信息，<strong>不存储任何视频文件</strong>，版权仍归原作者。你也可以生成<strong>分享海报</strong>（带二维码），长按保存后发朋友圈。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q2">需要登录或安装软件吗？</summary>
-      <p data-i18n="faq_a2">不需要。纯网页工具，无需登录抖音账号、无需安装任何 App 或浏览器插件，粘贴分享链接即可使用。</p>
+      <p data-i18n="faq_a2">无需登录抖音账号，也无需安装任何 App 或浏览器插件。本站账号为可选；基础解析可直接使用，API 控制台等账号功能需要登录。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q3">下载的抖音视频有水印吗？</summary>
@@ -733,7 +751,7 @@ GET /api/v1/jobs/job_xxx
 
 <footer>
   <span data-i18n="footer1">仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有</span><br>
-  <span data-i18n="footer2">未经授权请勿二次发布或商用 · 本工具不存储任何视频与账号数据</span>
+  <span data-i18n="footer2">未经授权请勿二次发布或商用 · 本站不保存视频或图片文件；站内账号可选</span>
 </footer>
 
 </div>
@@ -746,32 +764,37 @@ const input = $('#input'), parseBtn = $('#parseBtn'), alertBox = $('#alert'),
 
 /* ---------- 多语言 i18n ---------- */
 const LANG = window.__LANG || 'zh';
+const IS_WECHAT_UA = /micromessenger/i.test(navigator.userAgent);
 const I18N = {
   en: {
     nav_api:"API", nav_login:"Sign in", nav_console:"API Console", nav_logout:"Log out",
     hero_h1:'Paste a link,<br>get the <span class="hl">watermark-free</span> original',
-    hero_sub:"Open-source · Privacy-first · No ads, ever · Reliable",
-    b_opensource:"🔓 Open source", b_privacy:"🔒 Privacy-first", b_noads:"🚫 No ads", b_stable:"🛡 Reliable", b_nologin:"👤 No login",
+    hero_sub:"Open source & auditable · No media-file storage · No ads, ever · Reliable",
+    hero_share:"You can also <strong>create a share page in one click</strong> — send it to friends on WeChat and they watch instantly, no Douyin app needed",
+    b_opensource:"🔓 Open source", b_privacy:"🔒 Data minimised", b_noads:"🚫 No ads", b_stable:"🛡 Reliable", b_nologin:"👤 Site account optional", b_share:"↗ One-click share",
     ph_input:"Paste one or more Douyin share texts / links — paste many at once and they're auto-split for batch parsing.\ne.g.\n3.89 ... https://v.douyin.com/xxxx/\n7.65 ... https://v.douyin.com/yyyy/",
     btn_paste:"📋 Paste", btn_upload:"📎 Upload file", btn_clear:"Clear", btn_parse:"Parse",
     hint:"💡 Paste <b>multiple</b> links at once (one per line or run-on) — auto-split, batch-parsed, and exportable to Excel.",
-    step1:"Paste / upload one or many links", step2:"Click Parse (multi = auto batch)", step3:"Table view · download · export Excel",
+    step1:"Paste / upload one or many links", step2:"Click Parse (multi = auto batch)", step3:"Download the original · or create a share page",
     trust_title:"Why you can trust it",
-    tc1_h:"Open source · Zero privacy", tc1_p:"The front-end is fully open-source and auditable — <strong>no malicious code, no collection, nothing uploaded</strong>. No login, no account logging; videos are fetched directly by your browser and we store nothing.",
+    tc1_h:"Open source · Data minimised", tc1_p:"The front end is open source and auditable. We <strong>do not store video or image files</strong>; compatibility routes only stream bytes. Basic parsing needs no Douyin login and the site account is optional. Free-quota, abuse-prevention and playback-diagnostic details have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. Registered-account data is kept with the account.",
     tc2_h:"Reliable · Always up", tc2_p:"We put real engineering into <strong>keeping downloads working</strong>: multi-route failover, automatic retries, live monitoring and ongoing maintenance. Other tools break and stay broken — ours keeps working.",
     tc3_h:"No ads, ever", tc3_p:"Our promise is simple — <strong>we will never run ads</strong>. No popups, no 15-second pre-rolls, no second watermark on your downloads. Clean, just clean.",
+    tc4_h:"Share in one click", tc4_p:"After parsing you can <strong>create a share page in one click</strong>: send it to WeChat, QQ or Moments and friends <strong>watch it right there</strong> — no Douyin app, no redirect, no copy-paste codes. You can also generate a poster image to save and forward.",
     api_tag:"Developer API", api_h:"Need bulk / automation? Use the open API",
     api_p:"Sign in, create an API key in the console, and submit Douyin links in bulk via the async API — title, author, no-watermark video URL, gallery images and stats in one call. Billed per request, reliable, built for scraping, backup and integration.",
-    api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance查询",
+    api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance visible",
     api_cta1:"View API docs", api_cta2:"Open API console",
-    faq_title:"FAQ", faq_lead:"Douyin no-watermark download: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — no login, no install, fetched directly by your browser.",
-    faq_q1:"Is this downloader safe? Does it collect my data?", faq_a1:"Yes. The front-end is <strong>fully open-source</strong> and auditable — <strong>no malicious code, no collection, nothing uploaded</strong>. No login, no account logging; your browser fetches the video and we store nothing.",
-    faq_q2:"Do I need to log in or install anything?", faq_a2:"No. It's a pure web tool — no Douyin login, no app or browser extension. Just paste a share link.",
+    faq_title:"FAQ", faq_lead:"Douyin no-watermark download & sharing: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — or create a share page in one click and send it to friends on WeChat, who can watch it without installing Douyin. No Douyin login is required; basic parsing needs no site account or app installation.",
+    faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
+    faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Browser-direct media requests disclose your IP and browser information to Douyin.",
+    faq_q2:"Do I need to log in or install anything?", faq_a2:"No Douyin login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
     faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
     footer1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
-    footer2:"Do not re-publish or use commercially without permission · This tool stores no video or account data",
+    footer2:"Do not re-publish or use commercially without permission · No video or image files are stored; a site account is optional",
     auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
     auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
     quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
@@ -810,23 +833,41 @@ const _io = new IntersectionObserver((entries) => {
 }, { threshold: 0.15 });
 document.querySelectorAll('.reveal').forEach(el => _io.observe(el));
 
-/* ---------- 浏览器指纹（配合 IP 做防薅羊毛限频）---------- */
-let _fp = localStorage.getItem('dyfp') || '';
-async function computeFP(){
-  const parts = [navigator.userAgent, navigator.language,
-    screen.width+'x'+screen.height+'x'+screen.colorDepth, new Date().getTimezoneOffset(),
-    navigator.hardwareConcurrency||0, navigator.platform||'', navigator.deviceMemory||0];
-  try { const c=document.createElement('canvas'), x=c.getContext('2d');
-    x.textBaseline='top'; x.font='14px Arial'; x.fillText('抖音下载器·fp🎬',2,2);
-    parts.push(c.toDataURL().slice(-80)); } catch {}
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(parts.join('|')));
-  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('').slice(0,32);
+/* ---------- 30 天随机第一方匿名 ID（用于免费额度与防滥用）---------- */
+const ANON_ID_KEY = 'dyanon';
+const ANON_ID_TTL = 30 * 24 * 60 * 60 * 1000;
+function newAnonId(){
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map(b=>b.toString(16).padStart(2,'0')).join('');
 }
-(async () => { if(!_fp){ try{ _fp = await computeFP(); localStorage.setItem('dyfp',_fp); }catch{} } refreshQuota(); })();
-function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_fp) h['X-FP']=_fp; return h; }
+function loadAnonId(){
+  try {
+    localStorage.removeItem('dyfp');
+    localStorage.removeItem('dyhistory');
+    for (let i = localStorage.length - 1; i >= 0; i--){
+      const key = localStorage.key(i);
+      if (key && key.startsWith('dyauthor:')) localStorage.removeItem(key);
+    }
+  } catch {}
+  const now = Date.now();
+  try {
+    const saved = JSON.parse(localStorage.getItem(ANON_ID_KEY) || 'null');
+    if (saved && /^[0-9a-f]{32}$/.test(saved.id || '') &&
+        Number.isFinite(saved.expiresAt) && saved.expiresAt > now) return saved.id;
+  } catch {}
+  try {
+    const id = newAnonId();
+    localStorage.setItem(ANON_ID_KEY, JSON.stringify({id, expiresAt: now + ANON_ID_TTL}));
+    return id;
+  } catch { return ''; }
+}
+const _anonId = loadAnonId();
+refreshQuota();
+function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_anonId) h['X-FP']=_anonId; return h; }
 
 async function refreshQuota(){
-  try { const q = await (await fetch('/api/quota', {headers: _fp?{'X-FP':_fp}:{}})).json();
+  try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
     if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily);
   } catch {}
@@ -879,7 +920,6 @@ async function parse(){
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
     render(data);
-    saveHistory(data);
     refreshQuota();
   } catch (e) {
     showError(e.message || '网络异常，请检查连接后重试');
@@ -900,7 +940,7 @@ async function parseBatch(text){
   refreshQuota();
   _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
   const fails = data.results.filter(r=>!r.ok);
-  _batch.forEach(d => { saveHistory(d); if (d.kind==='note') _albums[d.item_id]=d.images;
+  _batch.forEach(d => { if (d.kind==='note') _albums[d.item_id]=d.images;
                         _shareSrc[d.item_id] = d._link || ''; });
   renderBatch(data.count, fails);
 }
@@ -950,17 +990,22 @@ function renderBatch(count, fails){
 
 async function dlBatchOne(i, btn){
   const d = _batch[i]; if (!d) return;
-  await browserDownload(d.video.url, d.video.filename, btn);
+  await browserDownload(d.video.url, d.video.filename, btn,
+    d.video.download_url || d.video.proxy_url);
 }
 async function downloadAllVideos(){
   const vids = _batch.filter(d => d.kind !== 'note');
   const btn = $('#dlAllBtn'); const old = btn.textContent;
-  for (let i=0; i<vids.length; i++){
-    btn.textContent = `下载中 ${i+1}/${vids.length}…`;
-    await browserDownload(vids[i].video.url, vids[i].video.filename);
-    await new Promise(r=>setTimeout(r,500));
+  try {
+    for (let i=0; i<vids.length; i++){
+      btn.textContent = `下载中 ${i+1}/${vids.length}…`;
+      await browserDownload(vids[i].video.url, vids[i].video.filename, null,
+        vids[i].video.download_url || vids[i].video.proxy_url);
+      await new Promise(r=>setTimeout(r,500));
+    }
+  } finally {
+    btn.textContent = old;
   }
-  btn.textContent = old;
 }
 async function exportBatch(){
   const btn = $('#exportBtn'); const old = btn.textContent; btn.textContent='导出中…'; btn.disabled=true;
@@ -989,9 +1034,12 @@ function openPlayer(i){
   const body = m.querySelector('.pm-body');
   if (d.kind === 'note'){
     body.innerHTML = `<div class="pm-title">${esc(d.title)}</div><div class="pm-imgs">${
-      (d.images||[]).map(im=>`<img src="${esc(im.url)}" alt="">`).join('')}</div>`;
+      (d.images||[]).map(im=>`<img src="${esc(im.url)}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
-    body.innerHTML = `<video controls autoplay playsinline src="${esc(d.video.url)}" data-proxy="${esc(d.video.proxy_url||'')}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
+    body.innerHTML = `<video controls autoplay playsinline webkit-playsinline x5-playsinline
+      x5-video-player-type="h5" x5-video-player-fullscreen="false"
+      src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
+      ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       <div class="pm-title">${esc(d.title)}</div>
       <div class="pm-act"><button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button></div>`;
   }
@@ -1034,10 +1082,12 @@ function extrasBlock(d){
 }
 
 const _albums = {};   // item_id -> images（供批量场景的"下载全部"取用）
+const _videos = {};   // item_id -> video（避免把标题/URL 注入内联 onclick）
 
 function render(d){
   result.innerHTML = (d.kind === 'note' ? albumHTML(d) : videoHTML(d));
   if (d.kind === 'note') _albums[d.item_id] = d.images;
+  else _videos[d.item_id] = d.video;
   _shareSrc[d.item_id] = input.value;      // 解析缓存过期时用它重新解析
   result.classList.add('show');
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
@@ -1093,13 +1143,13 @@ function positionTip(){
 async function getAuthor(itemId){
   const key = 'dyauthor:' + itemId;
   try {
-    const raw = localStorage.getItem(key);
+    const raw = sessionStorage.getItem(key);
     if (raw){ const o = JSON.parse(raw); if (Date.now() - o.t < AUTHOR_TTL) return o.d; }
   } catch {}
   const r = await fetch('/api/author?item_id=' + encodeURIComponent(itemId));
   if (!r.ok) throw new Error('fetch failed');
   const d = await r.json();
-  try { localStorage.setItem(key, JSON.stringify({t: Date.now(), d})); } catch {}
+  try { sessionStorage.setItem(key, JSON.stringify({t: Date.now(), d})); } catch {}
   return d;
 }
 function showTip(a){
@@ -1138,9 +1188,26 @@ function wireAvatar(root, itemId){
   link.addEventListener('mouseleave', () => { clearTimeout(_hoverTimer); hideTip(); });
 }
 
-/* 浏览器直连下载：优先 fetch→blob 带文件名保存（走用户浏览器 IP），
-   跨域被拦则退回新窗口打开由浏览器接管，全程不经过本服务器 */
-async function browserDownload(url, filename, btn){
+function clickDownload(url, filename){
+  const a = document.createElement('a');
+  a.href = url; a.download = filename || 'download'; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function downloadFallbackURL(url, filename){
+  if (!url) return '';
+  try {
+    const u = new URL(url, location.href);
+    if (u.origin !== location.origin) return '';
+    u.searchParams.set('dl', '1');
+    u.searchParams.set('name', filename || 'video.mp4');
+    return u.pathname + u.search;
+  } catch { return ''; }
+}
+
+/* 下载优先浏览器直连，CORS/重定向不允许保存时自动切同源流式接口。
+   兜底只转发字节并设置 Content-Disposition，不会在服务器落地视频。 */
+async function browserDownload(url, filename, btn, fallbackUrl){
   const old = btn ? btn.textContent : null;
   if (btn){ btn.textContent = '下载中…'; btn.style.pointerEvents='none'; }
   try {
@@ -1148,15 +1215,31 @@ async function browserDownload(url, filename, btn){
     if(!resp.ok) throw new Error('bad');
     const blob = await resp.blob();
     const obju = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = obju; a.download = filename || 'download';
-    document.body.appendChild(a); a.click(); a.remove();
+    clickDownload(obju, filename);
     setTimeout(()=>URL.revokeObjectURL(obju), 5000);
   } catch(e){
-    window.open(url, '_blank', 'noopener');   // 兜底：浏览器直连打开，可右键/长按保存
+    const fallback = downloadFallbackURL(fallbackUrl, filename);
+    if (fallback){
+      clickDownload(fallback, filename);
+      showOk('抖音直连受限，已切换兼容下载线路');
+    } else {
+      window.open(url, '_blank', 'noopener'); // 老缓存无兜底地址时仍保留原行为
+    }
   } finally {
     if (btn){ btn.textContent = old; btn.style.pointerEvents=''; }
   }
+}
+
+function downloadVideoItem(btn){
+  const v = _videos[btn.dataset.itemId];
+  if (v) browserDownload(v.url, v.filename, btn, v.download_url || v.proxy_url);
+}
+
+function videoPlaySrc(v){
+  if (!v) return '';
+  return (IS_WECHAT_UA && v.proxy_url)
+    ? v.proxy_url
+    : (v.url || v.alt_url || v.proxy_url || '');
 }
 
 function useProxyFallback(el){
@@ -1169,15 +1252,16 @@ function videoHTML(d){
   <div class="card">
     <div class="card-body">
       <div class="player-wrap">
-        <video controls playsinline preload="metadata"
-               src="${esc(d.video.url)}" data-proxy="${esc(d.video.proxy_url||'')}"
+        <video controls playsinline webkit-playsinline x5-playsinline
+               x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata"
+               src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
                ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
-        <div class="fallback-hint">
+        ${IS_WECHAT_UA || !d.video.proxy_url ? '' : `<div class="fallback-hint">
           播放不出来？<a href="javascript:void(0)" onclick="useProxyFallback(this.parentNode)">改用服务器代理播放</a>
-        </div>
+        </div>`}
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印 · 浏览器直连</span>
+        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '微信兼容线路' : '浏览器直连'}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
@@ -1189,12 +1273,12 @@ function videoHTML(d){
         ${statsRow(d.stats)}
         ${extrasBlock(d)}
         <div class="actions">
-          <button class="primary-btn" onclick="browserDownload('${esc(d.video.url)}','${esc(d.video.filename)}',this)">⬇ 下载视频</button>
+          <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>
           <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
           <a class="ghost-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener">新窗口打开</a>
         </div>
-        <div class="tip">下载与播放均由你的浏览器直连抖音，不经过本站服务器</div>
+        <div class="tip">播放优先浏览器直连；直连下载受限时自动切换本站流式转发，服务器不落地保存文件</div>
       </div>
     </div>
   </div>`;
@@ -1283,7 +1367,8 @@ function shareResultHTML(d){
     </div>
     <div class="share-qr">
       <img src="/s/${esc(d.sid)}/qr.svg" alt="分享页二维码">
-      <div class="qt"><b>扫码在手机上打开</b>用手机扫一扫，可直接转发到微信；也可以先复制链接再粘贴到聊天窗口。</div>
+      <div class="qt"><b>想发出带封面的卡片？</b>用微信扫这个码打开页面，再点右上角 <b>···</b> →「发送给朋友」，发出去就是卡片。<br>
+      直接复制链接粘贴到聊天窗口也能用，但微信不会展开成卡片，只显示为一条网址。</div>
     </div>
     <div class="share-tips">
       · 页面只呈现作品信息与播放地址，<b>不存储任何视频文件</b><br>
@@ -1357,16 +1442,6 @@ function copyShareUrl(btn){
   el.select();
   const done = () => { const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1600); };
   navigator.clipboard?.writeText(el.value).then(done).catch(()=>{ try{ document.execCommand('copy'); done(); }catch{} });
-}
-
-/* ---------- 本地历史 ---------- */
-function saveHistory(d){
-  try {
-    const k = 'dyhistory';
-    const list = JSON.parse(localStorage.getItem(k) || '[]').filter(x => x.item_id !== d.item_id);
-    list.unshift({item_id:d.item_id, title:d.title, author:d.author, cover:d.cover||'', kind:d.kind, t:Date.now()});
-    localStorage.setItem(k, JSON.stringify(list.slice(0, 50)));
-  } catch {}
 }
 
 /* ================= 登录 / 注册（表单 → 弹出滑块 → 通过后继续）================= */

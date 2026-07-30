@@ -84,15 +84,19 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 </div>
 
 <h2><span class="num">2</span><span data-i18n="s2">鉴权</span></h2>
-<p class="sub" data-i18n-html="s2_p">所有接口通过请求头 <code>X-API-Key: 你的密钥</code> 鉴权（也支持 <code>?key=</code> 查询参数）。密钥在 API 控制台生成与管理。</p>
+<p class="sub" data-i18n-html="s2_p">所有接口只通过请求头 <code>X-API-Key: 你的密钥</code> 鉴权。不要把密钥放进 URL 查询参数，否则会进入浏览器历史与代理访问日志。密钥在 API 控制台生成与管理。</p>
 <pre>X-API-Key: dy_xxxxxxxxxxxxxxxxxxxx</pre>
 
 <h2 id="endpoints"><span class="num">3</span><span data-i18n="s3">接口</span></h2>
 
 <div class="endpoint">
   <div class="ep-head"><span class="method">POST</span><span class="path">/api/v1/jobs</span></div>
-  <div class="ep-desc" data-i18n="ep1">提交批量解析任务（异步）。传 links 数组或整段 text，立即返回 job_id。</div>
-  <pre data-i18n-html="ep1_code"># 请求体（二选一）
+  <div class="ep-desc" data-i18n="ep1">提交持久化批量任务。服务会整批预授权费用；建议发送 Idempotency-Key，网络重试会返回同一 job_id 而不会重复冻结余额。</div>
+  <pre data-i18n-html="ep1_code"># 请求头
+X-API-Key: dy_xxx
+Idempotency-Key: 你的唯一请求号
+
+# 请求体（二选一）
 { "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }
 { "text":  "整段分享文案，自动提取其中所有链接" }
 
@@ -120,11 +124,11 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 <div class="endpoint">
   <div class="ep-head"><span class="method get">GET</span><span class="path">/api/v1/balance</span></div>
   <div class="ep-desc" data-i18n="ep3">查询当前密钥余额与用量。</div>
-  <pre>{ "code": 0, "data": { "balance_cents": 980, "spent_cents": 20, "calls": 20, "price_cents": 1 } }</pre>
+  <pre>{ "code": 0, "data": { "balance_cents": 978, "reserved_cents": 2, "spent_cents": 20, "calls": 20, "price_cents": 1 } }</pre>
 </div>
 
 <h2><span class="num">4</span><span data-i18n="s4">计费</span></h2>
-<p class="sub" data-i18n="s4_p">每成功解析一条链接计费一次（默认 ¥0.01/条，可能调整）；解析失败不计费；余额不足会拒绝提交。余额可在控制台或 balance 接口查询，充值请联系作者。</p>
+<p class="sub" data-i18n="s4_p">提交时按任务全部链接和当时单价整批预授权；可用余额不足则整单拒绝。每条成功结果转为消费，失败结果自动精确退款。任务、租约与账本都持久化，重启后继续处理；建议用 Idempotency-Key 安全重试。</p>
 
 <h2><span class="num">5</span><span data-i18n="s5">错误码</span></h2>
 <div class="tbl-wrap"><table>
@@ -158,14 +162,14 @@ const I18N={en:{
   s1:"Quick start", s1a_h:"Sign up / in", s1a_p:"Click “Sign in” at the top-right of the home page and pass the slider check.",
   s1b_h:"Create an API key", s1b_p:"Open the API console and click “Create key”. New keys include trial balance.",
   s1c_h:"Make a call", s1c_p:"Call the endpoints below with the <code>X-API-Key</code> header.",
-  s2:"Authentication", s2_p:"Every endpoint authenticates via the header <code>X-API-Key: your_key</code> (or a <code>?key=</code> query param). Keys are managed in the API console.",
+  s2:"Authentication", s2_p:"Every endpoint authenticates only through the <code>X-API-Key: your_key</code> header. Never put a key in a URL query parameter, where browser history and proxy access logs can expose it. Keys are managed in the API console.",
   s3:"Endpoints",
-  ep1:"Submit a batch parse job (async). Pass a links array or raw text; returns a job_id immediately.",
-  ep1_code:'# Body (either)\n{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }\n{ "text":  "any share text — all links are extracted automatically" }\n\n# Response\n{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
+  ep1:"Submit a durable batch job. The full estimated cost is pre-authorized. Send an Idempotency-Key so network retries return the same job without reserving funds twice.",
+  ep1_code:'# Headers\nX-API-Key: dy_xxx\nIdempotency-Key: your-unique-request-id\n\n# Body (either)\n{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }\n{ "text":  "any share text — all links are extracted automatically" }\n\n# Response\n{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
   ep2:"Poll job status and results. When status is done, results holds per-link outcomes.",
   ep2_code:'# Response\n{ "code": 0, "data": {\n    "status": "done", "total": 2, "done": 2, "ok": 1, "cost_cents": 1,\n    "results": [\n      { "link": "...", "ok": true,  "data": { "title": "...", "author": "...",\n          "video": { "url": "no-watermark video URL", "width": 1080, "height": 1920 },\n          "stats": { "digg": 12000, "comment": 340 } } },\n      { "link": "...", "ok": false, "error": "link expired" }\n    ] } }',
   ep3:"Check the current key's balance and usage.",
-  s4:"Billing", s4_p:"Each successfully parsed link is billed once (default ¥0.01/link, subject to change); failed parses aren't billed; submissions are rejected when balance is insufficient. Check balance in the console or via the balance endpoint; contact the author to top up.",
+  s4:"Billing", s4_p:"The entire job is pre-authorized at submission using the snapshotted unit price. Insufficient available balance rejects the whole job. Successful items become charges and failed items are refunded exactly. Jobs, leases, and the ledger survive restarts; use Idempotency-Key for safe retries.",
   s5:"Error codes", th_http:"HTTP", th_mean:"Meaning",
   e400:"Bad body / no valid links", e401:"Missing or invalid API key", e402:"Insufficient balance", e404:"Job not found or not yours",
   volume:'Need higher concurrency / lower unit price / self-hosting? <a href="https://github.com/d100000/dy-download">Contact the author</a> for an enterprise plan.',

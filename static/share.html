@@ -180,12 +180,12 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
   <div class="m-in">
     <h3 id="maskTitle">在浏览器中打开</h3>
     <p id="maskDesc">微信内不支持直接保存视频文件，<br>请按下面两步操作 👇</p>
-    <div class="step">
+    <div class="step" id="maskStep">
       ① 点击右上角的 <b>···</b> 按钮<br>
       ② 选择 <b>「在浏览器中打开」</b><br>
       ③ 在浏览器里点下载即可保存原片
     </div>
-    <button class="copy" onclick="copyLink()">📋 复制本页链接</button><br>
+    <button class="copy" id="maskCopy" onclick="copyLink()">📋 复制本页链接</button><br>
     <button class="close" onclick="hideMask()">我知道了</button>
   </div>
 </div>
@@ -203,10 +203,10 @@ const num = (n) => (n === null || n === undefined) ? '—'
 const fmtDate = (ts) => { if(!ts) return ''; const d = new Date(ts*1000);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 
-/* 埋点：sendBeacon 不阻塞页面 */
-function track(kind){
+/* 埋点：sendBeacon 不阻塞页面。extra 用于播放诊断（source/stage/detail/ms） */
+function track(kind, extra){
   try {
-    const b = JSON.stringify({kind});
+    const b = JSON.stringify(Object.assign({kind}, extra || {}));
     if (navigator.sendBeacon) navigator.sendBeacon('/api/share/' + S.sid + '/event',
       new Blob([b], {type:'application/json'}));
     else fetch('/api/share/' + S.sid + '/event', {method:'POST',
@@ -218,9 +218,19 @@ function toast(msg){
   t.textContent = msg; t.classList.add('show');
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 1900);
 }
-function showMask(title, desc){
-  if (title) document.getElementById('maskTitle').textContent = title;
-  if (desc) document.getElementById('maskDesc').innerHTML = desc;
+const _MASK_DEFAULT = {
+  title: '在浏览器中打开',
+  desc: '微信内不支持直接保存视频文件，<br>请按下面两步操作 👇',
+  step: '① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「在浏览器中打开」</b><br>③ 在浏览器里点下载即可保存原片',
+};
+/* copy=false 时隐藏「复制本页链接」按钮。用在「发送给好友」引导里：
+   微信不会把粘贴的网址展开成卡片，复制粘贴出去必然是一条纯文字链，
+   把这个按钮摆在引导旁边等于劝用户走错路。 */
+function showMask(title, desc, step, copy){
+  document.getElementById('maskTitle').textContent = title || _MASK_DEFAULT.title;
+  document.getElementById('maskDesc').innerHTML = desc || _MASK_DEFAULT.desc;
+  document.getElementById('maskStep').innerHTML = step || _MASK_DEFAULT.step;
+  document.getElementById('maskCopy').style.display = (copy === false) ? 'none' : '';
   document.getElementById('mask').classList.add('show');
 }
 function hideMask(){ document.getElementById('mask').classList.remove('show'); }
@@ -230,6 +240,30 @@ function copyLink(){
     const i = document.createElement('input'); i.value = url; document.body.appendChild(i);
     i.select(); try{ document.execCommand('copy'); toast('链接已复制'); }catch{} i.remove();
   });
+}
+/* 分享给好友：微信内无法用按钮直接唤起分享面板，只能引导用户点右上角 ···。
+   必须走 ··· 转发才会出卡片——微信不展开粘贴的网址，复制链接发出去只会是纯文字链，
+   所以这里刻意隐藏「复制本页链接」按钮（copy=false），别把用户引到错的路上。 */
+function shareToFriend(){
+  track('share');
+  if (IS_WECHAT_UA){
+    showMask('发送给好友',
+      '点击右上角 <b>···</b> → <b>发送给朋友</b>，<br>好友收到的是带封面的卡片，点开即可观看 👇',
+      '① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「发送给朋友」</b> 或 <b>「分享到朋友圈」</b><br>③ 好友收到带封面标题的卡片，点开直接观看<br>'
+      + '<span style="color:#9aa4b2">※ 直接复制链接粘贴给好友只会显示成一条网址，不会有卡片</span>',
+      false);
+    return;
+  }
+  const url = S.url || location.href;
+  if (navigator.share){
+    navigator.share({
+      title: S.title || '抖音作品',
+      text: '@' + (S.author || '抖音创作者') + ' 的抖音作品 · 点开即可观看',
+      url,
+    }).catch(()=>{});
+  } else {
+    copyLink();   // 不支持系统分享的浏览器 → 退回复制链接
+  }
 }
 
 /* ---------------- 状态页 ---------------- */
@@ -307,7 +341,7 @@ function render(){
     <div class="card">
       ${media}
       <div class="body">
-        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · 浏览器直连</span>
+        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · ${!isNote && IS_WECHAT_UA ? '微信兼容线路' : '浏览器直连'}</span>
         <div class="title">${esc(S.title)}</div>
         ${authorBlock(d)}
         ${statsBlock(d.stats)}
@@ -325,7 +359,7 @@ function render(){
 
     <button class="poster-cta" onclick="makePoster()">📸 生成分享海报<span>图片比链接更适合发朋友圈与群聊</span></button>
 
-    <div class="trust"><span>🔓 开源</span><span>🔒 零隐私采集</span><span>🚫 永不接广告</span><span>👤 无需登录</span></div>
+    <div class="trust"><span>🔓 开源可审查</span><span>🔒 不保存媒体</span><span>🚫 永不接广告</span><span>👤 账号可选</span></div>
 
     <div class="qr">
       <img src="/s/${esc(S.sid)}/qr.svg" alt="扫码在手机上打开">
@@ -333,7 +367,7 @@ function render(){
     </div>
 
     <footer>
-      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不存储任何视频文件。<br>
+      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；媒体直连抖音时，抖音会接收请求方网络与浏览器信息。<br>
       请勿未经授权二次发布或商用。<a href="javascript:void(0)" onclick="report()">侵权投诉</a> ·
       <a href="/">关于本站</a>${S.expires_at ? ' · 本页 ' + fmtDate(S.expires_at) + ' 过期' : ''}
     </footer>
@@ -343,12 +377,14 @@ function render(){
     ${isNote
       ? `<button class="btn p" onclick="saveAll()">⬇ 保存全部图片</button>`
       : `<button class="btn p" onclick="download()">⬇ 下载无水印原片</button>`}
-    <button class="btn g" onclick="copyLink()">复制链接</button>
+    <button class="btn g" onclick="shareToFriend()">↗ 分享给好友</button>
   </div></div>`;
 }
 
-/* ---------------- 播放：直连 → 服务器代理 → 引导 ---------------- */
-let _tried = 0;
+/* ---------------- 播放：按运行环境决定线路顺序，全部失败后再引导 ----------------
+   普通浏览器优先两个抖音域名以节省服务器带宽；微信 WebView 容易拦截抖音域名，
+   因此优先同源代理，避免等待 14 秒后才切换并丢失首次点击带来的播放授权。
+   每条线路的 ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
 function startPlay(){
   const d = S.data || {};
   if (!d.video || !d.video.url) return;
@@ -358,40 +394,81 @@ function startPlay(){
   btn.style.display = 'none'; ld.style.display = 'block';
   track('play');
 
+  // 普通浏览器：dy1 → dy2 → proxy；微信：proxy → dy1 → dy2
+  const directRoutes = [
+    {source:'dy1',   src:d.video.url,       wait:7000,  tip:IS_WECHAT_UA ? '切换线路中…' : '加载中…'},
+    {source:'dy2',   src:d.video.alt_url,   wait:7000,  tip:'切换线路中…'},
+  ];
+  const proxyRoute =
+    {source:'proxy', src:d.video.proxy_url, wait:12000, tip:IS_WECHAT_UA ? '加载中…' : '切换备用线路中…'};
+  const routes = (IS_WECHAT_UA
+    ? [proxyRoute, ...directRoutes]
+    : [...directRoutes, proxyRoute]).filter(r => r.src);
+
   const v = document.createElement('video');
   v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
   v.setAttribute('x5-playsinline',''); v.setAttribute('x5-video-player-type','h5');
   v.setAttribute('x5-video-player-fullscreen','false');
   v.controls = true; v.preload = 'auto'; v.autoplay = true;
   if (S.cover) v.poster = S.cover;
-  v.src = d.video.url;
   v.id = 'player';
   box.appendChild(v);
   const poster = document.getElementById('poster'); if (poster) poster.style.display = 'none';
 
-  const done = () => { ld.style.display = 'none'; clearTimeout(watchdog); };
-  v.addEventListener('loadeddata', done);
-  v.addEventListener('playing', done);
-  v.addEventListener('error', fallback);
-  // 直连在部分网络/内核下不会报 error，只是一直不 ready —— 用看门狗兜底
-  const watchdog = setTimeout(() => { if (v.readyState < 2) fallback(); }, 8000);
+  let idx = -1, t0 = 0, timer = 0, settled = false, hs = null;
 
-  function fallback(){
-    clearTimeout(watchdog);
-    if (_tried === 0 && d.video.proxy_url){
-      _tried = 1; track('fallback');
-      ld.textContent = '切换线路中…';
-      v.src = d.video.proxy_url; v.load(); v.play?.().catch(()=>{});
-      setTimeout(() => { if (v.readyState < 2) giveUp(); }, 12000);
-    } else giveUp();
+  // 每条线路挂自己的一套监听并在切走时摘掉：否则上一条线路迟到的 error
+  // 会把下一条线路一起判死，出现「只试了一条就放弃」。
+  function unbind(){
+    if (!hs) return;
+    v.removeEventListener('loadeddata', hs.ok);
+    v.removeEventListener('playing', hs.ok);
+    v.removeEventListener('error', hs.err);
+    hs = null;
+  }
+  function stop(){ clearTimeout(timer); unbind(); }
+
+  const onOK = () => {
+    settled = true; stop(); ld.style.display = 'none';
+    track('play_ok', {source:routes[idx].source, stage:'ok', ms:Date.now()-t0});
+  };
+  const onErr = (stage) => {
+    const e = v.error;
+    const detail = (e ? 'code=' + e.code : 'no-error') + ' rs=' + v.readyState + ' ns=' + v.networkState;
+    track('play_fail', {source:routes[idx].source, stage, detail, ms:Date.now()-t0});
+    next();
+  };
+
+  function next(){
+    stop();
+    idx++;
+    if (idx >= routes.length){ giveUp(); return; }
+    const r = routes[idx];
+    if (idx > 0) track('fallback', {source:r.source, stage:'start'});
+    ld.textContent = r.tip;
+    t0 = Date.now();
+    hs = {ok: () => { if (!settled) onOK(); },
+          err: () => { if (!settled) onErr('error'); }};
+    v.addEventListener('loadeddata', hs.ok);
+    v.addEventListener('playing', hs.ok);
+    v.addEventListener('error', hs.err);
+    v.src = r.src; v.load(); v.play?.().catch(()=>{ /* 需用户手势时由 controls 兜底 */ });
+    // 直连在部分网络/内核下不会报 error，只是一直不 ready —— 用看门狗兜底
+    timer = setTimeout(() => {
+      if (settled) return;
+      if (v.readyState < 2) onErr('timeout'); else onOK();
+    }, r.wait);
   }
   function giveUp(){
-    ld.style.display = 'none';
+    settled = true; stop(); ld.style.display = 'none';
+    track('play_fail', {source:'', stage:'giveup',
+      detail:'all ' + routes.length + ' routes failed'});
     if (IS_WECHAT_UA) showMask('在浏览器中打开观看',
       '当前网络环境下微信内无法播放这条视频，<br>用浏览器打开即可正常观看 👇');
     else toast('播放失败，请稍后重试或直接下载');
   }
-  v.play?.().catch(()=>{ /* 需用户手势时由 controls 兜底 */ });
+
+  next();
 }
 
 /* ---------------- 下载 ---------------- */
@@ -400,7 +477,8 @@ function download(){
   if (!d.video || !d.video.url) return;
   track('download');
   if (IS_WECHAT_UA){ showMask(); return; }
-  browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'));
+  browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
+    d.video.download_url || d.video.proxy_url);
 }
 function saveImage(url, name){
   track('download');
@@ -419,18 +497,39 @@ async function saveAll(){
   track('download');
   for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
 }
-async function browserDownload(url, filename){
+function clickDownload(url, filename){
+  const a = document.createElement('a');
+  a.href = url; a.download = filename || 'download'; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function downloadFallbackURL(url, filename){
+  if (!url) return '';
+  try {
+    const u = new URL(url, location.href);
+    if (u.origin !== location.origin) return '';
+    u.searchParams.set('dl', '1');
+    u.searchParams.set('name', filename || 'video.mp4');
+    return u.pathname + u.search;
+  } catch { return ''; }
+}
+async function browserDownload(url, filename, fallbackUrl){
   toast('开始下载…');
   try {
     const resp = await fetch(url, {mode:'cors'});
     if (!resp.ok) throw new Error('bad');
     const blob = await resp.blob();
     const u = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = u; a.download = filename || 'download';
-    document.body.appendChild(a); a.click(); a.remove();
+    clickDownload(u, filename);
     setTimeout(()=>URL.revokeObjectURL(u), 5000);
-  } catch { window.open(url, '_blank', 'noopener'); }
+  } catch {
+    const fallback = downloadFallbackURL(fallbackUrl, filename);
+    if (fallback){
+      clickDownload(fallback, filename);
+      toast('直连受限，已切换兼容下载线路');
+    } else {
+      window.open(url, '_blank', 'noopener');
+    }
+  }
 }
 function imgFail(){
   // 图集 CDN 直链过期：服务端会在下次访问时按 item_id 刷新，这里提示用户重载
@@ -477,7 +576,7 @@ async function makePoster(){
     // 封面：等比裁切填满 750×560
     const CH = 560;
     let cover = null;
-    try { if (S.cover) cover = await loadImg(S.cover, true); } catch {}
+    try { const cu = S.card_cover || S.cover; if (cu) cover = await loadImg(cu, true); } catch {}
     if (cover){
       const r = Math.max(W / cover.width, CH / cover.height);
       const w = cover.width * r, h = cover.height * r;
@@ -531,23 +630,24 @@ async function makePoster(){
     x.fillStyle = '#EDEFF2'; x.font = '600 30px "PingFang SC",system-ui,sans-serif';
     x.fillText('扫码直接观看', P + QS + 34, qy + 62);
     x.fillStyle = '#8A93A0'; x.font = '400 24px "PingFang SC",system-ui,sans-serif';
-    x.fillText('无水印原片 · 免登录', P + QS + 34, qy + 104);
+    x.fillText('无水印原片 · 无需登录抖音', P + QS + 34, qy + 104);
     x.fillText('不用装抖音 App', P + QS + 34, qy + 140);
 
     // 品牌页脚
     x.fillStyle = '#4E5561'; x.font = '400 21px "PingFang SC",system-ui,sans-serif';
-    x.fillText('抖音无水印下载器 · 开源 · 零隐私采集 · 永不接广告', P, H - 42);
+    x.fillText('抖音无水印下载器 · 开源可审查 · 不保存媒体文件 · 永不接广告', P, H - 42);
 
-    const blob = await new Promise(r => c.toBlob(r, 'image/png', .92));
-    if (_posterURL) URL.revokeObjectURL(_posterURL);
-    _posterURL = URL.createObjectURL(blob);
+    // 关键：必须用 data: URI 而非 blob: 对象 URL —— 微信 WebView 无法对 blob: 图片
+    // 长按「保存图片/发送给朋友」，只认 data: 与 http(s)。用 blob 会导致海报存不下也发不出。
+    const dataURL = c.toDataURL('image/png');
+    _posterURL = dataURL;
     const img = document.getElementById('posterImg');
-    img.src = _posterURL;
+    img.src = dataURL;
     const dl = document.getElementById('posterDl');
-    dl.href = _posterURL;
-    dl.style.display = IS_WECHAT_UA ? 'none' : '';       // 微信内无法下载，只能长按保存
+    dl.href = dataURL;
+    dl.style.display = IS_WECHAT_UA ? 'none' : '';       // 微信内无法触发下载，靠长按保存
     document.getElementById('posterTip').textContent = IS_WECHAT_UA
-      ? '长按图片保存到相册 · 或直接转发给朋友'
+      ? '长按上方图片 → 保存图片 / 发送给朋友'
       : '右键/长按保存图片，或点下载海报';
     document.getElementById('pmask').classList.add('show');
     track('cta');
@@ -581,7 +681,7 @@ async function setupWxShare(){
       title: (S.title || '抖音作品').slice(0, 40),        // 标题=抖音文案，与卡片抓取一致
       desc: '@' + (S.author || '抖音创作者') + ' 的抖音作品 · 点开即可观看，无需安装 App',
       link: S.url || location.href,
-      imgUrl: S.cover || (ORIGIN + '/og.svg'),
+      imgUrl: S.card_cover || S.cover || (ORIGIN + '/og.png'),   // 无签名 JPEG 优先；微信不渲染 SVG
     };
     wx.updateAppMessageShareData(opt);
     wx.updateTimelineShareData({title: opt.title, link: opt.link, imgUrl: opt.imgUrl});
@@ -592,7 +692,7 @@ async function setupWxShare(){
 function report(){
   const reason = prompt('请简要说明投诉理由（如：我是该作品的著作权人，要求下架）');
   if (!reason) return;
-  const contact = prompt('留下联系方式（选填，便于我们回复处理结果）') || '';
+  const contact = prompt('留下联系方式（选填，仅用于回复投诉；保留期最多 30 天，到期后定时删除）') || '';
   fetch('/api/report', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({sid: S.sid, reason, contact})})
     .then(r=>r.json()).then(d=>toast(d.message || '已收到投诉')).catch(()=>toast('提交失败，请稍后再试'));

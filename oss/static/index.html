@@ -96,7 +96,7 @@ footer a{color:var(--accent);text-decoration:none}
 <section class="trust">
   <h2 data-i18n="trust_h">为什么可以放心用</h2>
   <div class="tg">
-    <div class="tc"><h3 data-i18n="t1h">🔓 完全开源 · 零隐私</h3><p data-i18n="t1p">前端代码开源可审查，不采集、不上传你的任何隐私，无需登录，视频由你的浏览器直连获取，服务器不存储内容。</p></div>
+    <div class="tc"><h3 data-i18n="t1h">🔓 完全开源 · 不建用户画像</h3><p data-i18n="t1p">基础版不建用户或分析数据库，也不保存媒体文件。解析与兼容转发时，服务器或反向代理会按网络通信需要接触 IP、浏览器信息和请求地址；IP 只在进程内存中用于媒体限频。</p></div>
     <div class="tc"><h3 data-i18n="t2h">🎬 无水印原片</h3><p data-i18n="t2p">下载的是无水印原片，也不加入本站二次水印。支持视频与图集（多图逐张下载）。</p></div>
     <div class="tc"><h3 data-i18n="t3h">🚫 无广告</h3><p data-i18n="t3p">开源基础版，干净无广告、无弹窗、无捆绑。</p></div>
   </div>
@@ -110,13 +110,14 @@ footer a{color:var(--accent);text-decoration:none}
 <script>
 const $=s=>document.querySelector(s),input=$('#input'),result=$('#result'),alertB=$('#alert');
 const LANG=window.__LANG||'zh';
+const IS_WECHAT_UA=/micromessenger/i.test(navigator.userAgent);
 const I18N={en:{
   h1:'Paste a link,<br>get the <span class="hl">watermark-free</span> original',
   sub:"Open source · No login · Browser-direct · Videos & galleries",
   ph:"Paste a Douyin share text or link, e.g. 3.89 ... https://v.douyin.com/xxxx/",
   paste:"📋 Paste", parse:"Parse",
   trust_h:"Why you can trust it",
-  t1h:"🔓 Open source · Zero privacy", t1p:"The front-end is open-source and auditable — no collection, nothing uploaded, no login. Your browser fetches the video and the server stores nothing.",
+  t1h:"🔓 Open source · No profiling", t1p:"This edition creates no user or analytics database and stores no media files. During parsing or streaming fallback, the server or reverse proxy necessarily handles network metadata such as IP address, browser information, and request URL; IPs are used only in process memory for media rate limits.",
   t2h:"🎬 No watermark", t2p:"You get the original with no watermark, and we never add our own. Videos and photo galleries (per-image download) both supported.",
   t3h:"🚫 No ads", t3p:"Open-source edition — clean, no ads, no popups, no bundled junk.",
   foot1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
@@ -147,26 +148,31 @@ async function parse(){
     const d=await r.json();if(!r.ok)throw new Error(d.error||'解析失败');render(d);
   }catch(e){err(e.message)}finally{btn.disabled=false;$('#spin').style.display='none';$('#btnText').textContent='解析'}
 }
-async function dl(url,name,btn){const o=btn?btn.textContent:0;if(btn){btn.textContent='下载中…'}
+function clickDownload(url,name){const a=document.createElement('a');a.href=url;a.download=name||'download';a.rel='noopener';document.body.appendChild(a);a.click();a.remove()}
+function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin)return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
+async function dl(url,name,btn,fallback){const o=btn?btn.textContent:0;if(btn){btn.textContent='下载中…'}
   try{const r=await fetch(url,{mode:'cors'});if(!r.ok)throw 0;const b=await r.blob(),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),5000)}
-  catch{window.open(url,'_blank','noopener')}finally{if(btn)btn.textContent=o}}
+  catch{const f=fallbackURL(fallback,name);if(f)clickDownload(f,name);else window.open(url,'_blank','noopener')}finally{if(btn)btn.textContent=o}}
 function stats(s){if(!s)return'';return `<div class="stats">${[['❤ 点赞',s.digg],['💬 评论',s.comment],['★ 收藏',s.collect],['↗ 分享',s.share]].map(([l,n])=>`<div class="chip"><b>${fmtN(n)}</b><span>${l}</span></div>`).join('')}</div>`}
 function author(d){return `<div class="author">${d.avatar?`<img src="${esc(d.avatar)}">`:''}<div class="n">${esc(d.author)||'未知作者'}</div></div>`}
-let _imgs=[];
+let _imgs=[],_video=null;
+function downloadVideo(btn){if(_video)dl(_video.url,_video.filename,btn,_video.download_url||_video.proxy_url)}
+function videoPlaySrc(v){return IS_WECHAT_UA&&v.proxy_url?v.proxy_url:(v.url||v.proxy_url||'')}
 function render(d){
-  if(d.kind==='note'){_imgs=d.images||[];
+  if(d.kind==='note'){_video=null;_imgs=d.images||[];
     result.innerHTML=`<div class="card"><div style="padding:22px 22px 0"><span class="badge">图集 · ${_imgs.length} 张 · 浏览器直连</span><div class="v-title" style="margin-top:10px">${esc(d.title)}</div>${author(d)}${stats(d.stats)}</div>
     <div class="album-grid">${_imgs.map((im,i)=>`<figure class="album-item"><img src="${esc(im.url)}" loading="lazy"><button onclick="dl('${esc(im.url)}','${esc(im.filename)}',this)">⬇</button></figure>`).join('')}</div></div>`;
-  }else{
+  }else{_video=d.video;
     result.innerHTML=`<div class="card"><div class="card-body">
-    <div class="player"><video controls playsinline preload="metadata" src="${esc(d.video.url)}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video></div>
-    <div class="info"><span class="badge">视频 · 无水印 · 浏览器直连</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
-    <div class="actions"><button class="primary" onclick="dl('${esc(d.video.url)}','${esc(d.video.filename)}',this)">⬇ 下载视频</button><a class="ghost" href="${esc(d.video.url)}" target="_blank" rel="noopener" style="text-decoration:none">新窗口打开</a></div>
-    <div class="tip">下载与播放均由你的浏览器直连抖音，不经过本站服务器</div></div></div></div>`;
+    <div class="player"><video controls playsinline webkit-playsinline x5-playsinline x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata" src="${esc(videoPlaySrc(d.video))}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video></div>
+    <div class="info"><span class="badge">视频 · 无水印 · ${IS_WECHAT_UA?'微信兼容线路':'浏览器直连'}</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
+    <div class="actions"><button class="primary" onclick="downloadVideo(this)">⬇ 下载视频</button><a class="ghost" href="${esc(d.video.url)}" target="_blank" rel="noopener" style="text-decoration:none">新窗口打开</a></div>
+    <div class="tip">播放优先浏览器直连；直连下载受限时自动切换本站流式转发，服务器不落地保存文件</div></div></div></div>`;
   }
   result.classList.add('show');result.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
 window.dl=dl;
+window.downloadVideo=downloadVideo;
 </script>
 </body>
 </html>

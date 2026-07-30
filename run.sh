@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PORT="${PORT:-3344}"
+HOST="${HOST:-127.0.0.1}"
 PY="${PYTHON:-python3}"
 VENV=".venv"
 
@@ -19,6 +20,10 @@ if [ ! -d "$VENV" ]; then
   "$VENV/bin/pip" install --quiet -r requirements.txt
 fi
 
-echo "▶ 启动服务：http://127.0.0.1:$PORT   （管理后台 /admin_d）"
-echo "  管理密码：${ADMIN_PASSWORD:-douyin-admin（默认，生产请用 ADMIN_PASSWORD 覆盖）}"
-exec "$VENV/bin/uvicorn" server:app --host 0.0.0.0 --port "$PORT"
+echo "▶ 启动服务：http://$HOST:$PORT   （管理后台 /admin_d）"
+if [ -n "${ADMIN_PASSWORD:-}" ]; then
+  echo "  管理密码：已通过 ADMIN_PASSWORD 配置（不会回显）"
+else
+  echo "  管理密码：仍为默认值，生产环境请设置 ADMIN_PASSWORD"
+fi
+exec "$VENV/bin/uvicorn" server:app --host "$HOST" --port "$PORT" --no-access-log

@@ -103,7 +103,7 @@ code{font-family:ui-monospace,Menlo,monospace}
         </div>
       </div>
       <div class="tbl-wrap"><table>
-        <thead><tr><th>备注</th><th>密钥</th><th>余额</th><th>已消费</th><th>调用</th><th></th></tr></thead>
+        <thead><tr><th>备注</th><th>密钥</th><th>可用余额</th><th>任务预授权</th><th>已消费</th><th>调用</th><th></th></tr></thead>
         <tbody id="keyBody"></tbody>
       </table></div>
       <div class="empty" id="keyEmpty" style="display:none">还没有密钥，点「生成密钥」创建第一个。</div>
@@ -117,6 +117,11 @@ code{font-family:ui-monospace,Menlo,monospace}
           <button class="btn btn-primary btn-sm" id="submitJobBtn">提交任务</button>
         </div>
         <textarea id="testLinks" placeholder="每行一个 v.douyin.com 链接（最多 100 条）"></textarea>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
+          <input id="resumeJobId" placeholder="已有任务 ID（job_…）"
+                 style="flex:1;min-width:220px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:8px 12px;outline:none">
+          <button class="btn btn-ghost btn-sm" id="resumeJobBtn">恢复查询</button>
+        </div>
         <div id="jobResult" style="margin-top:12px"></div>
       </div>
     </div>
@@ -125,7 +130,7 @@ code{font-family:ui-monospace,Menlo,monospace}
       <div class="panel-head"><div><h2>接口文档</h2></div></div>
       <div class="panel-body">
         <h3>1. 提交任务（异步）</h3>
-        <p><code>POST /api/v1/jobs</code> · 请求头 <code>X-API-Key: 你的密钥</code></p>
+        <p><code>POST /api/v1/jobs</code> · 请求头 <code>X-API-Key: 你的密钥</code>；建议同时发送唯一 <code>Idempotency-Key</code></p>
         <pre id="docReq">请求体：{ "links": ["https://v.douyin.com/xxxx/", ...] }
 或    ：{ "text": "整段分享文案，自动提取链接" }</pre>
         <pre id="docResp">返回：{
@@ -142,7 +147,7 @@ code{font-family:ui-monospace,Menlo,monospace}
         <h3>3. 查询余额</h3>
         <p><code>GET /api/v1/balance</code> · 请求头 <code>X-API-Key</code></p>
         <h3>计费规则</h3>
-        <p>每成功解析 <b>一条链接</b>计费 <b id="priceLabel2">—</b>；解析失败不计费；余额不足会拒绝提交。充值请联系管理员。</p>
+        <p>提交时按全部链接整批预授权；每条成功结果计费 <b id="priceLabel2">—</b>，失败结果自动退款；可用余额不足会整单拒绝。任务与账本可跨重启恢复。</p>
       </div>
     </div>
   </div>
@@ -156,63 +161,117 @@ root.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-sc
 $('#themeBtn').onclick=()=>{root.dataset.theme=root.dataset.theme==='light'?'dark':'light';localStorage.setItem('theme',root.dataset.theme);};
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let toastT; function toast(m,e){const t=$('#toast');t.textContent=m;t.className='show'+(e?' err':'');clearTimeout(toastT);toastT=setTimeout(()=>t.className='',2400);}
-async function api(path,opts={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('HTTP '+r.status));return d;}
+async function api(path,opts={}){
+  const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok){const e=new Error(d.error||('HTTP '+r.status));e.status=r.status;throw e;}
+  return d;
+}
 const yuan=c=>'¥'+(c/100).toFixed(2);
 
 (async()=>{
   let me; try{ me=(await (await fetch('/api/auth/me')).json()).user; }catch{}
   if(!me){ $('#gate').style.display='block'; return; }
   $('#app').style.display='block'; $('#navEmail').textContent=me.email;
-  load();
+  await load();
 })();
 
 async function load(){
-  const d=await api('/api/keys');
+  let d;
+  try{ d=await api('/api/keys'); }
+  catch(e){
+    $('#statRow').innerHTML=`<div class="empty" style="display:block">加载失败：${esc(e.message)}。<button class="btn btn-ghost btn-sm" onclick="load()">重试</button></div>`;
+    toast('控制台数据加载失败',true);
+    return false;
+  }
   const price=d.price_cents;
   $('#priceLabel').textContent=yuan(price)+'/条'; $('#priceLabel2').textContent=yuan(price)+'/条';
-  const totBal=d.keys.reduce((a,k)=>a+k.balance_cents,0), totSpent=d.keys.reduce((a,k)=>a+k.spent_cents,0), totCalls=d.keys.reduce((a,k)=>a+k.calls,0);
+  const totBal=d.keys.reduce((a,k)=>a+k.balance_cents,0), totReserved=d.keys.reduce((a,k)=>a+(k.reserved_cents||0),0), totSpent=d.keys.reduce((a,k)=>a+k.spent_cents,0), totCalls=d.keys.reduce((a,k)=>a+k.calls,0);
   $('#statRow').innerHTML=`
     <div class="stat"><div class="k">密钥数</div><div class="v tnum">${d.keys.length}</div></div>
     <div class="stat"><div class="k">可用余额</div><div class="v tnum">${yuan(totBal)}</div></div>
+    <div class="stat"><div class="k">任务预授权</div><div class="v tnum">${yuan(totReserved)}</div></div>
     <div class="stat"><div class="k">累计消费</div><div class="v tnum">${yuan(totSpent)}</div></div>
     <div class="stat"><div class="k">累计调用</div><div class="v tnum">${totCalls}</div></div>`;
   $('#keyEmpty').style.display=d.keys.length?'none':'';
   $('#keyBody').innerHTML=d.keys.map(k=>`<tr>
     <td>${esc(k.name)}</td>
-    <td class="mono" style="max-width:230px"><span style="cursor:pointer" title="点击复制" onclick="navigator.clipboard.writeText('${esc(k.key)}').then(()=>toast('已复制'))">${esc(k.key.slice(0,16))}…📋</span></td>
-    <td class="tnum">${yuan(k.balance_cents)}</td><td class="tnum">${yuan(k.spent_cents)}</td><td class="tnum">${k.calls}</td>
+    <td class="mono" style="max-width:230px"><span style="cursor:pointer" title="点击复制" onclick="copyKey('${esc(k.key)}')">${esc(k.key.slice(0,16))}…📋</span></td>
+    <td class="tnum">${yuan(k.balance_cents)}</td><td class="tnum">${yuan(k.reserved_cents||0)}</td><td class="tnum">${yuan(k.spent_cents)}</td><td class="tnum">${k.calls}</td>
     <td><button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="delKey('${esc(k.key)}')">删除</button></td>
   </tr>`).join('');
   $('#testKey').innerHTML=d.keys.map(k=>`<option value="${esc(k.key)}">${esc(k.name)} · ${yuan(k.balance_cents)}</option>`).join('')||'<option value="">先生成一个密钥</option>';
+  return true;
 }
 
 $('#createKeyBtn').onclick=async()=>{
   try{ const k=await api('/api/keys',{method:'POST',body:JSON.stringify({name:$('#keyName').value.trim()})});
-    $('#keyName').value=''; try{await navigator.clipboard.writeText(k.key); toast('密钥已生成并复制');}catch{toast('密钥已生成');} load();
+    $('#keyName').value='';
+    try{
+      if(!navigator.clipboard?.writeText) throw new Error();
+      await navigator.clipboard.writeText(k.key); toast('密钥已生成并复制');
+    }catch{ window.prompt('密钥已生成，请手动复制并妥善保存：', k.key); }
+    await load();
   }catch(e){toast(e.message,true);}
 };
+window.copyKey=async key=>{
+  try{
+    if(!navigator.clipboard?.writeText) throw new Error();
+    await navigator.clipboard.writeText(key); toast('已复制');
+  }catch{ window.prompt('请手动复制 API Key：', key); }
+};
 window.delKey=async key=>{ if(!confirm('删除后立即失效，确定？'))return;
-  try{ await api('/api/keys/'+encodeURIComponent(key),{method:'DELETE'}); toast('已删除'); load(); }catch(e){toast(e.message,true);} };
+  try{ await api('/api/keys/revoke',{method:'POST',body:JSON.stringify({key})}); toast('已删除'); await load(); }catch(e){toast(e.message,true);} };
 
+let _pollRun=0;
 $('#submitJobBtn').onclick=async()=>{
   const key=$('#testKey').value; const text=$('#testLinks').value.trim();
   if(!key){toast('请先生成密钥',true);return;}
   if(!text){toast('请粘贴链接',true);return;}
   const box=$('#jobResult'); box.innerHTML='<span class="spin"></span> 提交中…';
   try{
-    const sub=await api('/api/v1/jobs',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':key},body:JSON.stringify({text})});
+    const idem=(crypto.randomUUID?.()||('web-'+Date.now()+'-'+Math.random()));
+    const sub=await api('/api/v1/jobs',{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':key,'Idempotency-Key':idem},body:JSON.stringify({text})});
     const jid=sub.data.job_id;
+    $('#resumeJobId').value=jid;
     box.innerHTML=`<div class="badge b-idle">任务 ${jid} · 预估 ${yuan(sub.data.estimated_cost_cents)}</div><div id="jobPoll" style="margin-top:10px"></div>`;
     poll(key,jid);
   }catch(e){ box.innerHTML=`<span style="color:var(--danger)">${esc(e.message)}</span>`; }
 };
+$('#resumeJobBtn').onclick=()=>{
+  const key=$('#testKey').value, jid=$('#resumeJobId').value.trim();
+  if(!key){toast('请选择任务使用的密钥',true);return;}
+  if(!/^job_[A-Za-z0-9_-]+$/.test(jid)){toast('请输入正确的任务 ID',true);return;}
+  $('#jobResult').innerHTML=`<div class="badge b-idle">任务 ${esc(jid)} · 正在恢复查询</div><div id="jobPoll" style="margin-top:10px"></div>`;
+  poll(key,jid);
+};
 async function poll(key,jid){
-  for(let i=0;i<40;i++){
-    await new Promise(r=>setTimeout(r,1500));
-    let d; try{ d=(await api('/api/v1/jobs/'+jid,{headers:{'X-API-Key':key}})).data; }catch(e){ break; }
-    $('#jobPoll').innerHTML=`<div style="font-size:13px;color:var(--muted);margin-bottom:6px">状态 ${d.status} · ${d.done}/${d.total} · 成功 ${d.ok} · 计费 ${yuan(d.cost_cents)}</div>`+
+  const run=++_pollRun;
+  let failures=0;
+  while(run===_pollRun){
+    let d;
+    try{
+      d=(await api('/api/v1/jobs/'+encodeURIComponent(jid),{headers:{'X-API-Key':key}})).data;
+      failures=0;
+    }catch(e){
+      const el=$('#jobPoll');
+      if(!el)return;
+      if([401,403,404].includes(e.status)){
+        el.innerHTML=`<span style="color:var(--danger)">查询失败：${esc(e.message)}。请确认任务 ID 与所选密钥匹配。</span>`;
+        return;
+      }
+      failures++;
+      const delay=Math.min(10000,1500*Math.max(1,failures));
+      el.innerHTML=`<span style="color:var(--danger)">网络查询失败：${esc(e.message)}；${Math.ceil(delay/1000)} 秒后自动重试（第 ${failures} 次）。</span>`;
+      await new Promise(r=>setTimeout(r,delay));
+      continue;
+    }
+    const el=$('#jobPoll');
+    if(!el)return;
+    el.innerHTML=`<div style="font-size:13px;color:var(--muted);margin-bottom:6px">状态 ${d.status} · ${d.done}/${d.total} · 成功 ${d.ok} · 计费 ${yuan(d.cost_cents)}</div>`+
       d.results.map(r=>`<div class="result-line">${r.ok?'✅':'❌'} <span class="mono" style="color:var(--muted)">${esc(r.link)}</span> ${r.ok?'→ '+esc(r.data.title||'').slice(0,30):'· '+esc(r.error)}</div>`).join('');
-    if(d.status==='done'){ load(); break; }
+    if(d.status==='done'){ await load(); return; }
+    await new Promise(r=>setTimeout(r,1500));
   }
 }
 </script>
