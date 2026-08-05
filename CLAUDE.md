@@ -12,6 +12,10 @@ PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
 .venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
+.venv/bin/python -m unittest tests.test_security_reliability   # 后端测试套件（TestClient，约 2 秒跑完）
+.venv/bin/python -m unittest tests.test_security_reliability.DurableBillingTests   # 单跑一个类（加 .方法名 可单跑一个用例）
+node --test tests/*.js                     # 前端逻辑测试；必须写 *.js 且在仓库根目录跑（文件名不匹配默认 glob，裸目录会报错）
+swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位图（1200×630，macOS/AppKit）
 docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v $(pwd)/data:/data douyin-dl
 ```
 
@@ -20,7 +24,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。Dockerfile 只 `COPY server.py` + `COPY static`——新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
-无测试套件、无 lint 配置，验证靠手动跑服务 + 真实链接解析（抖音接口随时可变，改解析逻辑必须实测）。`/healthz` 可做存活探针（含 `version` 字段）。
+测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（33 例，覆盖媒体签名与 Range/流租约、代理健康不被媒体错误污染、原子配额、持久化计费、隐私存储、文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；两个 Node 测试（`test_download_flow.js`、`test_share_playback.js`）是把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑的——改前端下载/播放代码时必须保留锚点或同步更新测试。测试不能替代真实链接实测：抖音接口随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
 
 ## 版本号与 README 维护（每次改动必做）
 
@@ -30,7 +34,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 ### 单文件后端 + 单文件前端
 
-`server.py`（3000+ 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 内置 mihomo 内核 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。定位代码用 `grep -n "^# -----" server.py` 列分隔线，不要记行号。新增功能应放进对应分区，不要拆包。
+`server.py`（约 5000 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 内置 mihomo 内核 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。定位代码用 `grep -n "^# -----" server.py` 列分隔线，不要记行号。新增功能应放进对应分区，不要拆包。
 
 注意用户体系被拆成了相距很远的两块：**底层**（`hash_pw`/`current_user`/滑块验证码，在「用户鉴权 / 防机器人」分区）在文件前部，**路由**（`/api/auth/*`）在文件**最末尾**的同名分区。改用户相关功能时两处都要看。
 
@@ -49,6 +53,8 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 ### 流量分工：播放直连优先，视频下载统一同源流式
 
 这是全项目的核心设计取舍，改动前先理解：解析（短链 + 分享页）在服务器完成并走代理；普通浏览器播放优先直连抖音 CDN（`result.video.url` 是可直接 GET 的播放接口，浏览器自行跟 302）。抖音播放接口首跳 302 缺少 CORS，视频下载统一使用 `video.download_url`（带 `exp`/`sig` 的 `/api/video/{vid}`）：前端先发 1 字节 Range 预检，再交给隐藏 iframe 原生流式保存，不能把完整视频读进 Blob；微信内播放也优先同源签名地址，避免抖音域名被 WebView 拦截。`_media_signature()` 绑定 `kind/resource/exp`，但刻意不绑定 `dl/name`，因此前端可追加下载参数；入口还必须经过单 IP 限频、流生命周期并发租约和单段 Range 校验。未使用的通用 `/api/media` 已删除，不得重新引入任意 URL 代理。视频下载会消耗服务器带宽并使用服务器代理出口，但只转发、不落地保存。图集仍逐张浏览器直连，已刻意去掉"图集打包 ZIP"这类必须服务器下载的功能——不要重新引入。
+
+**抖音 CDN 已上线 Referer 防盗链**（v1.10.1 实测：douyinvod 对带第三方站点 Referer 的媒体请求一律 403，无 Referer 或 douyin.com Referer 正常）。因此所有嵌入抖音媒体的页面（`static/index.html`、`static/share.html`、`oss/static/index.html`）的 `<head>` 必须保留 `<meta name="referrer" content="no-referrer">`——`<video>` 元素不支持 `referrerpolicy` 属性，只有文档级策略能覆盖媒体请求；新增引用抖音直链的标签/页面时不要绕过它。服务器侧出站不受影响：`CDN_HEADERS` 固定带 `Referer: https://www.douyin.com/`。
 
 ### 出站请求：一律经 `open_url()`
 
@@ -70,7 +76,9 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 分享页 SEO 走 `_share_head()`（per-share OG）而非 `_seo_head()`，且**一律 noindex**，`robots.txt` 也 Disallow `/s/`——不收录他人作品是合规底线，不要"优化"掉。
 
-播放线路按环境排序：普通浏览器走 **`dy1`（`video.url`）→ `dy2`（`video.alt_url`）→ `proxy`（`video.proxy_url`）→ 失败提示**，优先节省服务器带宽；微信内走 **`proxy → dy1 → dy2 → 引导“用浏览器打开”`**，确保首次点击立即进入同源线路，不先空等两个 7 秒超时。`alt_url` 仍必须保留，它是代理故障时的重要备线。每级切换上报 `fallback`，每级成败上报 `play_ok`/`play_fail`（带 `source`=dy1/dy2/proxy、`stage`=ok/error/timeout/giveup、`detail`=media error code、`ms`），落 `share_events` 的 `source/stage/detail/ms` 四列，后台「分享页 → 播放诊断」看板按 微信内/外 × 线路 看成功率；微信内 `proxy` 占比升高是预期，带宽分析要分环境看。注意 `share_events` 这四列是启动时用 `PRAGMA table_info` + `ALTER TABLE` 就地补的（无迁移框架），再加列照此办理。
+播放线路 v1.11 起**全环境统一 `dy1`（`video.url`）→ `dy2`（`video.alt_url`）→ `proxy`（`video.proxy_url`）→ 失败提示**：抖音域名直连不花服务器带宽，同源代理只做兜底（v1.10.1 的全页 no-referrer 解决了直连 403，微信内直连才可行）。微信 WebView 拦截直连时常不报 error 只挂起，因此微信内直连看门狗缩短为 4 秒（普通浏览器 7 秒），最坏 8 秒落到代理线路。`alt_url` 仍必须保留，它是免费直连的重要备线。首页微信内同样直连优先：`videoPlaySrc()` 不再特判微信，`onerror` 走 `videoProxyFallback()` 自动切同源代理，手动「改用服务器代理播放」入口对微信内也开放。每级开始尝试上报 `play_try`、切换上报 `fallback`、成败上报 `play_ok`/`play_fail`（带 `source`=dy1/dy2/proxy、`stage`=ok/error/timeout/giveup、`detail`=media error code、`ms`），落 `share_events` 的 `source/stage/detail/ms` 四列；后台「分享页」页签有「播放诊断」（微信内/外 × 线路成功率）与「播放尝试日志」（try/ok/fail 全量明细）两块看板，微信内 `proxy` 占比是服务器带宽的先导指标。注意 `share_events` 这四列是启动时用 `PRAGMA table_info` + `ALTER TABLE` 就地补的（无迁移框架），再加列照此办理。
+
+**转发流量统计**：`/api/video` 每条流结束时按实际转发字节计量（`_ResumableVideoStream.sent`，经 `_media_finalizer` 的 `on_close` 钩子），先进内存 `_traffic_pending`（finalize 可能跑在事件循环线程，不能直接写 SQLite），由 `_sweeper` 每 5 分钟、后台读取时与 shutdown 时 `_flush_media_traffic()` 落库到 `media_traffic` 表（天 × 用途聚合，`scope`=play/download，无个人标识，保留 1 年）。后台「转发流量统计」看板走 `GET /api/admin/traffic-stats?days=`。浏览器直连抖音 CDN 的流量不经过服务器，无法也不需要统计。
 
 **域名池**：`_share_origin()` 给新链接分配域名，优先级为 **后台主域名（`app_settings.share_primary_domain`，即时生效不重启）→ `SHARE_DOMAINS` 环境变量域名池（轮换）→ 请求来源**。短码与域名解耦，某域名被微信封了在后台停用即可（`share_domains_off` 也对主域名生效，会自动退回池子/来源），存量链接换域名照样打开。主站域名与分享域名要物理隔离——分享域名被封是日常，主站被牵连是灾难。
 
@@ -121,7 +129,7 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 
 ## `oss/` —— 独立的开源精简版
 
-`oss/` 不是本服务的一部分，而是要 force-push 到公开仓库 `d100000/dy-download` 的**最小可用版**（约 300 行：只有粘贴链接 → 解析 → 视频同源流式下载 / 图集浏览器直连，代理仅一个 `PROXY` 环境变量）。管理后台、代理池、用户体系、计费 API、数据分析**不得进入 `oss/`**。它与根目录的 `server.py` / `static/index.html` 是手工同步的两份代码：改了根目录的解析逻辑，若需要同步，要手动移植到 `oss/server.py`，反之亦然。发布流程见 `oss/PUBLISH.md`（`./publish.sh` 会强制覆盖远程历史）。
+`oss/` 不是本服务的一部分，而是要 force-push 到公开仓库 `d100000/dy-download` 的**最小可用版**（约 300 行：只有粘贴链接 → 解析 → 视频同源流式下载 / 图集浏览器直连，代理仅一个 `PROXY` 环境变量）。管理后台、代理池、用户体系、计费 API、数据分析**不得进入 `oss/`**。它与根目录的 `server.py` / `static/index.html` 是手工同步的两份代码：改了根目录的解析逻辑，若需要同步，要手动移植到 `oss/server.py`，反之亦然；`tests/test_download_flow.js` 同时覆盖两份前端下载实现，可兜底同步回归。发布流程见 `oss/PUBLISH.md`（`./publish.sh` 会强制覆盖远程历史）。
 
 ## 参考文档
 

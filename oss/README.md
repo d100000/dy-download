@@ -17,7 +17,7 @@
 
 ## ✨ 功能 · Features
 
-- 🎬 **无水印视频下载** — 720P / MP4，在线预览可拖动进度 · No-watermark video download
+- 🎬 **无水印视频下载** — 优先 1080P / MP4，在线预览可拖动进度 · No-watermark video download
 - 🖼 **图集下载** — 图文作品逐张原图下载 · Image-gallery (slideshow) download
 - 🔒 **免登录 · 不建用户画像** — 不创建用户或分析数据库，网络请求所需信息仅用于当次处理与内存限频 · No login, user profiles, or analytics database
 - ⚡ **可靠下载** — 1 字节 Range 预检后由浏览器从同源地址原生流式保存，服务器不落地 · Range preflight and native same-origin streaming, zero server storage
@@ -80,6 +80,9 @@ PROXY=socks5://user:pass@host:port uvicorn server:app --port 8000 --no-access-lo
 | `MEDIA_TOKEN_TTL` | `43200` | 媒体授权有效秒数，限制在 300–86400 秒 |
 | `MEDIA_REQUESTS_PER_MIN` | `120` | 单 IP 每分钟媒体请求上限 |
 | `MEDIA_MAX_CONCURRENT` | `6` | 单 IP 同时播放或下载上限 |
+| `MEDIA_RESUME_MAX_ATTEMPTS` | `64` | 单个媒体流最多自动续传次数，限制在 1–256 |
+| `MEDIA_RESUME_MAX_SECONDS` | `3600` | 首次断流后自动续传总时长秒数，限制在 30–7200 |
+| `MEDIA_RESUME_MAX_FAILURES` | `8` | 同一偏移连续续传失败上限，限制在 2–16 |
 | `TRUST_PROXY` | 关闭 | 是否采信可信反代写入的 `X-Forwarded-For` |
 | `TRUST_PROXY_HOPS` | `1` | 从 XFF 右侧计算的可信代理层数 |
 | `PROXY` | 空 | 服务端访问抖音时使用的 HTTP/SOCKS 代理 |

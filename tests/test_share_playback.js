@@ -142,10 +142,11 @@ test('a stale route timeout cannot fail the newer route', () => {
   const video = h.videos[0];
   const staleTimeout = h.timers[0].fn;
 
+  // 微信内也是 dy1 → dy2 → proxy：首条 dy1 失败后切到 dy2
   video.dispatch('error');
-  assert.equal(video.src, 'https://dy1.example/video');
+  assert.equal(video.src, 'https://dy2.example/video');
   staleTimeout();
-  assert.equal(video.src, 'https://dy1.example/video');
+  assert.equal(video.src, 'https://dy2.example/video');
 });
 
 test('repeated start reuses one player and automatic failure never opens a mask', () => {

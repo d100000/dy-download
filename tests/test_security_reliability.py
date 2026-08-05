@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import os
 import stat
 import tempfile
@@ -86,6 +87,15 @@ class StaticRegressionTests(unittest.TestCase):
         self.assertIn("aweme.snssdk.com/aweme/v1/play/", source)
         self.assertIn("www.iesdouyin.com/aweme/v1/play/", source)
         self.assertIn("if not content_type or not (", source)
+        self.assertIn("ratio=1080p", source)
+        self.assertNotIn("ratio=720p", source)
+        self.assertIn("class _ResumableVideoStream", source)
+        self.assertIn("_video_response_shape(", source)
+        self.assertIn("validator=validate", source)
+        self.assertIn('"Accept-Encoding": "identity"', source)
+        self.assertIn("ratio=1080p", server._play_api("video_id_12345"))
+        self.assertIn("ratio=1080p", server._play_api_alt("video_id_12345"))
+        self.assertEqual(server.CDN_HEADERS["Accept-Encoding"], "identity")
 
     def test_api_responses_are_not_cacheable(self):
         with TestClient(server.app) as client:
@@ -226,6 +236,353 @@ class MediaSecurityTests(unittest.TestCase):
             self.assertNotIn("203.0.113.21", server._media_active)
         finally:
             server.open_url = original_open
+
+    def test_full_video_resumes_from_exact_offset_after_early_eof(self):
+        class FakeResponse:
+            def __init__(self, status, headers, blocks):
+                self.status = status
+                self.headers = {
+                    "Content-Type": "video/mp4",
+                    **headers,
+                }
+                self.blocks = list(blocks)
+                self.closed = False
+
+            def read(self, _size):
+                return self.blocks.pop(0) if self.blocks else b""
+
+            def close(self):
+                self.closed = True
+
+        initial = FakeResponse(
+            200, {"Content-Length": "10"}, [b"abc", b""])
+        resumed = FakeResponse(
+            206,
+            {
+                "Content-Length": "7",
+                "Content-Range": "bytes 3-9/10",
+            },
+            [b"defghij"])
+        responses = [initial, resumed]
+        ranges = []
+
+        def fake_open(_url, **kwargs):
+            ranges.append((kwargs.get("headers") or {}).get("Range"))
+            return responses.pop(0), None
+
+        vid = "video_id_12345"
+        exp, sig = server._media_token("video", vid, 300)
+        request = make_request(
+            "/api/video/" + vid, client_ip="203.0.113.23")
+        with mock.patch.object(server, "open_url", side_effect=fake_open):
+            response = server.api_video(vid, request, exp=exp, sig=sig)
+
+            async def consume():
+                chunks = []
+                async for block in response.body_iterator:
+                    chunks.append(block)
+                return b"".join(chunks)
+
+            body = asyncio.run(consume())
+
+        self.assertEqual(body, b"abcdefghij")
+        self.assertEqual(ranges, [None, "bytes=3-9"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-length"], "10")
+        self.assertNotIn("content-range", response.headers)
+        self.assertTrue(initial.closed)
+        self.assertTrue(resumed.closed)
+        self.assertNotIn("203.0.113.23", server._media_active)
+
+    def test_range_video_preserves_partial_exception_bytes_then_resumes(self):
+        class PartialReadError(OSError):
+            def __init__(self, partial):
+                super().__init__("upstream reset")
+                self.partial = partial
+
+        class FakeResponse:
+            def __init__(self, headers, reads):
+                self.status = 206
+                self.headers = {
+                    "Content-Type": "video/mp4",
+                    **headers,
+                }
+                self.reads = list(reads)
+                self.closed = False
+
+            def read(self, _size):
+                value = self.reads.pop(0) if self.reads else b""
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            def close(self):
+                self.closed = True
+
+        initial = FakeResponse(
+            {
+                "Content-Length": "5",
+                "Content-Range": "bytes 5-9/20",
+            },
+            [PartialReadError(b"67")])
+        resumed = FakeResponse(
+            {
+                "Content-Length": "3",
+                "Content-Range": "bytes 7-9/20",
+            },
+            [b"890"])
+        responses = [initial, resumed]
+        ranges = []
+
+        def fake_open(_url, **kwargs):
+            ranges.append((kwargs.get("headers") or {}).get("Range"))
+            return responses.pop(0), None
+
+        vid = "video_id_12345"
+        exp, sig = server._media_token("video", vid, 300)
+        request = make_request(
+            "/api/video/" + vid,
+            headers={"Range": "bytes=5-9"},
+            client_ip="203.0.113.24")
+        with mock.patch.object(server, "open_url", side_effect=fake_open):
+            response = server.api_video(vid, request, exp=exp, sig=sig)
+
+            async def consume():
+                chunks = []
+                async for block in response.body_iterator:
+                    chunks.append(block)
+                return b"".join(chunks)
+
+            body = asyncio.run(consume())
+
+        self.assertEqual(body, b"67890")
+        self.assertEqual(ranges, ["bytes=5-9", "bytes=7-9"])
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers["content-length"], "5")
+        self.assertEqual(response.headers["content-range"], "bytes 5-9/20")
+        self.assertTrue(initial.closed)
+        self.assertTrue(resumed.closed)
+        self.assertNotIn("203.0.113.24", server._media_active)
+
+    def test_main_one_byte_progress_cannot_bypass_total_resume_limit(self):
+        class FakeResponse:
+            def __init__(self, status, headers):
+                self.status = status
+                self.headers = {
+                    "Content-Type": "video/mp4",
+                    **headers,
+                }
+                self.reads = [b"x", b""]
+                self.closed = False
+
+            def read(self, _size):
+                return self.reads.pop(0) if self.reads else b""
+
+            def close(self):
+                self.closed = True
+
+        calls = []
+        responses = []
+
+        def fake_open(_url, **kwargs):
+            range_header = (kwargs.get("headers") or {}).get("Range")
+            calls.append(range_header)
+            if range_header:
+                start = int(range_header.split("=", 1)[1].split("-", 1)[0])
+                response = FakeResponse(
+                    206,
+                    {
+                        "Content-Length": str(100 - start),
+                        "Content-Range": f"bytes {start}-99/100",
+                    })
+            else:
+                response = FakeResponse(200, {"Content-Length": "100"})
+            responses.append(response)
+            return response, None
+
+        vid = "video_id_12345"
+        exp, sig = server._media_token("video", vid, 300)
+        request = make_request(
+            "/api/video/" + vid, client_ip="203.0.113.26")
+        with mock.patch.object(server, "open_url", side_effect=fake_open), \
+             mock.patch.object(
+                 server._ResumableVideoStream,
+                 "_MAX_TOTAL_RESUME_ATTEMPTS", 3), \
+             mock.patch.object(
+                 server._ResumableVideoStream,
+                 "_MAX_CONSECUTIVE_RESUME_FAILURES", 12):
+            response = server.api_video(vid, request, exp=exp, sig=sig)
+
+            async def consume():
+                chunks = []
+                async for block in response.body_iterator:
+                    chunks.append(block)
+                return chunks
+
+            with self.assertRaisesRegex(OSError, "resume budget exhausted"):
+                asyncio.run(consume())
+
+        self.assertEqual(
+            calls, [None, "bytes=1-99", "bytes=2-99", "bytes=3-99"])
+        self.assertEqual(len(responses), 4)
+        self.assertTrue(all(response.closed for response in responses))
+        self.assertNotIn("203.0.113.26", server._media_active)
+
+    def test_oss_full_video_recovers_from_exception_and_repeated_eof(self):
+        spec = importlib.util.spec_from_file_location(
+            "oss_server_media_test", Path("oss/server.py"))
+        oss_server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(oss_server)
+
+        class PartialReadError(OSError):
+            def __init__(self, partial):
+                super().__init__("upstream reset")
+                self.partial = partial
+
+        class FakeResponse:
+            def __init__(self, status, headers, reads):
+                self.status = status
+                self.headers = {
+                    "Content-Type": "video/mp4",
+                    **headers,
+                }
+                self.reads = list(reads)
+                self.closed = False
+
+            def read(self, _size):
+                value = self.reads.pop(0) if self.reads else b""
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+            def close(self):
+                self.closed = True
+
+        initial = FakeResponse(
+            200, {"Content-Length": "10"},
+            [PartialReadError(b"ab")])
+        first_resume = FakeResponse(
+            206,
+            {
+                "Content-Length": "8",
+                "Content-Range": "bytes 2-9/10",
+            },
+            [b"cde", b""])
+        second_resume = FakeResponse(
+            206,
+            {
+                "Content-Length": "5",
+                "Content-Range": "bytes 5-9/10",
+            },
+            [b"fghij"])
+        responses = [initial, first_resume, second_resume]
+        ranges = []
+
+        def fake_open(_url, follow=True, headers=None):
+            del follow
+            ranges.append((headers or {}).get("Range"))
+            return responses.pop(0)
+
+        vid = "video_id_12345"
+        expiry = int(time.time()) + 300
+        signature = oss_server._video_signature(vid, expiry)
+        request = make_request(
+            "/api/video/" + vid, client_ip="203.0.113.25")
+        with mock.patch.object(
+                oss_server, "_open", side_effect=fake_open):
+            response = oss_server.api_video(
+                vid, request, exp=str(expiry), sig=signature)
+
+            async def consume():
+                chunks = []
+                async for block in response.body_iterator:
+                    chunks.append(block)
+                return b"".join(chunks)
+
+            body = asyncio.run(consume())
+
+        self.assertEqual(body, b"abcdefghij")
+        self.assertEqual(ranges, [None, "bytes=2-9", "bytes=5-9"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-length"], "10")
+        self.assertNotIn("content-range", response.headers)
+        self.assertTrue(initial.closed)
+        self.assertTrue(first_resume.closed)
+        self.assertTrue(second_resume.closed)
+        self.assertNotIn("203.0.113.25", oss_server._media_active)
+
+    def test_oss_one_byte_progress_cannot_bypass_total_resume_limit(self):
+        spec = importlib.util.spec_from_file_location(
+            "oss_server_resume_budget_test", Path("oss/server.py"))
+        oss_server = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(oss_server)
+
+        class FakeResponse:
+            def __init__(self, status, headers):
+                self.status = status
+                self.headers = {
+                    "Content-Type": "video/mp4",
+                    **headers,
+                }
+                self.reads = [b"x", b""]
+                self.closed = False
+
+            def read(self, _size):
+                return self.reads.pop(0) if self.reads else b""
+
+            def close(self):
+                self.closed = True
+
+        calls = []
+        responses = []
+
+        def fake_open(_url, follow=True, headers=None):
+            del follow
+            range_header = (headers or {}).get("Range")
+            calls.append(range_header)
+            if range_header:
+                start = int(range_header.split("=", 1)[1].split("-", 1)[0])
+                response = FakeResponse(
+                    206,
+                    {
+                        "Content-Length": str(100 - start),
+                        "Content-Range": f"bytes {start}-99/100",
+                    })
+            else:
+                response = FakeResponse(200, {"Content-Length": "100"})
+            responses.append(response)
+            return response
+
+        vid = "video_id_12345"
+        expiry = int(time.time()) + 300
+        signature = oss_server._video_signature(vid, expiry)
+        request = make_request(
+            "/api/video/" + vid, client_ip="203.0.113.27")
+        with mock.patch.object(
+                oss_server, "_open", side_effect=fake_open), \
+             mock.patch.object(
+                 oss_server._ResumableVideoStream,
+                 "_MAX_TOTAL_RESUME_ATTEMPTS", 3), \
+             mock.patch.object(
+                 oss_server._ResumableVideoStream,
+                 "_MAX_CONSECUTIVE_RESUME_FAILURES", 12):
+            response = oss_server.api_video(
+                vid, request, exp=str(expiry), sig=signature)
+
+            async def consume():
+                chunks = []
+                async for block in response.body_iterator:
+                    chunks.append(block)
+                return chunks
+
+            with self.assertRaisesRegex(OSError, "resume budget exhausted"):
+                asyncio.run(consume())
+
+        self.assertEqual(
+            calls, [None, "bytes=1-99", "bytes=2-99", "bytes=3-99"])
+        self.assertEqual(len(responses), 4)
+        self.assertTrue(all(response.closed for response in responses))
+        self.assertNotIn("203.0.113.27", oss_server._media_active)
 
     def test_video_upstream_rejects_error_page_and_uses_alternate_domain(self):
         class FakeResponse:
@@ -383,6 +740,52 @@ class MediaSecurityTests(unittest.TestCase):
         def fake_raw_open(url, follow, headers, timeout, proxy):
             if proxy is first:
                 raise urlerr.HTTPError(url, 403, "resource forbidden", {}, None)
+            return response
+
+        with mock.patch.object(
+                server.proxy_mgr, "candidates",
+                return_value=[first, second]), \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_fail") as mark_fail, \
+             mock.patch.object(
+                 server.proxy_mgr, "mark_banned") as mark_banned, \
+             mock.patch.object(server.proxy_mgr, "mark_ok"), \
+             mock.patch.object(server.proxy_mgr, "note_retry"), \
+             mock.patch.object(
+                 server, "_raw_open", side_effect=fake_raw_open):
+            opened, used = server.open_url(
+                "https://aweme.snssdk.com/aweme/v1/play/",
+                retry_http_statuses=(502,),
+                ban_on_auth_error=False)
+
+        self.assertIs(opened, response)
+        self.assertIs(used, second)
+        mark_fail.assert_not_called()
+        mark_banned.assert_not_called()
+        self.assertEqual(first["fail"], 4)
+        self.assertTrue(first["enabled"])
+
+    def test_media_tunnel_403_exception_rotates_without_banning_proxy(self):
+        first = {
+            "url": "http://proxy-one.example:8000",
+            "fail": 4,
+            "enabled": True,
+        }
+        second = {
+            "url": "http://proxy-two.example:8000",
+            "fail": 0,
+            "enabled": True,
+        }
+
+        class FakeResponse:
+            pass
+
+        response = FakeResponse()
+
+        def fake_raw_open(_url, _follow, _headers, _timeout, proxy):
+            if proxy is first:
+                raise OSError(
+                    "Tunnel connection failed: 403 Forbidden")
             return response
 
         with mock.patch.object(

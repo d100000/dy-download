@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 抖音 CDN 对带第三方 Referer 的媒体请求一律 403（防盗链），全页不带 Referer 出站 -->
+<meta name="referrer" content="no-referrer">
 {{SEO_HEAD}}
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230E1013'/%3E%3Cg fill='none' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%2325F4EE' transform='translate(-2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23FE2C55' transform='translate(2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23fff'/%3E%3C/g%3E%3Cpath d='M20 46 h24' stroke='%23fff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
@@ -1041,6 +1043,7 @@ function openPlayer(i){
     body.innerHTML = `<video controls autoplay playsinline webkit-playsinline x5-playsinline
       x5-video-player-type="h5" x5-video-player-fullscreen="false"
       src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
+      onerror="videoProxyFallback(this)"
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       <div class="pm-title">${esc(d.title)}</div>
       <div class="pm-act"><button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button></div>`;
@@ -1388,9 +1391,15 @@ function downloadVideoItem(btn){
 
 function videoPlaySrc(v){
   if (!v) return '';
-  return (IS_WECHAT_UA && v.proxy_url)
-    ? v.proxy_url
-    : (v.url || v.alt_url || v.proxy_url || '');
+  // 微信内同样直连优先（省服务器带宽），直连失败由 videoProxyFallback 自动落同源代理
+  return v.url || v.alt_url || v.proxy_url || '';
+}
+
+function videoProxyFallback(v){
+  // 直连域名被拦截/防盗链拒绝时自动换同源代理；已起播后的晚到 error 不处理
+  if (!v.dataset.proxy || v.currentTime > 0) return;
+  if ((v.src || '').indexOf('/api/video/') !== -1) return;
+  v.src = v.dataset.proxy; v.load(); v.play?.();
 }
 
 function useProxyFallback(el){
@@ -1406,13 +1415,14 @@ function videoHTML(d){
         <video controls playsinline webkit-playsinline x5-playsinline
                x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata"
                src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
+               onerror="videoProxyFallback(this)"
                ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
-        ${IS_WECHAT_UA || !d.video.proxy_url ? '' : `<div class="fallback-hint">
+        ${!d.video.proxy_url ? '' : `<div class="fallback-hint">
           播放不出来？<a href="javascript:void(0)" onclick="useProxyFallback(this.parentNode)">改用服务器代理播放</a>
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '微信兼容线路' : '直连播放'}</span>
+        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放'}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">

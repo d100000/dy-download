@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.11.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -110,9 +110,26 @@ if ADMIN_PASSWORD == "douyin-admin":
 # 免费使用配额（防薅羊毛）
 FREE_ANON_DAILY = int(os.environ.get("FREE_ANON_DAILY", "3"))    # 匿名：每天 3 次
 FREE_USER_DAILY = int(os.environ.get("FREE_USER_DAILY", "10"))   # 登录用户：每天 10 次
+
+
+def _clamped_env_int(name: str, default: int,
+                     minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 MEDIA_TOKEN_TTL = max(300, min(86400, int(os.environ.get("MEDIA_TOKEN_TTL", "43200"))))
 MEDIA_REQUESTS_PER_MIN = max(10, int(os.environ.get("MEDIA_REQUESTS_PER_MIN", "120")))
 MEDIA_MAX_CONCURRENT = max(1, int(os.environ.get("MEDIA_MAX_CONCURRENT", "6")))
+MEDIA_RESUME_MAX_ATTEMPTS = _clamped_env_int(
+    "MEDIA_RESUME_MAX_ATTEMPTS", 64, 1, 256)
+MEDIA_RESUME_MAX_SECONDS = _clamped_env_int(
+    "MEDIA_RESUME_MAX_SECONDS", 3600, 30, 7200)
+MEDIA_RESUME_MAX_FAILURES = _clamped_env_int(
+    "MEDIA_RESUME_MAX_FAILURES", 8, 2, 16)
 DATA_RETENTION_DAYS = max(
     1, min(30, int(os.environ.get("DATA_RETENTION_DAYS", "30")))
 )
@@ -209,6 +226,11 @@ CREATE INDEX IF NOT EXISTS idx_share_ev_kind ON share_events(kind, ts);
 CREATE TABLE IF NOT EXISTS reports(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT,
   reason TEXT, contact TEXT, ip TEXT, handled INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS media_traffic(
+  day INTEGER, scope TEXT,
+  requests INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0,
+  PRIMARY KEY(day, scope)
 );
 """
 
@@ -957,6 +979,9 @@ def _cleanup_retained_data(force: bool = False) -> None:
             conn.execute(
                 "DELETE FROM shares WHERE expires_at>0 AND expires_at<?",
                 (int(now),))
+            # 转发流量是无个人标识的按天聚合，保留 1 年供带宽/成本复盘
+            conn.execute("DELETE FROM media_traffic WHERE day<?",
+                         (_today() - 366,))
             conn.execute(
                 "DELETE FROM api_keys WHERE enabled=0 AND deleted_at IS NOT NULL "
                 "AND deleted_at<? AND COALESCE(reserved_cents,0)=0 "
@@ -978,6 +1003,7 @@ def _sweeper():
             _sweep_memory()
             _refund_stale_quota_reservations()
             _cleanup_retained_data()
+            _flush_media_traffic()
         except Exception:
             pass
 
@@ -1170,6 +1196,33 @@ class ProxyManager:
                     self._save()
                     return p["enabled"]
         return None
+
+    def remove_many(self, ids: set) -> int:
+        """批量删除（跳过 managed 托管条目，其生命周期归 mihomo 面板管理）。"""
+        with self._lock:
+            n = len(self.proxies)
+            self.proxies = [p for p in self.proxies
+                            if p["id"] not in ids or p.get("managed")]
+            self._save()
+            return n - len(self.proxies)
+
+    def set_enabled_many(self, ids: set, enabled: bool) -> int:
+        """批量启停（跳过 managed 条目），语义与 toggle() 一致。"""
+        changed = 0
+        with self._lock:
+            for p in self.proxies:
+                if p["id"] not in ids or p.get("managed"):
+                    continue
+                p["enabled"] = enabled
+                p["auto_off"] = False
+                if enabled:
+                    p["fail"] = 0
+                    p["banned"] = False          # 手动启用即解除封禁标记
+                    p["banned_reason"] = None
+                changed += 1
+            if changed:
+                self._save()
+        return changed
 
     def mark_banned(self, p: dict, reason: str):
         """代理 IP 被抖音封禁：落库标记、自动禁用、计数。"""
@@ -1849,8 +1902,14 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
         except Exception as e:                      # 连接/超时 → 代理故障，自动转移
             msg = str(e).lower()
             if "403" in msg or "forbidden" in msg or "tunnel connection failed" in msg:
-                proxy_mgr.mark_banned(p, "代理无法连接抖音（403/被封禁）")
-                errors.append(f"{_proxy_public_label(p)} → 被封禁(403)")
+                if ban_on_auth_error:
+                    proxy_mgr.mark_banned(p, "代理无法连接抖音（403/被封禁）")
+                    errors.append(f"{_proxy_public_label(p)} → 被封禁(403)")
+                else:
+                    # HTTP CONNECT/tunnel 失败未必代表出口 IP 被抖音永久封禁；
+                    # 媒体 CDN 线路只轮换本次请求，不能污染代理池持久健康状态。
+                    errors.append(
+                        f"{_proxy_public_label(p)} → 媒体连接失败(403)")
             else:
                 proxy_mgr.mark_fail(p)
                 errors.append(
@@ -1964,6 +2023,244 @@ def _stream(resp, chunk=256 * 1024, on_close=None):
             resp.close()
 
 
+def _parse_content_range(value: str):
+    """解析单段 Content-Range，返回 (start, end, total|None)。"""
+    match = re.fullmatch(
+        r"bytes\s+(\d+)-(\d+)/(\d+|\*)", (value or "").strip(),
+        flags=re.IGNORECASE)
+    if not match:
+        return None
+    start, end = int(match.group(1)), int(match.group(2))
+    total = None if match.group(3) == "*" else int(match.group(3))
+    if end < start or (total is not None and (total <= 0 or end >= total)):
+        return None
+    return start, end, total
+
+
+def _video_response_shape(resp, requested_range: str):
+    """校验上游 Range 语义，返回流的绝对边界与期望字节数。
+
+    返回 (status, start, end|None, total|None, expected|None)。缺少长度时
+    expected 为 None，此时仍可流式传输，但无法判定提前 EOF。
+    """
+    status = resp.status if hasattr(resp, "status") else resp.getcode()
+    content_range = _parse_content_range(
+        resp.headers.get("Content-Range") or "")
+    raw_length = (resp.headers.get("Content-Length") or "").strip()
+    if raw_length and not re.fullmatch(r"\d+", raw_length):
+        raise ValueError("invalid video Content-Length")
+    content_length = int(raw_length) if raw_length else None
+
+    if requested_range:
+        if status != 206 or content_range is None:
+            raise ValueError("video upstream did not honor Range")
+        start, end, total = content_range
+        expected = end - start + 1
+        if content_length is not None and content_length != expected:
+            raise ValueError("video range length mismatch")
+
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested_range.strip())
+        if not match:
+            raise ValueError("invalid requested video Range")
+        req_start, req_end = match.groups()
+        if req_start:
+            if start != int(req_start):
+                raise ValueError("video range start mismatch")
+            if req_end:
+                wanted_end = int(req_end)
+                if total is not None:
+                    wanted_end = min(wanted_end, total - 1)
+                if end != wanted_end:
+                    raise ValueError("video range end mismatch")
+            elif total is not None and end != total - 1:
+                raise ValueError("open video range ended early")
+        else:
+            # 后缀 Range 必须知道资源总长，才能证明返回的是最后 N 字节。
+            suffix = int(req_end)
+            if total is None or end != total - 1:
+                raise ValueError("invalid suffix video range")
+            if start != max(0, total - suffix):
+                raise ValueError("video suffix range mismatch")
+        return status, start, end, total, expected
+
+    if status != 200:
+        raise ValueError("unexpected partial response for full video")
+    if content_range is not None:
+        raise ValueError("unexpected Content-Range for full video")
+    if content_length is None:
+        return status, 0, None, None, None
+    return status, 0, content_length - 1, content_length, content_length
+
+
+class _ResumeBudgetExceeded(Exception):
+    pass
+
+
+class _ResumableVideoStream:
+    """在上游长连接提前 EOF/读取异常后，从精确字节偏移续传。"""
+    _MAX_CONSECUTIVE_RESUME_FAILURES = MEDIA_RESUME_MAX_FAILURES
+    _MAX_TOTAL_RESUME_ATTEMPTS = MEDIA_RESUME_MAX_ATTEMPTS
+    _MAX_RESUME_SECONDS = MEDIA_RESUME_MAX_SECONDS
+
+    def __init__(self, vid: str, initial, request_headers: dict,
+                 start: int, end: Optional[int], total: Optional[int],
+                 expected: Optional[int], chunk: int = 256 * 1024):
+        self.vid = vid
+        self.request_headers = dict(request_headers)
+        self.start = start
+        self.end = end
+        self.total = total
+        self.expected = expected
+        self.chunk = chunk
+        self.sent = 0
+        self.current = initial
+        self.closed = False
+        self._lock = threading.Lock()
+        self._on_close = None
+        self._resume_attempts = 0
+        self._resume_started = None
+
+    def set_on_close(self, callback) -> None:
+        self._on_close = callback
+
+    def _take_current(self):
+        with self._lock:
+            return None if self.closed else self.current
+
+    def _replace_current(self, replacement) -> bool:
+        with self._lock:
+            if self.closed:
+                accepted = False
+            else:
+                self.current = replacement
+                accepted = True
+        if not accepted:
+            _close_upstream(replacement)
+        return accepted
+
+    def _resume(self):
+        with self._lock:
+            if self.closed:
+                return None
+            now = time.monotonic()
+            if self._resume_started is None:
+                self._resume_started = now
+            if (self._resume_attempts >= self._MAX_TOTAL_RESUME_ATTEMPTS
+                    or now - self._resume_started
+                    >= self._MAX_RESUME_SECONDS):
+                raise _ResumeBudgetExceeded()
+            self._resume_attempts += 1
+        offset = self.start + self.sent
+        if self.end is not None and offset > self.end:
+            return None
+        headers = dict(self.request_headers)
+        headers["Range"] = (
+            f"bytes={offset}-{self.end}"
+            if self.end is not None else f"bytes={offset}-")
+
+        def validate(candidate):
+            status, start, end, total, expected = _video_response_shape(
+                candidate, headers["Range"])
+            if status != 206 or start != offset:
+                raise ValueError("resumed video range start mismatch")
+            if self.end is not None and end is not None and end > self.end:
+                raise ValueError("resumed video range exceeded response")
+            if self.total is not None and total != self.total:
+                raise ValueError("video size changed while resuming")
+            if expected is not None and self.expected is not None:
+                remaining = self.expected - self.sent
+                if expected > remaining:
+                    raise ValueError("resumed video range is too long")
+
+        replacement = _open_video_upstream(
+            self.vid, headers, validator=validate)
+        if (time.monotonic() - self._resume_started
+                >= self._MAX_RESUME_SECONDS):
+            _close_upstream(replacement)
+            raise _ResumeBudgetExceeded()
+        if not self._replace_current(replacement):
+            return None
+        return replacement
+
+    def close(self) -> None:
+        with self._lock:
+            if self.closed:
+                return
+            self.closed = True
+            current, self.current = self.current, None
+        if current is not None:
+            _close_upstream(current)
+
+    def __iter__(self):
+        consecutive_failures = 0
+        try:
+            while self.expected is None or self.sent < self.expected:
+                current = self._take_current()
+                if current is None:
+                    break
+                remaining = (
+                    self.chunk if self.expected is None
+                    else min(self.chunk, self.expected - self.sent))
+                try:
+                    block = current.read(remaining)
+                except Exception as exc:
+                    # http.client.IncompleteRead 等异常会携带已收到的 partial；
+                    # 必须先转发并推进 offset，否则重开 Range 会重复这些字节。
+                    partial = getattr(exc, "partial", b"")
+                    block = bytes(partial) if isinstance(
+                        partial, (bytes, bytearray, memoryview)) else b""
+                    if self.expected is not None:
+                        block = block[:self.expected - self.sent]
+                    if block:
+                        self.sent += len(block)
+                        consecutive_failures = 0
+                        yield block
+                    if self.expected is None or self.sent >= self.expected:
+                        break
+                    _close_upstream(current)
+                    consecutive_failures += 1
+                else:
+                    if block:
+                        if self.expected is not None:
+                            block = block[:self.expected - self.sent]
+                        self.sent += len(block)
+                        consecutive_failures = 0
+                        yield block
+                        continue
+                    if self.expected is None or self.sent >= self.expected:
+                        break
+                    # 已声明长度却提前 EOF：关闭断流连接，从 sent 对应的
+                    # 绝对偏移重开单段 Range，避免重复或缺失字节。
+                    _close_upstream(current)
+                    consecutive_failures += 1
+
+                if (consecutive_failures
+                        > self._MAX_CONSECUTIVE_RESUME_FAILURES):
+                    raise OSError(
+                        "video upstream repeatedly ended early") from None
+                while True:
+                    try:
+                        resumed = self._resume()
+                        break
+                    except _ResumeBudgetExceeded:
+                        raise OSError(
+                            "video upstream resume budget exhausted") from None
+                    except Exception:
+                        consecutive_failures += 1
+                        if (consecutive_failures
+                                > self._MAX_CONSECUTIVE_RESUME_FAILURES):
+                            raise OSError(
+                                "video upstream resume failed") from None
+                if resumed is None:
+                    break
+        finally:
+            callback = self._on_close
+            if callback:
+                callback()
+            else:
+                self.close()
+
+
 _media_limit_lock = threading.Lock()
 _media_hits: dict = {}
 _media_active: dict = {}
@@ -2018,8 +2315,11 @@ class _MediaStreamingResponse(StreamingResponse):
             self._media_finalize()
 
 
-def _media_finalizer(upstream, lease: _MediaLease):
-    """返回线程安全、幂等的上游关闭 + 并发租约释放函数。"""
+def _media_finalizer(upstream, lease: _MediaLease, on_close=None):
+    """返回线程安全、幂等的上游关闭 + 并发租约释放函数。
+
+    on_close 在首次 finalize 时执行一次（用于流量计量等收尾统计），
+    必须是廉价的内存操作——finalize 可能跑在事件循环线程，阻塞不得。"""
     lock = threading.Lock()
     closed = False
 
@@ -2035,6 +2335,11 @@ def _media_finalizer(upstream, lease: _MediaLease):
             pass
         finally:
             _media_release(lease)
+            if on_close:
+                try:
+                    on_close()
+                except Exception:
+                    pass
 
     return finalize
 
@@ -2048,6 +2353,55 @@ def _sweep_media_limits() -> None:
                 _media_hits[key] = fresh
             else:
                 _media_hits.pop(key, None)
+
+
+# 媒体转发流量统计（后台「转发流量统计」）：只统计经 /api/video 同源转发的字节，
+# 浏览器直连抖音 CDN 的流量不经过本服务器、无法也不需要统计。
+# 内存累加 + 定期落库（media_traffic 按天/用途聚合，无任何个人标识）——
+# 不能在流结束回调里直接写 SQLite：finalize 可能跑在事件循环线程。
+_traffic_lock = threading.Lock()
+_traffic_pending: dict = {}          # (day, scope) -> [requests, bytes]
+
+
+def _traffic_add(scope: str, nbytes: int) -> None:
+    key = (_today(), scope)
+    with _traffic_lock:
+        cur = _traffic_pending.setdefault(key, [0, 0])
+        cur[0] += 1
+        cur[1] += max(0, int(nbytes or 0))
+
+
+def _flush_media_traffic() -> None:
+    global _traffic_pending
+    with _traffic_lock:
+        if not _traffic_pending:
+            return
+        pending, _traffic_pending = _traffic_pending, {}
+    try:
+        with _db_lock:
+            conn = _db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                for (day, scope), (n, b) in pending.items():
+                    conn.execute(
+                        "INSERT INTO media_traffic(day,scope,requests,bytes) "
+                        "VALUES(?,?,?,?) ON CONFLICT(day,scope) DO UPDATE SET "
+                        "requests=requests+excluded.requests, "
+                        "bytes=bytes+excluded.bytes",
+                        (day, scope, n, b))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+    except Exception:
+        # 落库失败把计数放回内存，等下一轮 sweeper 重试，不丢数据
+        with _traffic_lock:
+            for key, (n, b) in pending.items():
+                cur = _traffic_pending.setdefault(key, [0, 0])
+                cur[0] += n
+                cur[1] += b
 
 
 def _valid_single_range(value: str) -> bool:
@@ -2074,7 +2428,10 @@ def _content_disposition(name: str) -> str:
 
 _cache: dict = {}
 _author_cache: dict = {}          # item_id -> (ts, 作者结构化详情)
-CDN_HEADERS = {"Referer": "https://www.douyin.com/"}
+CDN_HEADERS = {
+    "Referer": "https://www.douyin.com/",
+    "Accept-Encoding": "identity",
+}
 
 
 def _play_api(vid: str) -> str:
@@ -2085,17 +2442,17 @@ def _play_api(vid: str) -> str:
     且 CDN 直链与浏览器同 IP，避免"服务器/代理 IP 解析的直链换个 IP 打不开"。
     实测该接口对桌面 UA / 无 UA 均返回 200，浏览器可直连。
     """
-    return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
+    return f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=1080p&line=0"
 
 
 def _play_api_alt(vid: str) -> str:
     """备用播放域名。与 aweme.snssdk.com 互为备份（见 docs/产品文档.md §风险表）。
 
     微信内不同机型/内核对这两个域名的可达性不一致（部分环境 snssdk 被拦、
-    iesdouyin 可播，反之亦然）。普通浏览器在服务器代理前尝试此线路以节省带宽；
-    微信内则把它留作同源代理失败后的备线。
+    iesdouyin 可播，反之亦然）。所有环境（含微信）都在服务器代理前尝试
+    此线路以节省带宽，同源代理只做兜底。
     """
-    return f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0"
+    return f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=1080p&line=0"
 
 
 def _video_download_url(vid: str, filename: str = "video.mp4") -> str:
@@ -3485,7 +3842,7 @@ def _close_upstream(resp) -> None:
         pass
 
 
-def _open_video_upstream(vid: str, headers: dict):
+def _open_video_upstream(vid: str, headers: dict, validator=None):
     """打开一个可信的视频响应；主线路异常时切到备用播放域名。"""
     no_proxy_error = None
     for upstream in (_play_api(vid), _play_api_alt(vid)):
@@ -3518,6 +3875,8 @@ def _open_video_upstream(vid: str, headers: dict):
             final_url = geturl() if callable(geturl) else ""
             if final_url and not _host_allowed(final_url):
                 raise ValueError("video redirect left the Douyin media allowlist")
+            if validator:
+                validator(resp)
 
             accepted = True
             return resp
@@ -3554,7 +3913,12 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
     try:
         # 同源播放/下载线路：经代理，绝不直连暴露服务器 IP。
         # 主播放域名被风控、返回网关页或临时 5xx 时，自动切换备用域名。
-        resp = _open_video_upstream(vid, extra)
+        resp = _open_video_upstream(
+            vid, extra,
+            validator=lambda candidate: _video_response_shape(
+                candidate, range_header))
+        status, start, end, total, expected = _video_response_shape(
+            resp, range_header)
     except ApiError:
         _media_release(lease)
         raise
@@ -3562,21 +3926,28 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
         _media_release(lease)
         raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
 
-    status = resp.status if hasattr(resp, "status") else resp.getcode()
     headers = {
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
     }
-    for h in ("Content-Length", "Content-Range"):
-        v = resp.headers.get(h)
-        if v:
-            headers[h] = v
+    if expected is not None:
+        headers["Content-Length"] = str(expected)
+    if status == 206:
+        headers["Content-Range"] = (
+            f"bytes {start}-{end}/"
+            f"{total if total is not None else '*'}")
     if dl:
         headers["Content-Disposition"] = _content_disposition(name or "video.mp4")
-    finalize = _media_finalizer(resp, lease)
+    stream = _ResumableVideoStream(
+        vid, resp, extra, start, end, total, expected)
+    # 流关闭时按实际转发字节计量（stream.sent 即已发给客户端的字节数）
+    scope = "download" if dl else "play"
+    finalize = _media_finalizer(
+        stream, lease, on_close=lambda: _traffic_add(scope, stream.sent))
+    stream.set_on_close(finalize)
     return _MediaStreamingResponse(
-        _stream(resp, on_close=finalize),
+        stream,
         finalize=finalize, status_code=status,
         media_type="video/mp4", headers=headers)
 
@@ -3759,6 +4130,33 @@ def admin_test_all(request: Request):
     results = _probe_all(list(proxy_mgr.proxies), reach)
     ok = sum(1 for r in results if r and r.get("ok"))
     return {"results": results, "ok": ok, "total": len(results)}
+
+
+class ProxyBatchBody(BaseModel):
+    action: str                            # delete / enable / disable / test
+    ids: list[str]
+
+
+@app.post("/api/admin/proxies/batch")
+def admin_batch_proxy(body: ProxyBatchBody, request: Request):
+    """批量操作选中的代理；managed 托管条目跳过增删启停（归 mihomo 面板管）。"""
+    _require_admin(request)
+    ids = set(body.ids)
+    if not ids:
+        raise ApiError(400, "未选择任何代理")
+    if len(ids) > 500:
+        raise ApiError(400, "单次批量操作最多 500 个")
+    if body.action == "delete":
+        return {"ok": True, "affected": proxy_mgr.remove_many(ids)}
+    if body.action in ("enable", "disable"):
+        return {"ok": True, "affected": proxy_mgr.set_enabled_many(ids, body.action == "enable")}
+    if body.action == "test":
+        selected = [p for p in proxy_mgr.proxies if p["id"] in ids]
+        reach = proxy_mgr.settings.get("test_reach_douyin", True)
+        results = _probe_all(selected, reach)
+        ok = sum(1 for r in results if r and r.get("ok"))
+        return {"results": results, "ok": ok, "total": len(results)}
+    raise ApiError(400, "不支持的批量操作")
 
 
 class SettingBody(BaseModel):
@@ -3974,8 +4372,8 @@ def admin_del_share(sid: str, request: Request):
 def admin_play_stats(request: Request, hours: int = 24, limit: int = 60):
     """播放诊断看板：看清「微信内哪些视频能播、走的哪条线路、失败在哪一步」。
 
-    普通浏览器播放链路是 dy1 → dy2 → proxy；微信内为 proxy → dy1 → dy2。
-    每条线路的 ok/fail 都会上报，带宽分析需要按微信内/外分别观察。"""
+    所有环境（含微信）播放链路均为 dy1 → dy2 → proxy，抖音直连优先、同源代理兜底。
+    每条线路的 try/ok/fail 都会上报，带宽分析需要按微信内/外分别观察。"""
     _require_admin(request)
     hours = max(1, min(24 * 30, hours))
     limit = max(1, min(300, limit))
@@ -4022,15 +4420,48 @@ def admin_play_stats(request: Request, hours: int = 24, limit: int = 60):
         "GROUP BY e.sid HAVING fail>0 ORDER BY giveup DESC, fail DESC, ok ASC LIMIT ?",
         (since, limit), "all")
 
-    # 最近失败明细，带 UA —— 定位是哪个机型/内核播不了
-    recent = db_exec(
-        "SELECT ts,sid,COALESCE(source,'') source,COALESCE(stage,'') stage,"
+    # 播放尝试全量日志：每条线路的 尝试(play_try)/成功/失败 明细，带粗粒度 UA
+    # 定位是哪个机型/内核播不了。play_try 为 v1.11 新增，旧数据只有 ok/fail。
+    log = db_exec(
+        "SELECT ts,sid,kind,COALESCE(source,'') source,COALESCE(stage,'') stage,"
         "COALESCE(detail,'') detail,ms,wechat,ua FROM share_events "
-        "WHERE ts>=? AND kind='play_fail' ORDER BY ts DESC LIMIT ?",
+        "WHERE ts>=? AND kind IN ('play_try','play_ok','play_fail') "
+        "ORDER BY ts DESC LIMIT ?",
         (since, limit), "all")
 
     return {"hours": hours, "lines": lines, "giveup": giveup,
-            "bad": [dict(r) for r in bad], "recent": [dict(r) for r in recent]}
+            "bad": [dict(r) for r in bad], "log": [dict(r) for r in log]}
+
+
+@app.get("/api/admin/traffic-stats")
+def admin_traffic_stats(request: Request, days: int = 30):
+    """转发流量统计：/api/video 同源流式转发的按天字节/次数聚合。
+
+    scope=play 是播放兜底线路、scope=download 是视频下载；
+    浏览器直连抖音 CDN 的流量不经过本服务器，无法也不需要统计。"""
+    _require_admin(request)
+    days = max(1, min(365, days))
+    _flush_media_traffic()          # 先把内存里的增量落库，保证读到最新
+    since = _today() - days + 1
+    rows = db_exec("SELECT day,scope,requests,bytes FROM media_traffic "
+                   "WHERE day>=? ORDER BY day DESC", (since,), "all")
+    daily: dict = {}
+    for r in rows:
+        d = daily.setdefault(r["day"], {
+            "day": r["day"],
+            "date": time.strftime("%Y-%m-%d", time.gmtime(r["day"] * 86400)),
+            "play_requests": 0, "play_bytes": 0,
+            "download_requests": 0, "download_bytes": 0})
+        if r["scope"] == "download":
+            d["download_requests"] += r["requests"] or 0
+            d["download_bytes"] += r["bytes"] or 0
+        else:
+            d["play_requests"] += r["requests"] or 0
+            d["play_bytes"] += r["bytes"] or 0
+    out = sorted(daily.values(), key=lambda x: -x["day"])
+    totals = {k: sum(d[k] for d in out) for k in
+              ("play_requests", "play_bytes", "download_requests", "download_bytes")}
+    return {"days": days, "daily": out, "totals": totals}
 
 
 @app.get("/api/admin/reports")
@@ -4178,6 +4609,11 @@ def _start_health():
 @app.on_event("shutdown")
 def _stop_mihomo():
     _stop_api_job_workers()
+    # 内存里的转发流量计数落库，重启不丢
+    try:
+        _flush_media_traffic()
+    except Exception:
+        pass
     # 关服务时杀掉内置 mihomo 子进程，避免留下孤儿进程占用端口
     try:
         mihomo_mgr.stop()

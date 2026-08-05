@@ -3,6 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- 抖音 CDN 对带第三方 Referer 的媒体请求一律 403（防盗链），全页不带 Referer 出站 -->
+<meta name="referrer" content="no-referrer">
 {{SHARE_HEAD}}
 <meta name="format-detection" content="telephone=no">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230E1013'/%3E%3Cg fill='none' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%2325F4EE' transform='translate(-2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23FE2C55' transform='translate(2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23fff'/%3E%3C/g%3E%3Cpath d='M20 46 h24' stroke='%23fff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -341,7 +343,7 @@ function render(){
     <div class="card">
       ${media}
       <div class="body">
-        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · ${!isNote && IS_WECHAT_UA ? '微信兼容线路' : '浏览器直连'}</span>
+        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · ${!isNote && IS_WECHAT_UA ? '直连优先 · 兼容线路兜底' : '浏览器直连'}</span>
         <div class="title">${esc(S.title)}</div>
         ${authorBlock(d)}
         ${statsBlock(d.stats)}
@@ -381,10 +383,11 @@ function render(){
   </div></div>`;
 }
 
-/* ---------------- 播放：按运行环境决定线路顺序，全部失败后再引导 ----------------
-   普通浏览器优先两个抖音域名以节省服务器带宽；微信 WebView 容易拦截抖音域名，
-   因此优先同源代理，避免等待 14 秒后才切换并丢失首次点击带来的播放授权。
-   每条线路的 ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
+/* ---------------- 播放：dy1 → dy2 → proxy，全部失败后再引导 ----------------
+   所有环境（含微信）都优先抖音自己的两个播放域名——浏览器直连、不花服务器带宽，
+   同源代理只做兜底。微信 WebView 拦截直连域名时常不报 error 只挂起，
+   因此微信内把直连看门狗缩短，保证最坏 8 秒内落到同源代理线路。
+   每条线路的 try/ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
 let _playSession = 0;
 function startPlay(){
   const d = S.data || {};
@@ -402,16 +405,13 @@ function startPlay(){
   btn.style.display = 'none'; ld.style.display = 'block';
   track('play');
 
-  // 普通浏览器：dy1 → dy2 → proxy；微信：proxy → dy1 → dy2
-  const directRoutes = [
-    {source:'dy1',   src:d.video.url,       wait:7000,  tip:IS_WECHAT_UA ? '切换线路中…' : '加载中…'},
-    {source:'dy2',   src:d.video.alt_url,   wait:7000,  tip:'切换线路中…'},
-  ];
-  const proxyRoute =
-    {source:'proxy', src:d.video.proxy_url, wait:12000, tip:IS_WECHAT_UA ? '加载中…' : '切换备用线路中…'};
-  const routes = (IS_WECHAT_UA
-    ? [proxyRoute, ...directRoutes]
-    : [...directRoutes, proxyRoute]).filter(r => r.src);
+  // 全环境统一 dy1 → dy2 → proxy：抖音直连优先，同源代理兜底
+  const directWait = IS_WECHAT_UA ? 4000 : 7000;
+  const routes = [
+    {source:'dy1',   src:d.video.url,       wait:directWait, tip:'加载中…'},
+    {source:'dy2',   src:d.video.alt_url,   wait:directWait, tip:'切换线路中…'},
+    {source:'proxy', src:d.video.proxy_url, wait:12000,      tip:'切换备用线路中…'},
+  ].filter(r => r.src);
 
   const v = document.createElement('video');
   v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
@@ -462,6 +462,7 @@ function startPlay(){
     idx++;
     const myAttempt = ++attempt;
     const r = routes[idx];
+    track('play_try', {source:r.source, stage:'start'});    // 全量尝试日志（后台「播放尝试日志」）
     if (idx > 0) track('fallback', {source:r.source, stage:'start'});
     ld.textContent = r.tip;
     t0 = Date.now();

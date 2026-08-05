@@ -143,6 +143,22 @@ tr:last-child td{border-bottom:none}
 #toast.err{border-color:var(--danger-border); color:var(--danger)}
 .spin{width:14px;height:14px;border-radius:50%;border:2px solid rgba(128,128,128,.35);border-top-color:var(--accent);display:inline-block;animation:sp .7s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
+
+/* 代理列表：工具栏 / 批量条 / 分页 / 排序 */
+.list-toolbar{display:flex; gap:8px; padding:13px 20px; border-bottom:1px solid var(--border); flex-wrap:wrap}
+.list-toolbar select{width:auto; min-width:108px}
+.list-toolbar input{width:auto; flex:1; min-width:180px}
+.batch-bar{display:none; align-items:center; gap:8px; padding:10px 20px; border-bottom:1px solid var(--border); background:var(--surface-2); flex-wrap:wrap}
+.batch-bar.show{display:flex}
+.batch-bar>span{font-size:13px; color:var(--muted); font-weight:600; margin-right:4px}
+th input[type=checkbox],td input[type=checkbox]{width:15px; height:15px; cursor:pointer; accent-color:var(--accent)}
+th.sortable{cursor:pointer; user-select:none}
+th.sortable:hover{color:var(--text)}
+.pager{display:flex; gap:8px; justify-content:flex-end; align-items:center; padding:12px 20px; font-size:12.5px; color:var(--muted)}
+.pager button{padding:3px 11px; border-radius:7px; border:1px solid var(--border); background:var(--surface); font-size:12.5px}
+.pager button:hover{border-color:var(--border-strong)}
+.pager button:disabled{opacity:.4; cursor:not-allowed}
+.group-title{grid-column:1/-1; font-size:12.5px; font-weight:700; color:var(--muted); padding:12px 0 2px}
 </style>
 </head>
 <body>
@@ -173,7 +189,9 @@ tr:last-child td{border-bottom:none}
   <div class="dash" id="dashView">
     <div class="admin-tabs">
       <button class="admin-tab active" data-view="overview">数据概览</button>
-      <button class="admin-tab" data-view="proxy">代理池</button>
+      <button class="admin-tab" data-view="proxies">代理列表</button>
+      <button class="admin-tab" data-view="proxyset">代理设置</button>
+      <button class="admin-tab" data-view="keys">API 密钥</button>
       <button class="admin-tab" data-view="users">用户</button>
       <button class="admin-tab" data-view="shares">分享页</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
@@ -189,8 +207,8 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
 
-    <!-- 代理池 + API -->
-    <div class="view" id="v-proxy" style="display:none">
+    <!-- 代理列表 -->
+    <div class="view" id="v-proxies" style="display:none">
     <div class="stat-row" id="statRow"></div>
 
     <!-- 添加 -->
@@ -232,24 +250,61 @@ tr:last-child td{border-bottom:none}
           <button class="btn btn-ghost btn-sm" id="refreshBtn">刷新</button>
         </div>
       </div>
+      <div class="list-toolbar">
+        <select id="fStatus">
+          <option value="">全部状态</option>
+          <option value="ok">正常</option>
+          <option value="bad">异常</option>
+          <option value="banned">已封禁</option>
+          <option value="auto_off">自动停用</option>
+          <option value="off">手动停用</option>
+          <option value="unknown">未测</option>
+        </select>
+        <select id="fProto">
+          <option value="">全部协议</option>
+          <option>socks5</option><option>socks5h</option><option>socks4</option>
+          <option>socks4a</option><option>http</option><option>https</option>
+        </select>
+        <input id="fSearch" type="text" placeholder="搜索地址 / 出口 IP / 备注，回车生效">
+      </div>
+      <div class="batch-bar" id="batchBar">
+        <span id="batchCount"></span>
+        <button class="btn btn-ghost btn-sm" id="batchTest">批量测速</button>
+        <button class="btn btn-ghost btn-sm" id="batchEnable">启用</button>
+        <button class="btn btn-ghost btn-sm" id="batchDisable">禁用</button>
+        <button class="btn btn-ghost btn-sm" id="batchDelete" style="color:var(--danger)">删除</button>
+        <button class="btn btn-ghost btn-sm" id="batchClear">清空选择</button>
+      </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>状态</th><th>代理地址</th><th>协议</th><th>出口 IP</th><th>延迟</th><th>抖音</th><th>成功/失败</th><th>启用</th><th></th>
+          <th style="width:32px"><input type="checkbox" id="selAll" title="全选当前筛选结果"></th>
+          <th>状态</th><th>代理地址</th><th>协议</th><th>出口 IP</th>
+          <th class="sortable" data-sort="latency">延迟</th>
+          <th>抖音</th>
+          <th class="sortable" data-sort="okrate">成功/失败</th>
+          <th>启用</th><th></th>
         </tr></thead>
         <tbody id="proxyBody"></tbody>
       </table></div>
       <div class="empty" id="emptyRow" style="display:none">还没有代理。添加后，所有出站请求将自动走代理。</div>
+      <div class="pager" id="pager" style="display:none"></div>
     </div>
 
+    </div><!-- /v-proxies -->
+
+    <!-- 代理设置 -->
+    <div class="view" id="v-proxyset" style="display:none">
     <!-- 设置 -->
     <div class="panel">
       <div class="panel-head"><div><h3>代理策略与安全</h3></div></div>
       <div class="panel-body">
         <div class="settings-grid">
+          <div class="group-title">出站安全</div>
           <div class="setting-row">
             <div class="label"><b>禁止服务器直连抖音</b><p>开启后所有抖音请求只走代理，无可用代理即报错，绝不暴露服务器 IP（建议常开）</p></div>
             <label class="switch ctl"><input type="checkbox" id="s_force"><span class="slider"></span></label>
           </div>
+          <div class="group-title">轮换与解析</div>
           <div class="setting-row">
             <div class="label"><b>轮换策略</b><p>轮询 / 随机 / 最少失败优先</p></div>
             <select class="ctl" id="s_rotation">
@@ -273,6 +328,7 @@ tr:last-child td{border-bottom:none}
               <option value="socks4a">socks4a</option>
             </select>
           </div>
+          <div class="group-title">健康检查</div>
           <div class="setting-row">
             <div class="label"><b>自动健康检查</b><p>后台定时测速，失败自动禁用、恢复自愈</p></div>
             <label class="switch ctl"><input type="checkbox" id="s_autohealth"><span class="slider"></span></label>
@@ -319,7 +375,10 @@ tr:last-child td{border-bottom:none}
       </div>
     </div>
 
+    </div><!-- /v-proxyset -->
+
     <!-- 开放 API 密钥 + 计费 -->
+    <div class="view" id="v-keys" style="display:none">
     <div class="panel">
       <div class="panel-head">
         <div><h3>开放 API 密钥 & 计费</h3><div class="desc">异步调用 <code>POST /api/v1/jobs</code>，请求头带 <code>X-API-Key</code>；免费网页端按用途摘要每日 <b id="freeLimit">—</b> 次</div></div>
@@ -341,7 +400,7 @@ tr:last-child td{border-bottom:none}
         <div class="empty" id="keyEmpty" style="display:none">还没有 API 密钥。生成后即可对外提供付费调用。</div>
       </div>
     </div>
-    </div><!-- /v-proxy -->
+    </div><!-- /v-keys -->
 
     <!-- 用户 -->
     <div class="view" id="v-users" style="display:none">
@@ -377,7 +436,7 @@ tr:last-child td{border-bottom:none}
 
       <div class="panel">
         <div class="panel-head">
-          <div><h3>播放诊断</h3><div class="desc">按线路统计成功率 · 看清微信内哪些视频能播、哪条抖音域名更通。<b>proxy 走服务器带宽，占比要盯住</b></div></div>
+          <div><h3>播放诊断</h3><div class="desc">按线路统计成功率 · 微信内外均为 dy1→dy2→proxy 直连优先。<b>proxy 走服务器带宽，占比要盯住</b></div></div>
           <div style="display:flex;gap:8px">
             <select id="playHours" style="width:110px">
               <option value="24">近 24 小时</option>
@@ -408,13 +467,35 @@ tr:last-child td{border-bottom:none}
       </div>
 
       <div class="panel">
-        <div class="panel-head"><div><h3>最近播放失败明细</h3>
-          <div class="desc">带 UA，用来定位是哪个机型 / 内核播不了</div></div></div>
+        <div class="panel-head"><div><h3>播放尝试日志</h3>
+          <div class="desc">每条线路的尝试 / 成功 / 失败全量明细，带粗粒度 UA 定位机型 / 内核</div></div></div>
         <div class="tbl-wrap"><table>
-          <thead><tr><th>时间</th><th>环境</th><th>短码</th><th>线路</th><th>阶段</th><th>耗时</th><th>细节</th><th>UA</th></tr></thead>
+          <thead><tr><th>时间</th><th>环境</th><th>短码</th><th>事件</th><th>线路</th><th>阶段</th><th>耗时</th><th>细节</th><th>UA</th></tr></thead>
           <tbody id="playRecentBody"></tbody>
         </table></div>
-        <div class="empty" id="playRecentEmpty" style="display:none">暂无失败记录。</div>
+        <div class="empty" id="playRecentEmpty" style="display:none">暂无播放尝试记录。</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <div><h3>转发流量统计</h3><div class="desc">经服务器 <code>/api/video</code> 同源转发的媒体流量（播放兜底 + 视频下载）· 浏览器直连抖音 CDN 的流量不经过服务器</div></div>
+          <div style="display:flex;gap:8px">
+            <select id="trafficDays" style="width:110px">
+              <option value="7">近 7 天</option>
+              <option value="30" selected>近 30 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="trafficRefresh">刷新</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="desc" id="trafficTotal" style="margin-bottom:9px"></div>
+          <div class="tbl-wrap"><table>
+            <thead><tr><th>日期</th><th>播放转发</th><th>播放流量</th><th>下载转发</th><th>下载流量</th><th>合计流量</th></tr></thead>
+            <tbody id="trafficBody"></tbody>
+          </table></div>
+          <div class="empty" id="trafficEmpty" style="display:none">还没有经服务器转发的媒体流量。</div>
+        </div>
       </div>
 
       <div class="panel">
@@ -519,7 +600,8 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   const v = t.dataset.view; $('#v-'+v).style.display='';
   if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
-  else if(v==='proxy') loadMihomo();
+  else if(v==='proxyset') loadMihomo(); else if(v==='keys') loadKeys();
+  else if(v==='proxies') load();
 });
 
 /* ---------------- 分享页管理 ---------------- */
@@ -550,7 +632,7 @@ async function loadShares(){
         <button class="btn btn-ghost btn-sm" style="color:var(--danger)" onclick="delShare('${esc(s.id)}')">删除</button>
       </td></tr>`;
   }).join('');
-  loadReports(); loadShareConfig(); loadPlayStats();
+  loadReports(); loadShareConfig(); loadPlayStats(); loadTraffic();
 }
 async function takedownShare(sid){
   if(!confirm('下架后该分享页立即不可访问（用于处理侵权投诉）。确定？')) return;
@@ -567,7 +649,8 @@ $('#shareSearch').onkeydown = e => { if(e.key === 'Enter') loadShares(); };
 
 /* ---------------- 播放诊断 ----------------
    线路：dy1/dy2 是抖音自己的两个播放域名（浏览器直连，不花服务器带宽），
-   proxy 是服务器兜底。微信内两个抖音域名的可达性因机型/内核而异，这张表就是拿来看的。 */
+   proxy 是服务器兜底。微信内外统一 dy1→dy2→proxy 直连优先；
+   微信内两个抖音域名的可达性因机型/内核而异，这张表就是拿来看的。 */
 const PLAY_SRC = {dy1:'dy1 · aweme.snssdk.com', dy2:'dy2 · iesdouyin.com',
                   proxy:'proxy · 服务器兜底'};
 async function loadPlayStats(){
@@ -598,19 +681,49 @@ async function loadPlayStats(){
     <td class="tnum"><span class="badge bad">${b.fail}</span></td>
     <td class="tnum">${b.giveup ? '<span class="badge bad">' + b.giveup + '</span>' : '—'}</td></tr>`).join('');
 
-  $('#playRecentEmpty').style.display = d.recent.length ? 'none' : '';
-  $('#playRecentBody').innerHTML = d.recent.map(r => `<tr>
+  const KIND_LABEL = {play_try:'尝试', play_ok:'<span class="badge">成功</span>',
+                      play_fail:'<span class="badge bad">失败</span>'};
+  $('#playRecentEmpty').style.display = d.log.length ? 'none' : '';
+  $('#playRecentBody').innerHTML = d.log.map(r => `<tr>
     <td class="tnum">${ago2(r.ts)}</td>
     <td>${r.wechat ? '微信内' : '微信外'}</td>
-    <td class="mono">${esc(r.sid)}</td>
+    <td class="mono"><a href="/s/${esc(r.sid)}" target="_blank" rel="noopener">${esc(r.sid)}</a></td>
+    <td>${KIND_LABEL[r.kind] || esc(r.kind)}</td>
     <td class="mono">${esc(r.source || '—')}</td>
-    <td>${esc(r.stage)}</td>
+    <td>${esc(r.stage || '—')}</td>
     <td class="tnum">${r.ms ? r.ms + ' ms' : '—'}</td>
     <td class="mono" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.detail)}">${esc(r.detail || '—')}</td>
     <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.ua)}">${esc(r.ua || '')}</td></tr>`).join('');
 }
 $('#playRefresh').onclick = loadPlayStats;
 $('#playHours').onchange = loadPlayStats;
+
+/* ---------------- 转发流量 ----------------
+   只统计经 /api/video 同源转发的字节；浏览器直连抖音 CDN 不经过服务器。 */
+function fmtBytes(n){
+  n = Number(n) || 0;
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB','TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1){ n /= 1024; i++; }
+  return (i ? n.toFixed(n >= 100 ? 0 : 1) : n) + ' ' + u[i];
+}
+async function loadTraffic(){
+  const days = $('#trafficDays')?.value || '30';
+  let d; try{ d = await api('/api/admin/traffic-stats?days=' + days); }catch{ return; }
+  const t = d.totals;
+  $('#trafficTotal').innerHTML =
+    `近 ${d.days} 天合计：播放转发 <b>${t.play_requests}</b> 次 / <b>${fmtBytes(t.play_bytes)}</b>`
+    + ` · 下载 <b>${t.download_requests}</b> 次 / <b>${fmtBytes(t.download_bytes)}</b>`
+    + ` · 总流量 <b>${fmtBytes(t.play_bytes + t.download_bytes)}</b>`;
+  $('#trafficEmpty').style.display = d.daily.length ? 'none' : '';
+  $('#trafficBody').innerHTML = d.daily.map(r => `<tr>
+    <td class="tnum">${r.date}</td>
+    <td class="tnum">${r.play_requests}</td><td class="tnum">${fmtBytes(r.play_bytes)}</td>
+    <td class="tnum">${r.download_requests}</td><td class="tnum">${fmtBytes(r.download_bytes)}</td>
+    <td class="tnum"><b>${fmtBytes(r.play_bytes + r.download_bytes)}</b></td></tr>`).join('');
+}
+$('#trafficRefresh').onclick = loadTraffic;
+$('#trafficDays').onchange = loadTraffic;
 
 async function loadReports(){
   let d; try{ d = await api('/api/admin/reports'); }catch{ return; }
@@ -724,10 +837,151 @@ const proto = u => (u.match(/^(\w+):\/\//)||[])[1] || 'http';
 const stripCred = u => u.replace(/\/\/[^@/]+@/, '//••••@');
 const ago = t => { if(!t) return '—'; const s=Math.floor(Date.now()/1000-t); if(s<60)return s+'秒前'; if(s<3600)return Math.floor(s/60)+'分前'; if(s<86400)return Math.floor(s/3600)+'时前'; return Math.floor(s/86400)+'天前'; };
 
+/* 代理列表：筛选 / 搜索 / 排序 / 分页 / 多选 */
+const PL = {status:'', proto:'', search:'', sort:'', asc:true, page:1, selected:new Set()};
+const PAGE_SIZE = 50;
+let _allProxies = [];
+
+function pStatus(p){
+  if(p.banned) return 'banned';
+  if(p.auto_off) return 'auto_off';
+  if(!p.enabled) return 'off';
+  if(p.fail>=3) return 'bad';
+  if(p.last_ok) return 'ok';
+  return 'unknown';
+}
+function filteredProxies(){
+  const q = PL.search.toLowerCase();
+  return _allProxies.filter(p =>
+    (!PL.status || pStatus(p)===PL.status) &&
+    (!PL.proto || proto(p.url)===PL.proto) &&
+    (!q || p.url.toLowerCase().includes(q) || (p.exit_ip||'').toLowerCase().includes(q)
+       || (p.note||'').toLowerCase().includes(q)));
+}
+function renderProxies(){
+  // 清掉已不存在的选中（避免幽灵选择）
+  const alive = new Set(_allProxies.map(p=>p.id));
+  PL.selected.forEach(id => { if(!alive.has(id)) PL.selected.delete(id); });
+
+  const list = filteredProxies();
+  if(PL.sort){
+    const okrate = x => { const t=x.ok+x.fail; return t ? x.ok/t : 0; };
+    list.sort((a,b)=>{
+      let va, vb;
+      if(PL.sort==='latency'){
+        if(a.latency_ms==null && b.latency_ms==null) return 0;
+        if(a.latency_ms==null) return 1;
+        if(b.latency_ms==null) return -1;
+        va=a.latency_ms; vb=b.latency_ms;
+      } else { va=okrate(a); vb=okrate(b); }
+      return PL.asc ? va-vb : vb-va;
+    });
+  }
+  document.querySelectorAll('th.sortable').forEach(th=>{
+    const base = th.dataset.sort==='latency' ? '延迟' : '成功/失败';
+    th.textContent = base + (PL.sort===th.dataset.sort ? (PL.asc?' ↑':' ↓') : '');
+  });
+
+  const pages = Math.max(1, Math.ceil(list.length/PAGE_SIZE));
+  if(PL.page>pages) PL.page=pages;
+  const slice = list.slice((PL.page-1)*PAGE_SIZE, PL.page*PAGE_SIZE);
+
+  $('#emptyRow').style.display = _allProxies.length ? 'none' : '';
+  if(!slice.length && _allProxies.length){
+    $('#proxyBody').innerHTML = '<tr><td colspan="10" class="empty">没有符合筛选条件的代理。</td></tr>';
+  } else {
+    $('#proxyBody').innerHTML = slice.map(p => {
+      const health = p.banned ? `<span class="badge bad" title="${esc(p.banned_reason||'IP 被封禁')}">已封禁</span>`
+        : p.auto_off ? `<span class="badge warn">自动停用</span>`
+        : p.fail>=3 ? `<span class="badge bad">异常</span>`
+        : p.last_ok ? `<span class="badge ok">正常</span>` : `<span class="badge idle">未测</span>`;
+      const dy = p.douyin_ok===true ? `<span class="badge ok">可达</span>`
+        : p.douyin_ok===false ? `<span class="badge bad">不可达</span>` : '—';
+      const managed = !!p.managed;
+      return `<tr>
+        <td>${managed ? '' : `<input type="checkbox" data-pid="${p.id}" ${PL.selected.has(p.id)?'checked':''}>`}</td>
+        <td><span class="dot ${p.enabled?'on':'off'}"></span>${health}${managed?' <span class="badge idle">托管</span>':''}</td>
+        <td class="url-cell mono" title="${esc(p.url)}">${esc(stripCred(p.url))}</td>
+        <td><span class="badge idle">${proto(p.url)}</span></td>
+        <td class="mono tnum">${p.exit_ip?esc(p.exit_ip):'—'}</td>
+        <td class="tnum">${p.latency_ms!=null?p.latency_ms+' ms':'—'}</td>
+        <td>${dy}</td>
+        <td class="tnum" title="最近使用 ${ago(p.last_used)}">${p.ok} / ${p.fail}</td>
+        <td>${managed ? '<span class="desc" title="由「代理设置 → 内置机场加速」管理">—</span>'
+          : `<label class="switch"><input type="checkbox" ${p.enabled?'checked':''} onchange="toggleProxy('${p.id}')"><span class="slider"></span></label>`}</td>
+        <td><div class="row-actions">
+          <button class="btn btn-ghost btn-sm" onclick="testProxy('${p.id}', this)">测速</button>
+          ${managed ? '' : `<button class="btn btn-ghost btn-sm" onclick="delProxy('${p.id}')" style="color:var(--danger)">删除</button>`}
+        </div></td></tr>`;
+    }).join('');
+  }
+  $('#proxyBody').querySelectorAll('input[data-pid]').forEach(cb => cb.onchange = () => {
+    cb.checked ? PL.selected.add(cb.dataset.pid) : PL.selected.delete(cb.dataset.pid);
+    renderBatchBar(); syncSelAll(list);
+  });
+  renderBatchBar(); syncSelAll(list); renderPager(list.length, pages);
+}
+function renderBatchBar(){
+  const n = PL.selected.size;
+  $('#batchBar').classList.toggle('show', n>0);
+  $('#batchCount').textContent = n ? `已选 ${n} 个` : '';
+}
+function syncSelAll(list){
+  const sel = $('#selAll');
+  const ids = list.filter(p=>!p.managed).map(p=>p.id);
+  const hit = ids.filter(id=>PL.selected.has(id)).length;
+  sel.checked = ids.length>0 && hit===ids.length;
+  sel.indeterminate = hit>0 && hit<ids.length;
+}
+function renderPager(total, pages){
+  const pg = $('#pager');
+  if(total<=PAGE_SIZE){ pg.style.display='none'; return; }
+  pg.style.display='';
+  pg.innerHTML = `<span>共 ${total} 个</span>
+    <button id="pgPrev" ${PL.page<=1?'disabled':''}>‹ 上一页</button>
+    <span class="tnum">${PL.page} / ${pages}</span>
+    <button id="pgNext" ${PL.page>=pages?'disabled':''}>下一页 ›</button>`;
+  $('#pgPrev').onclick = () => { PL.page--; renderProxies(); };
+  $('#pgNext').onclick = () => { PL.page++; renderProxies(); };
+}
+$('#fStatus').onchange = e => { PL.status=e.target.value; PL.page=1; renderProxies(); };
+$('#fProto').onchange = e => { PL.proto=e.target.value; PL.page=1; renderProxies(); };
+$('#fSearch').oninput = e => { PL.search=e.target.value.trim(); PL.page=1; renderProxies(); };
+$('#selAll').onchange = e => {
+  const ids = filteredProxies().filter(p=>!p.managed).map(p=>p.id);
+  if(e.target.checked) ids.forEach(id=>PL.selected.add(id));
+  else ids.forEach(id=>PL.selected.delete(id));
+  renderProxies();
+};
+document.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
+  const k = th.dataset.sort;
+  if(PL.sort===k) PL.asc=!PL.asc; else { PL.sort=k; PL.asc=(k==='latency'); }
+  renderProxies();
+});
+async function batch(action, btn){
+  const ids = [...PL.selected];
+  if(!ids.length) return;
+  if(action==='delete' && !confirm(`确定删除选中的 ${ids.length} 个代理？（托管条目不受影响）`)) return;
+  let old;
+  if(btn){ old=btn.innerHTML; btn.innerHTML='<span class="spin"></span>'; btn.disabled=true; }
+  try{
+    const r = await api('/api/admin/proxies/batch', {method:'POST', body:JSON.stringify({action, ids})});
+    if(action==='test') toast(`测速完成：${r.ok}/${r.total} 个可用`);
+    else toast(`已处理 ${r.affected} 个`);
+    if(action==='delete') PL.selected.clear();
+    load();
+  }catch(err){ toast(err.message, true); }
+  finally{ if(btn){ btn.innerHTML=old; btn.disabled=false; } }
+}
+$('#batchTest').onclick = e => batch('test', e.currentTarget);
+$('#batchEnable').onclick = () => batch('enable');
+$('#batchDisable').onclick = () => batch('disable');
+$('#batchDelete').onclick = () => batch('delete');
+$('#batchClear').onclick = () => { PL.selected.clear(); renderProxies(); };
+
 async function load(){
   let s;
   try { s = await api('/api/admin/state'); } catch(err){ return; }
-  loadKeys(); loadMihomo();
   const st = s.stats, en = s.proxies.filter(p=>p.enabled).length,
         banned = s.proxies.filter(p=>p.banned).length;
   $('#statRow').innerHTML = `
@@ -749,28 +1003,8 @@ async function load(){
   $('#s_reach').checked = !!g.test_reach_douyin;
 
   // table
-  $('#emptyRow').style.display = s.proxies.length ? 'none' : '';
-  $('#proxyBody').innerHTML = s.proxies.map(p => {
-    const health = p.banned ? `<span class="badge bad" title="${esc(p.banned_reason||'IP 被封禁')}">已封禁</span>`
-      : p.auto_off ? `<span class="badge warn">自动停用</span>`
-      : p.fail>=3 ? `<span class="badge bad">异常</span>`
-      : p.last_ok ? `<span class="badge ok">正常</span>` : `<span class="badge idle">未测</span>`;
-    const dy = p.douyin_ok===true ? `<span class="badge ok">可达</span>`
-      : p.douyin_ok===false ? `<span class="badge bad">不可达</span>` : '—';
-    return `<tr>
-      <td><span class="dot ${p.enabled?'on':'off'}"></span>${health}</td>
-      <td class="url-cell mono" title="${esc(p.url)}">${esc(stripCred(p.url))}</td>
-      <td><span class="badge idle">${proto(p.url)}</span></td>
-      <td class="mono tnum">${p.exit_ip?esc(p.exit_ip):'—'}</td>
-      <td class="tnum">${p.latency_ms!=null?p.latency_ms+' ms':'—'}</td>
-      <td>${dy}</td>
-      <td class="tnum" title="最近使用 ${ago(p.last_used)}">${p.ok} / ${p.fail}</td>
-      <td><label class="switch"><input type="checkbox" ${p.enabled?'checked':''} onchange="toggleProxy('${p.id}')"><span class="slider"></span></label></td>
-      <td><div class="row-actions">
-        <button class="btn btn-ghost btn-sm" onclick="testProxy('${p.id}', this)">测速</button>
-        <button class="btn btn-ghost btn-sm" onclick="delProxy('${p.id}')" style="color:var(--danger)">删除</button>
-      </div></td></tr>`;
-  }).join('');
+  _allProxies = s.proxies;
+  renderProxies();
 }
 
 /* 预览解析 */

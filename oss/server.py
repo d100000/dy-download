@@ -20,6 +20,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 from urllib import error as urlerr
 from urllib import parse as urlparse
 from urllib import request as urlreq
@@ -31,7 +32,10 @@ from pydantic import BaseModel
 
 UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 "
       "(KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1")
-CDN_HEADERS = {"Referer": "https://www.douyin.com/"}
+CDN_HEADERS = {
+    "Referer": "https://www.douyin.com/",
+    "Accept-Encoding": "identity",
+}
 MEDIA_HOST_SUFFIXES = (
     "douyinvod.com", "iesdouyin.com", "snssdk.com", "ibytedtos.com",
     "amemv.com", "zjcdn.com", "douyincdn.com", "bytecdn.cn",
@@ -90,9 +94,26 @@ def _load_app_secret() -> bytes:
 
 
 APP_SECRET = _load_app_secret()
+
+
+def _clamped_env_int(name: str, default: int,
+                     minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 MEDIA_TOKEN_TTL = max(300, min(86400, int(os.environ.get("MEDIA_TOKEN_TTL", "43200"))))
 MEDIA_REQUESTS_PER_MIN = max(1, int(os.environ.get("MEDIA_REQUESTS_PER_MIN", "120")))
 MEDIA_MAX_CONCURRENT = max(1, int(os.environ.get("MEDIA_MAX_CONCURRENT", "6")))
+MEDIA_RESUME_MAX_ATTEMPTS = _clamped_env_int(
+    "MEDIA_RESUME_MAX_ATTEMPTS", 64, 1, 256)
+MEDIA_RESUME_MAX_SECONDS = _clamped_env_int(
+    "MEDIA_RESUME_MAX_SECONDS", 3600, 30, 7200)
+MEDIA_RESUME_MAX_FAILURES = _clamped_env_int(
+    "MEDIA_RESUME_MAX_FAILURES", 8, 2, 16)
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
 TRUST_PROXY_HOPS = max(1, int(os.environ.get("TRUST_PROXY_HOPS", "1")))
 
@@ -350,7 +371,7 @@ def parse_share(text):
     filename = f"{base}.mp4"
     cover = (next(_find(v.get("cover") or {}, "url_list"), None) or [""])[0]
     res.update({"duration_ms": v.get("duration") or 0, "cover": cover,
-                "video": {"url": f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid_value}&ratio=720p&line=0" if vid_value else "",
+                "video": {"url": f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid_value}&ratio=1080p&line=0" if vid_value else "",
                           "proxy_url": _video_url(vid_value) if vid_value else "",
                           "download_url": _video_url(
                               vid_value, filename, download=True) if vid_value else "",
@@ -378,6 +399,237 @@ def _stream(r, finalize, chunk=256 * 1024):
         finalize()
 
 
+def _parse_content_range(value: str):
+    """解析单段 Content-Range，返回 (start, end, total|None)。"""
+    match = re.fullmatch(
+        r"bytes\s+(\d+)-(\d+)/(\d+|\*)", (value or "").strip(),
+        flags=re.IGNORECASE)
+    if not match:
+        return None
+    start, end = int(match.group(1)), int(match.group(2))
+    total = None if match.group(3) == "*" else int(match.group(3))
+    if end < start or (total is not None and (total <= 0 or end >= total)):
+        return None
+    return start, end, total
+
+
+def _video_response_shape(response, requested_range: str):
+    """校验上游 Range 语义并返回绝对边界和预期响应字节数。"""
+    status = (response.status if hasattr(response, "status")
+              else response.getcode())
+    content_range = _parse_content_range(
+        response.headers.get("Content-Range") or "")
+    raw_length = (response.headers.get("Content-Length") or "").strip()
+    if raw_length and not re.fullmatch(r"\d+", raw_length):
+        raise ValueError("invalid video Content-Length")
+    content_length = int(raw_length) if raw_length else None
+
+    if requested_range:
+        if status != 206 or content_range is None:
+            raise ValueError("video upstream did not honor Range")
+        start, end, total = content_range
+        expected = end - start + 1
+        if content_length is not None and content_length != expected:
+            raise ValueError("video range length mismatch")
+
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", requested_range.strip())
+        if not match:
+            raise ValueError("invalid requested video Range")
+        req_start, req_end = match.groups()
+        if req_start:
+            if start != int(req_start):
+                raise ValueError("video range start mismatch")
+            if req_end:
+                wanted_end = int(req_end)
+                if total is not None:
+                    wanted_end = min(wanted_end, total - 1)
+                if end != wanted_end:
+                    raise ValueError("video range end mismatch")
+            elif total is not None and end != total - 1:
+                raise ValueError("open video range ended early")
+        else:
+            suffix = int(req_end)
+            if total is None or end != total - 1:
+                raise ValueError("invalid suffix video range")
+            if start != max(0, total - suffix):
+                raise ValueError("video suffix range mismatch")
+        return status, start, end, total, expected
+
+    if status != 200:
+        raise ValueError("unexpected partial response for full video")
+    if content_range is not None:
+        raise ValueError("unexpected Content-Range for full video")
+    if content_length is None:
+        return status, 0, None, None, None
+    return status, 0, content_length - 1, content_length, content_length
+
+
+class _ResumeBudgetExceeded(Exception):
+    pass
+
+
+class _ResumableVideoStream:
+    """上游提前 EOF/读取异常时从已发送字节的精确偏移续传。"""
+    _MAX_CONSECUTIVE_RESUME_FAILURES = MEDIA_RESUME_MAX_FAILURES
+    _MAX_TOTAL_RESUME_ATTEMPTS = MEDIA_RESUME_MAX_ATTEMPTS
+    _MAX_RESUME_SECONDS = MEDIA_RESUME_MAX_SECONDS
+
+    def __init__(self, vid: str, initial, request_headers: dict,
+                 start: int, end: Optional[int], total: Optional[int],
+                 expected: Optional[int], chunk: int = 256 * 1024):
+        self.vid = vid
+        self.request_headers = dict(request_headers)
+        self.start = start
+        self.end = end
+        self.total = total
+        self.expected = expected
+        self.chunk = chunk
+        self.sent = 0
+        self.current = initial
+        self.closed = False
+        self._lock = threading.Lock()
+        self._on_close = None
+        self._resume_attempts = 0
+        self._resume_started = None
+
+    def set_on_close(self, callback) -> None:
+        self._on_close = callback
+
+    def _take_current(self):
+        with self._lock:
+            return None if self.closed else self.current
+
+    def _replace_current(self, replacement) -> bool:
+        with self._lock:
+            if self.closed:
+                accepted = False
+            else:
+                self.current = replacement
+                accepted = True
+        if not accepted:
+            _close_upstream(replacement)
+        return accepted
+
+    def _resume(self):
+        with self._lock:
+            if self.closed:
+                return None
+            now = time.monotonic()
+            if self._resume_started is None:
+                self._resume_started = now
+            if (self._resume_attempts >= self._MAX_TOTAL_RESUME_ATTEMPTS
+                    or now - self._resume_started
+                    >= self._MAX_RESUME_SECONDS):
+                raise _ResumeBudgetExceeded()
+            self._resume_attempts += 1
+        offset = self.start + self.sent
+        if self.end is not None and offset > self.end:
+            return None
+        headers = dict(self.request_headers)
+        headers["Range"] = (
+            f"bytes={offset}-{self.end}"
+            if self.end is not None else f"bytes={offset}-")
+
+        def validate(candidate):
+            status, start, end, total, expected = _video_response_shape(
+                candidate, headers["Range"])
+            if status != 206 or start != offset:
+                raise ValueError("resumed video range start mismatch")
+            if self.end is not None and end is not None and end > self.end:
+                raise ValueError("resumed video range exceeded response")
+            if self.total is not None and total != self.total:
+                raise ValueError("video size changed while resuming")
+            if expected is not None and self.expected is not None:
+                if expected > self.expected - self.sent:
+                    raise ValueError("resumed video range is too long")
+
+        replacement = _open_video_upstream(
+            self.vid, headers, validator=validate)
+        if (time.monotonic() - self._resume_started
+                >= self._MAX_RESUME_SECONDS):
+            _close_upstream(replacement)
+            raise _ResumeBudgetExceeded()
+        if not self._replace_current(replacement):
+            return None
+        return replacement
+
+    def close(self) -> None:
+        with self._lock:
+            if self.closed:
+                return
+            self.closed = True
+            current, self.current = self.current, None
+        if current is not None:
+            _close_upstream(current)
+
+    def __iter__(self):
+        consecutive_failures = 0
+        try:
+            while self.expected is None or self.sent < self.expected:
+                current = self._take_current()
+                if current is None:
+                    break
+                remaining = (
+                    self.chunk if self.expected is None
+                    else min(self.chunk, self.expected - self.sent))
+                try:
+                    block = current.read(remaining)
+                except Exception as exc:
+                    # IncompleteRead 等异常携带的 partial 尚未返回给调用者；
+                    # 先发送并推进偏移，防止续传重复这些字节。
+                    partial = getattr(exc, "partial", b"")
+                    block = bytes(partial) if isinstance(
+                        partial, (bytes, bytearray, memoryview)) else b""
+                    if self.expected is not None:
+                        block = block[:self.expected - self.sent]
+                    if block:
+                        self.sent += len(block)
+                        consecutive_failures = 0
+                        yield block
+                    if self.expected is None or self.sent >= self.expected:
+                        break
+                    _close_upstream(current)
+                    consecutive_failures += 1
+                else:
+                    if block:
+                        if self.expected is not None:
+                            block = block[:self.expected - self.sent]
+                        self.sent += len(block)
+                        consecutive_failures = 0
+                        yield block
+                        continue
+                    if self.expected is None or self.sent >= self.expected:
+                        break
+                    _close_upstream(current)
+                    consecutive_failures += 1
+
+                if (consecutive_failures
+                        > self._MAX_CONSECUTIVE_RESUME_FAILURES):
+                    raise OSError(
+                        "video upstream repeatedly ended early") from None
+                while True:
+                    try:
+                        resumed = self._resume()
+                        break
+                    except _ResumeBudgetExceeded:
+                        raise OSError(
+                            "video upstream resume budget exhausted") from None
+                    except Exception:
+                        consecutive_failures += 1
+                        if (consecutive_failures
+                                > self._MAX_CONSECUTIVE_RESUME_FAILURES):
+                            raise OSError(
+                                "video upstream resume failed") from None
+                if resumed is None:
+                    break
+        finally:
+            callback = self._on_close
+            if callback:
+                callback()
+            else:
+                self.close()
+
+
 def _media_host_allowed(url: str) -> bool:
     try:
         parsed = urlparse.urlsplit(url)
@@ -398,11 +650,11 @@ def _close_upstream(response) -> None:
         pass
 
 
-def _open_video_upstream(vid: str, headers: dict):
+def _open_video_upstream(vid: str, headers: dict, validator=None):
     """主播放域名失效、返回错误页或临时 5xx 时自动切换备用域名。"""
     urls = (
-        f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0",
-        f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=720p&line=0",
+        f"https://aweme.snssdk.com/aweme/v1/play/?video_id={vid}&ratio=1080p&line=0",
+        f"https://www.iesdouyin.com/aweme/v1/play/?video_id={vid}&ratio=1080p&line=0",
     )
     for url in urls:
         response = None
@@ -427,6 +679,8 @@ def _open_video_upstream(vid: str, headers: dict):
                 raise ValueError(f"unexpected video content type {content_type}")
             if not _media_host_allowed(final_url):
                 raise ValueError("video redirect left the Douyin media allowlist")
+            if validator:
+                validator(response)
             accepted = True
             return response
         except urlerr.HTTPError as exc:
@@ -452,18 +706,25 @@ def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
         extra["Range"] = range_header
     r = None
     try:
-        r = _open_video_upstream(vid, extra)
+        r = _open_video_upstream(
+            vid, extra,
+            validator=lambda candidate: _video_response_shape(
+                candidate, range_header))
+        status, start, end, total, expected = _video_response_shape(
+            r, range_header)
         h = {"Accept-Ranges": "bytes", "Cache-Control": "private, no-store",
              "X-Content-Type-Options": "nosniff"}
-        for k in ("Content-Length", "Content-Range"):
-            if r.headers.get(k):
-                h[k] = r.headers[k]
+        if expected is not None:
+            h["Content-Length"] = str(expected)
+        if status == 206:
+            h["Content-Range"] = (
+                f"bytes {start}-{end}/"
+                f"{total if total is not None else '*'}")
         if dl:
             safe_name = re.sub(r'[\\/:*?"<>|\r\n]+', "_",
                                (name or "video.mp4"))[:80]
             h["Content-Disposition"] = (
                 "attachment; filename*=UTF-8''" + urlparse.quote(safe_name))
-        status = r.status if hasattr(r, "status") else r.getcode()
     except ApiError:
         if r is not None:
             _close_upstream(r)
@@ -474,9 +735,12 @@ def api_video(vid: str, request: Request, exp: str = "", sig: str = "",
             _close_upstream(r)
         _media_release(lease)
         raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
-    finalize = _media_finalizer(r, lease)
+    stream = _ResumableVideoStream(
+        vid, r, extra, start, end, total, expected)
+    finalize = _media_finalizer(stream, lease)
+    stream.set_on_close(finalize)
     return _MediaStreamingResponse(
-        _stream(r, finalize), finalize=finalize, status_code=status,
+        stream, finalize=finalize, status_code=status,
         media_type="video/mp4", headers=h)
 
 
