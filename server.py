@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.12.1"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -5300,6 +5300,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
         return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
 
     return f'''<title>{esc(meta["title"])}</title>
+<meta name="app-version" content="{APP_VERSION}">
 <meta name="description" content="{esc(meta["desc"])}">
 <meta name="keywords" content="{esc(meta["kw"])}">
 <meta name="robots" content="index,follow,max-image-preview:large">
@@ -5432,6 +5433,8 @@ def api_docs(request: Request):
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin, "/api-docs"))
                 .replace("{{ORIGIN}}", origin))
     resp = HTMLResponse(html)
+    # no-cache = 每次请求都回源校验（配合 ETag 未变返回 304），部署后用户无需强刷
+    resp.headers["Cache-Control"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -5447,6 +5450,7 @@ def transcript_page(request: Request):
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin, "/transcript"))
                 .replace("{{ORIGIN}}", origin))
     resp = HTMLResponse(html)
+    resp.headers["Cache-Control"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -5577,12 +5581,15 @@ def auth_logout(request: Request):
 
 @app.get("/api-console")
 def api_console():
-    return FileResponse("static/api-console.html")
+    # FileResponse 自带 ETag/Last-Modified；no-cache 强制每次回源校验，部署即生效
+    return FileResponse("static/api-console.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/admin_d")
 def admin_page():
-    return FileResponse("static/admin.html")
+    return FileResponse("static/admin.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
