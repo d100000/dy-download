@@ -835,11 +835,11 @@ $('#prioSave').onclick = async e => {
 };
 
 /* ---------------- 播放请求日志（分页） ---------------- */
-const PL = {page:1};
+const PLL = {page:1};   // 注意：代理列表已占用 PL 变量名，这里用 PLL
 const PL_KIND = {play_try:['尝试','idle'], play_ok:['成功','ok'], play_fail:['失败','bad']};
 async function loadPlayLogs(){
   const q = new URLSearchParams({
-    page: PL.page, size: $('#pl_size').value,
+    page: PLL.page, size: $('#pl_size').value,
     result: $('#pl_result').value, wechat: $('#pl_wechat').value,
     sid: $('#pl_sid').value.trim(),
   });
@@ -865,12 +865,12 @@ async function loadPlayLogs(){
   $('#pl_info').textContent = `第 ${d.page}/${d.pages} 页 · 共 ${d.total} 条`;
   $('#pl_prev').disabled = d.page <= 1;
   $('#pl_next').disabled = d.page >= d.pages;
-  PL.page = d.page;
+  PLL.page = d.page;
 }
-$('#pl_search').onclick = () => { PL.page = 1; loadPlayLogs(); };
-$('#pl_prev').onclick = () => { PL.page--; loadPlayLogs(); };
-$('#pl_next').onclick = () => { PL.page++; loadPlayLogs(); };
-$('#pl_size').onchange = () => { PL.page = 1; loadPlayLogs(); };
+$('#pl_search').onclick = () => { PLL.page = 1; loadPlayLogs(); };
+$('#pl_prev').onclick = () => { PLL.page--; loadPlayLogs(); };
+$('#pl_next').onclick = () => { PLL.page++; loadPlayLogs(); };
+$('#pl_size').onchange = () => { PLL.page = 1; loadPlayLogs(); };
 
 /* ---------------- 分享页管理 ---------------- */
 async function loadShares(){
