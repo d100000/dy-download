@@ -459,7 +459,9 @@ function startPlay(){
     if (isActuallyPlaying()){ onOK(myAttempt); return; }
     const e = v.error;
     const detail = (e ? 'code=' + e.code : 'no-error') + ' rs=' + v.readyState + ' ns=' + v.networkState;
-    track('play_fail', {source:routes[idx].source, stage, detail, ms:Date.now()-t0});
+    // 上报失败后链上下一条将重试的线路（无则空 = 下一条是放弃），供后台播放日志诊断
+    track('play_fail', {source:routes[idx].source, stage, detail, ms:Date.now()-t0,
+                        next:(routes[idx+1] || {}).source || ''});
     next();
   };
 

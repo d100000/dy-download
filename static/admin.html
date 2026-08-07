@@ -130,6 +130,8 @@ tr:last-child td{border-bottom:none}
 .prio-item .pn{font-weight:600; font-size:14px}
 .prio-item .pd{font-size:12px; color:var(--muted)}
 .prio-item .idx{margin-left:auto; font-size:12px; color:var(--faint); font-variant-numeric:tabular-nums}
+.pager{display:flex; align-items:center; gap:10px; margin-top:12px}
+.pager-info{font-size:12.5px; color:var(--muted); font-variant-numeric:tabular-nums}
 .switch{position:relative; display:inline-block; width:42px; height:24px; flex:none}
 .switch input{opacity:0; width:0; height:0}
 .slider{position:absolute; inset:0; background:var(--surface-2); border:1px solid var(--border); border-radius:99px; transition:.2s}
@@ -202,6 +204,7 @@ th.sortable:hover{color:var(--text)}
       <button class="admin-tab" data-view="keys">API 密钥</button>
       <button class="admin-tab" data-view="users">用户</button>
       <button class="admin-tab" data-view="shares">分享页</button>
+      <button class="admin-tab" data-view="playlogs">播放日志</button>
       <button class="admin-tab" data-view="atc">增强线路</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
     </div>
@@ -635,6 +638,48 @@ th.sortable:hover{color:var(--text)}
       </div>
     </div>
     </div><!-- /v-atc -->
+
+    <!-- 播放请求日志（分页） -->
+    <div class="view" id="v-playlogs" style="display:none">
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>播放请求日志</h3>
+          <div class="desc">逐条记录播放的浏览器环境、线路、成败与失败后的下一条重试线路。数据落库（share_events），按保留期自动清理。</div></div>
+      </div>
+      <div class="panel-body">
+        <div class="row-actions" style="margin-bottom:12px; flex-wrap:wrap">
+          <select class="ctl" id="pl_result">
+            <option value="">全部结果</option>
+            <option value="try">仅尝试</option>
+            <option value="ok">仅成功</option>
+            <option value="fail">仅失败</option>
+          </select>
+          <select class="ctl" id="pl_wechat">
+            <option value="">微信内 + 外</option>
+            <option value="1">仅微信内</option>
+            <option value="0">仅微信外</option>
+          </select>
+          <input class="ctl" id="pl_sid" placeholder="按分享页短码过滤（可选）" style="width:180px">
+          <button class="btn btn-primary btn-sm" id="pl_search">查询</button>
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>时间</th><th>分享页</th><th>环境</th><th>事件</th><th>线路</th><th>失败后重试</th><th>细节</th><th>耗时</th></tr></thead>
+          <tbody id="pl_body"></tbody>
+        </table></div>
+        <div class="empty" id="pl_empty" style="display:none">没有符合条件的播放日志</div>
+        <div class="pager" id="pl_pager">
+          <button class="btn btn-ghost btn-sm" id="pl_prev">‹ 上一页</button>
+          <span class="pager-info" id="pl_info"></span>
+          <button class="btn btn-ghost btn-sm" id="pl_next">下一页 ›</button>
+          <select class="ctl" id="pl_size" style="margin-left:auto">
+            <option value="20">20 条/页</option>
+            <option value="50">50 条/页</option>
+            <option value="100">100 条/页</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    </div><!-- /v-playlogs -->
   </div>
 </div>
 
@@ -671,7 +716,7 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
   else if(v==='proxyset') loadMihomo(); else if(v==='keys') loadKeys();
-  else if(v==='atc') loadAtc();
+  else if(v==='atc') loadAtc(); else if(v==='playlogs') loadPlayLogs();
   else if(v==='proxies') load();
 });
 
@@ -788,6 +833,44 @@ $('#prioSave').onclick = async e => {
   } catch(err){ toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = old; }
 };
+
+/* ---------------- 播放请求日志（分页） ---------------- */
+const PL = {page:1};
+const PL_KIND = {play_try:['尝试','idle'], play_ok:['成功','ok'], play_fail:['失败','bad']};
+async function loadPlayLogs(){
+  const q = new URLSearchParams({
+    page: PL.page, size: $('#pl_size').value,
+    result: $('#pl_result').value, wechat: $('#pl_wechat').value,
+    sid: $('#pl_sid').value.trim(),
+  });
+  let d; try{ d = await api('/api/admin/play-logs?' + q); }catch{ return; }
+  const fmtT = ts => { const x = new Date(ts*1000), p=n=>String(n).padStart(2,'0');
+    return `${p(x.getMonth()+1)}-${p(x.getDate())} ${p(x.getHours())}:${p(x.getMinutes())}:${p(x.getSeconds())}`; };
+  $('#pl_body').innerHTML = d.rows.map(r => {
+    const k = PL_KIND[r.kind] || [r.kind,'idle'];
+    return `<tr>
+      <td class="tnum" style="white-space:nowrap">${fmtT(r.ts)}</td>
+      <td><span class="mono" style="font-size:12px">${esc(r.sid)}</span><br>
+        <span style="font-size:11.5px;color:var(--muted)">${esc((r.title||'').slice(0,18))}</span></td>
+      <td style="white-space:nowrap">${r.wechat?'<span class="badge ok">微信内</span>':'<span class="badge idle">微信外</span>'}
+        <span style="font-size:11.5px;color:var(--muted)">${esc(r.ua||'')}</span></td>
+      <td><span class="badge ${k[1]}">${k[0]}</span>${r.stage?` <span style="font-size:11px;color:var(--faint)">${esc(r.stage)}</span>`:''}</td>
+      <td class="mono" style="font-size:12.5px">${esc(r.source||'—')}</td>
+      <td class="mono" style="font-size:12.5px">${r.kind==='play_fail'?(esc(r.next_src)||'<span style="color:var(--danger)">无（放弃）</span>'):'—'}</td>
+      <td style="font-size:11.5px;color:var(--muted);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.detail)}">${esc(r.detail)||'—'}</td>
+      <td class="tnum" style="font-size:12px">${r.ms?(r.ms/1000).toFixed(1)+'s':'—'}</td>
+    </tr>`;
+  }).join('');
+  $('#pl_empty').style.display = d.rows.length ? 'none' : '';
+  $('#pl_info').textContent = `第 ${d.page}/${d.pages} 页 · 共 ${d.total} 条`;
+  $('#pl_prev').disabled = d.page <= 1;
+  $('#pl_next').disabled = d.page >= d.pages;
+  PL.page = d.page;
+}
+$('#pl_search').onclick = () => { PL.page = 1; loadPlayLogs(); };
+$('#pl_prev').onclick = () => { PL.page--; loadPlayLogs(); };
+$('#pl_next').onclick = () => { PL.page++; loadPlayLogs(); };
+$('#pl_size').onchange = () => { PL.page = 1; loadPlayLogs(); };
 
 /* ---------------- 分享页管理 ---------------- */
 async function loadShares(){

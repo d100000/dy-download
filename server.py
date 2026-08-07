@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.12.1"
+APP_VERSION = "1.13.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -367,7 +367,8 @@ with _db_lock:
                 _c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
     _ensure_columns("share_events", (
-        ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER")))
+        ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER"),
+        ("next_src", "TEXT")))   # 该线路失败后，链上下一条将重试的线路（dy1/dy2/atc/proxy）
     _ensure_columns("api_keys", (
         ("reserved_cents", "INTEGER DEFAULT 0"), ("deleted_at", "INTEGER")))
     _ensure_columns("jobs", (
@@ -2850,19 +2851,22 @@ def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
 
 
 def _share_event(request: Request, sid: str, kind: str, source: str = "",
-                 stage: str = "", detail: str = "", ms: int = 0):
-    """记录分享页埋点。播放类事件额外带 source/stage/detail/ms，用于诊断
-    「微信里哪些视频能播、走的哪条线路、失败在哪一步」（后台「播放诊断」看板）。"""
+                 stage: str = "", detail: str = "", ms: int = 0,
+                 next_src: str = ""):
+    """记录分享页埋点。播放类事件额外带 source/stage/detail/ms/next_src，用于诊断
+    「微信里哪些视频能播、走的哪条线路、失败在哪一步、失败后接着重试哪条」。
+    注意：只记线路名，不记带签名的完整媒体地址（隐私红线）。"""
     col = {"view": "views", "play": "plays",
            "download": "downloads", "cta": "cta_clicks"}.get(kind)
     try:
         if col:
             db_exec(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
         db_exec("INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp,"
-                "source,stage,detail,ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "source,stage,detail,ms,next_src) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (int(time.time()), sid, kind, "", _coarse_ua(request), "",
                  1 if _is_wechat(request) else 0, "",
-                 source[:24], stage[:24], detail[:120], int(ms or 0)))
+                 source[:24], stage[:24], detail[:120], int(ms or 0),
+                 next_src[:24]))
     except Exception:
         pass
 
@@ -2917,10 +2921,11 @@ def api_share_get(sid: str, request: Request):
 
 class ShareEventBody(BaseModel):
     kind: str
-    source: str = ""            # 播放线路：dy1(aweme.snssdk) / dy2(iesdouyin) / proxy(服务器兜底)
+    source: str = ""            # 播放线路：dy1(aweme.snssdk) / dy2(iesdouyin) / atc(增强) / proxy(服务器兜底)
     stage: str = ""             # 该线路的结果：start / ok / error / timeout / giveup
     detail: str = ""            # 失败细节（media error code、readyState 等）
     ms: int = 0                 # 从该线路开始到出结果的耗时
+    next: str = ""              # 失败后链上下一条将重试的线路名（无则空 = 已是最后一条）
 
 
 # 播放诊断事件：play_try/play_ok/play_fail 只写 share_events，不累加 shares 计数，
@@ -2933,7 +2938,7 @@ SHARE_EVENT_KINDS = ("view", "play", "download", "cta", "fallback",
 def api_share_event(sid: str, body: ShareEventBody, request: Request):
     if body.kind in SHARE_EVENT_KINDS:
         _share_event(request, sid, body.kind, body.source, body.stage,
-                     body.detail, body.ms)
+                     body.detail, body.ms, body.next)
     return {"ok": True}
 
 
@@ -4932,6 +4937,42 @@ def admin_play_stats(request: Request, hours: int = 24, limit: int = 60):
 
     return {"hours": hours, "lines": lines, "giveup": giveup,
             "bad": [dict(r) for r in bad], "log": [dict(r) for r in log]}
+
+
+@app.get("/api/admin/play-logs")
+def admin_play_logs(request: Request, page: int = 1, size: int = 20,
+                    result: str = "", wechat: str = "", sid: str = ""):
+    """播放请求日志（服务端分页）：记录每次播放的浏览器环境、线路、成败，
+    以及失败后将重试的下一条线路（next_src）。支撑「微信内是否播放成功」的逐条核查。
+    只存粗粒度环境与线路名，不存完整媒体签名地址（隐私红线）。"""
+    _require_admin(request)
+    page = max(1, int(page))
+    size = max(1, min(100, int(size)))
+    where = ["e.kind IN ('play_try','play_ok','play_fail')"]
+    params: list = []
+    if result in ("try", "ok", "fail"):
+        where.append("e.kind=?")
+        params.append("play_" + result)
+    if wechat in ("0", "1"):
+        where.append("e.wechat=?")
+        params.append(int(wechat))
+    if sid.strip():
+        where.append("e.sid=?")
+        params.append(sid.strip()[:20])
+    cond = " AND ".join(where)
+    total = db_exec(f"SELECT COUNT(*) FROM share_events e WHERE {cond}",
+                    tuple(params), "one")[0]
+    rows = db_exec(
+        "SELECT e.ts,e.sid,COALESCE(s.title,'(已删除)') title,e.kind,"
+        "COALESCE(e.source,'') source,COALESCE(e.stage,'') stage,"
+        "COALESCE(e.detail,'') detail,COALESCE(e.next_src,'') next_src,"
+        "e.ms,e.wechat,e.ua FROM share_events e "
+        "LEFT JOIN shares s ON s.id=e.sid "
+        f"WHERE {cond} ORDER BY e.ts DESC, e.id DESC LIMIT ? OFFSET ?",
+        (*params, size, (page - 1) * size), "all")
+    return {"rows": [dict(r) for r in rows], "total": total,
+            "page": page, "size": size,
+            "pages": max(1, (total + size - 1) // size)}
 
 
 @app.get("/api/admin/traffic-stats")

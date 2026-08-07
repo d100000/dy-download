@@ -1265,5 +1265,66 @@ class AtcEnhancementTests(unittest.TestCase):
         self.assertEqual(tuple(job), ("play", "pending"))
 
 
+class PlayLogTests(unittest.TestCase):
+    """播放请求日志：分页、筛选、失败后下一条重试线路（next_src）。"""
+
+    def setUp(self):
+        server.db_exec("DELETE FROM share_events")
+        self.admin = TestClient(server.app)
+        r = self.admin.post("/api/admin/login",
+                            json={"password": "test-only-admin-password"})
+        self.assertEqual(r.status_code, 200)
+
+    def tearDown(self):
+        server.db_exec("DELETE FROM share_events")
+
+    def _seed(self, n=25):
+        now = int(time.time())
+        for i in range(n):
+            kind = ("play_try", "play_ok", "play_fail")[i % 3]
+            server.db_exec(
+                "INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp,"
+                "source,stage,detail,ms,next_src) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (now - i, "sidABC1", kind, "", "wechat/8 ios", "",
+                 i % 2, "", "dy1", "error" if kind == "play_fail" else "start",
+                 "code=3" if kind == "play_fail" else "", 1200,
+                 "dy2" if kind == "play_fail" else ""))
+
+    def test_pagination_and_total(self):
+        self._seed(25)
+        r = self.admin.get("/api/admin/play-logs?page=1&size=10")
+        d = r.json()
+        self.assertEqual(d["total"], 25)
+        self.assertEqual(d["pages"], 3)
+        self.assertEqual(len(d["rows"]), 10)
+        r = self.admin.get("/api/admin/play-logs?page=3&size=10")
+        self.assertEqual(len(r.json()["rows"]), 5)
+
+    def test_filters(self):
+        self._seed(9)   # try/ok/fail 各 3，微信内外各半
+        d = self.admin.get("/api/admin/play-logs?result=fail").json()
+        self.assertEqual(d["total"], 3)
+        self.assertTrue(all(r["kind"] == "play_fail" for r in d["rows"]))
+        d = self.admin.get("/api/admin/play-logs?wechat=1").json()
+        self.assertTrue(all(r["wechat"] == 1 for r in d["rows"]))
+        d = self.admin.get("/api/admin/play-logs?sid=nope").json()
+        self.assertEqual(d["total"], 0)
+
+    def test_next_src_recorded_on_fail(self):
+        self._seed(3)
+        d = self.admin.get("/api/admin/play-logs?result=fail").json()
+        self.assertEqual(d["rows"][0]["next_src"], "dy2")
+        # 事件接口也接受 next 字段
+        c = TestClient(server.app)
+        r = c.post("/api/share/sidABC1/event",
+                   json={"kind": "play_fail", "source": "atc",
+                         "stage": "error", "detail": "code=4", "ms": 800,
+                         "next": "proxy"})
+        self.assertEqual(r.status_code, 200)
+        row = server.db_exec(
+            "SELECT next_src FROM share_events WHERE source='atc'", (), "one")
+        self.assertEqual(row[0], "proxy")
+
+
 if __name__ == "__main__":
     unittest.main()
