@@ -3092,9 +3092,10 @@ def _atc_cfg() -> dict:
     except ValueError:
         daily = 5
     try:
-        ttl = max(600, min(86400, int(app_setting("atc_url_ttl", "7200"))))
+        # 实测 ATC 地址约 1 小时后 403（2026-08-07 实测），默认 1 小时并提前换线
+        ttl = max(600, min(86400, int(app_setting("atc_url_ttl", "3600"))))
     except ValueError:
-        ttl = 7200
+        ttl = 3600
     try:
         priority = json.loads(app_setting("share_play_priority", ""))
         if not (isinstance(priority, list)
