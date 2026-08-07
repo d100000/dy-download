@@ -142,20 +142,17 @@ h1 .hl{
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion: reduce){ .spinner{animation-duration:1.6s} }
 
-/* ---------- steps ---------- */
-.steps{display:flex; justify-content:center; gap:10px; margin-top:22px; flex-wrap:wrap}
-.steps{animation:riseIn .7s .3s cubic-bezier(.2,.7,.3,1) both}
-.step-chip{
-  display:flex; align-items:center; gap:8px; padding:7px 15px; border-radius:99px;
-  border:1px solid var(--border); background:color-mix(in srgb, var(--surface) 88%, transparent);
-  color:var(--muted); font-size:13px; transition:transform .18s, border-color .18s;
+/* ---------- 输入框内浮清空 ×（有内容时出现，不占按钮位）---------- */
+.clear-x{
+  position:absolute; top:10px; right:10px; width:26px; height:26px; border-radius:8px;
+  background:var(--surface-2); border:1px solid var(--border); color:var(--muted);
+  font-size:12px; display:grid; place-items:center; transition:color .15s, border-color .15s;
 }
-.step-chip:hover{transform:translateY(-2px); border-color:var(--border-strong)}
-.step-chip b{
-  width:18px; height:18px; border-radius:50%; background:var(--surface-2); color:var(--text);
-  display:grid; place-items:center; font-size:11px; font-weight:600;
-  font-variant-numeric:tabular-nums;
-}
+.clear-x:hover{color:var(--text); border-color:var(--border-strong)}
+/* 播放兜底提示（此前缺样式定义，裸奔） */
+.fallback-hint{font-size:12px; color:var(--faint); margin-top:8px; text-align:center}
+.fallback-hint a{color:var(--muted); text-decoration:underline}
+.fallback-hint a:hover{color:var(--text)}
 
 /* ---------- alert ---------- */
 .alert{
@@ -391,16 +388,43 @@ a.ghost-btn{text-decoration:none}
   backdrop-filter:blur(4px); font-variant-numeric:tabular-nums;
 }
 
-/* ---------- 信任徽章 ---------- */
-.trust-badges{display:flex; flex-wrap:wrap; justify-content:center; gap:8px; margin-top:20px;
-  animation:riseIn .7s .24s cubic-bezier(.2,.7,.3,1) both}
-.tb{
-  font-size:12.5px; font-weight:500; color:var(--muted);
-  background:color-mix(in srgb, var(--surface) 88%, transparent);
-  border:1px solid var(--border); padding:6px 14px; border-radius:99px;
-  transition:transform .18s cubic-bezier(.34,1.56,.64,1), color .18s, border-color .18s;
+/* ---------- 用户下拉菜单 ---------- */
+.user-menu{position:relative; display:flex; align-items:center}
+.user-drop{
+  position:absolute; top:calc(100% + 8px); right:0; min-width:150px; z-index:120;
+  background:var(--surface); border:1px solid var(--border); border-radius:12px;
+  box-shadow:var(--shadow); padding:6px; display:flex; flex-direction:column;
 }
-.tb:hover{transform:translateY(-2px); color:var(--text); border-color:var(--accent)}
+.user-drop button,.user-drop a{
+  text-align:left; padding:9px 12px; border-radius:8px; font-size:13.5px;
+  color:var(--text); text-decoration:none; background:none; border:none; cursor:pointer;
+}
+.user-drop button:hover,.user-drop a:hover{background:var(--surface-2)}
+
+/* ---------- 注册引导轻提示 / 文案提取 ---------- */
+.reg-tip{
+  margin-top:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  font-size:13px; color:var(--muted); background:var(--accent-soft);
+  border:1px solid var(--border); border-radius:11px; padding:10px 14px;
+}
+.reg-tip a{color:var(--accent); font-weight:600; text-decoration:none}
+.reg-tip button{margin-left:auto; color:var(--faint); font-size:12px; padding:2px 6px}
+.ts-box{margin-top:4px; border-top:1px dashed var(--border); padding-top:12px}
+.ts-head{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.ts-btn{
+  font-size:13.5px; font-weight:600; padding:9px 18px; border-radius:10px;
+  color:var(--accent); background:var(--accent-soft); border:1px solid var(--accent);
+  transition:transform .15s, box-shadow .15s;
+}
+.ts-btn:hover{transform:translateY(-1px); box-shadow:0 6px 16px -6px var(--accent-soft)}
+.ts-btn:disabled{opacity:.6; cursor:default; transform:none; box-shadow:none}
+.ts-note{font-size:12px; color:var(--faint)}
+.ts-result{margin-top:10px; font-size:13px; color:var(--text); background:var(--surface-2);
+  border:1px solid var(--border); border-radius:11px; padding:12px 14px; line-height:1.8;
+  max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-word}
+.ts-acts{margin-top:8px; display:flex; gap:8px; align-items:center}
+.ts-acts .ghost-btn{font-size:12.5px; padding:5px 12px}
+.ts-acts a{font-size:12.5px; color:var(--muted)}
 
 /* ---------- 滚动揭示 ---------- */
 .reveal{opacity:0; transform:translateY(24px); transition:opacity .6s ease, transform .6s cubic-bezier(.2,.7,.3,1)}
@@ -479,13 +503,9 @@ a.ghost-btn{text-decoration:none}
   .icon-btn{width:40px; height:40px}
   .hero{padding:30px 0 26px}
   .hero p{font-size:14px; margin-top:11px}
-  .trust-badges{gap:6px; margin-top:16px}
-  .tb{font-size:11.5px; padding:5px 11px}
   .composer{padding:13px 12px 10px; border-radius:16px; margin-top:22px}
   .composer textarea{font-size:16px; min-height:66px}         /* 16px 防止 iOS 聚焦自动缩放 */
   .composer-bar .primary-btn{padding:11px 22px}
-  .steps{gap:7px; margin-top:18px}
-  .step-chip{font-size:12px; padding:6px 12px}
   .card-body{padding:16px; gap:18px}
   .player-wrap{width:100%}
   .meta-row{gap:16px; padding:12px 0}
@@ -538,10 +558,12 @@ footer{
     <a class="nav-link" href="/api-docs" data-i18n="nav_api">API 接入</a>
     <button class="nav-user" id="authBtn" data-i18n="nav_login">登录 / 注册</button>
     <div class="user-menu" id="userMenu" style="display:none">
-      <button class="nav-link" id="mySharesBtn">我的分享</button>
-      <a class="nav-link" id="apiTabBtn" href="/api-console" data-i18n="nav_console">API 控制台</a>
-      <span class="user-email" id="userEmail"></span>
-      <button class="nav-link" id="logoutBtn" data-i18n="nav_logout">退出</button>
+      <button class="nav-user" id="userEmailBtn"><span id="userEmail"></span> ▾</button>
+      <div class="user-drop" id="userDrop" style="display:none">
+        <button id="mySharesBtn">我的分享</button>
+        <a href="/api-console" data-i18n="nav_console">API 控制台</a>
+        <button id="logoutBtn" data-i18n="nav_logout">退出</button>
+      </div>
     </div>
     <button class="lang-switch" id="langBtn" title="Language / 语言"><span id="langLabel">EN</span></button>
     <button class="icon-btn" id="themeBtn" title="切换主题 / Theme" aria-label="切换明暗主题">◐</button>
@@ -615,22 +637,13 @@ footer{
   <h1 data-i18n-html="hero_h1">粘贴分享链接<br>拿走<span class="hl">无水印</span>原片</h1>
   <p data-i18n="hero_sub">开源可审查 · 不保存媒体文件 · 承诺永不接广告 · 稳定下载</p>
   <p class="hero-share" data-i18n-html="hero_share">还能<strong>一键生成分享页</strong>——发给微信好友点开即看，无需安装抖音 App</p>
-  <div class="trust-badges">
-    <span class="tb" data-i18n="b_opensource">🔓 完全开源</span>
-    <span class="tb" data-i18n="b_privacy">🔒 最少必要数据</span>
-    <span class="tb" data-i18n="b_noads">🚫 永不接广告</span>
-    <span class="tb" data-i18n="b_stable">🛡 稳定可靠</span>
-    <span class="tb" data-i18n="b_nologin">👤 站内账号可选</span>
-    <span class="tb" data-i18n="b_share">↗ 一键分享</span>
-  </div>
 
   <div class="composer">
     <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴一条或多条抖音分享文案 / 链接——支持一次粘贴多条，系统会自动拆分出全部链接批量解析。&#10;例如：&#10;3.89 复制打开抖音…… https://v.douyin.com/xxxx/&#10;7.65 复制打开抖音…… https://v.douyin.com/yyyy/"></textarea>
+    <button class="clear-x" id="clearBtn" aria-label="清空" title="清空" style="display:none">✕</button>
     <div class="composer-bar">
       <div style="display:flex; gap:8px; flex-wrap:wrap">
         <button class="ghost-btn" id="pasteBtn" data-i18n="btn_paste">📋 粘贴</button>
-        <button class="ghost-btn" id="uploadBtn" data-i18n="btn_upload">📎 上传链接文件</button>
-        <button class="ghost-btn" id="clearBtn" data-i18n="btn_clear">清空</button>
         <input type="file" id="fileInput" accept=".txt,.csv,text/plain" hidden>
       </div>
       <button class="primary-btn" id="parseBtn">
@@ -638,14 +651,8 @@ footer{
         <span id="btnText" data-i18n="btn_parse">解析</span>
       </button>
     </div>
-    <div class="composer-hint" data-i18n-html="hint">💡 可一次粘贴 <b>多条</b>分享文案或链接（每行一条或直接连续粘贴均可），系统自动识别拆分、批量解析并支持导出 Excel。</div>
+    <div class="composer-hint" data-i18n-html="hint">💡 可一次粘贴 <b>多条</b>链接，自动拆分批量解析、可导出 Excel；链接太多也可以<a href="javascript:void(0)" id="uploadBtn">上传链接文件</a>。</div>
     <div class="quota-hint" id="quotaHint"></div>
-  </div>
-
-  <div class="steps">
-    <span class="step-chip"><b>1</b><span data-i18n="step1">粘贴 / 上传单条或多条链接</span></span>
-    <span class="step-chip"><b>2</b><span data-i18n="step2">点击解析（多条自动批量）</span></span>
-    <span class="step-chip"><b>3</b><span data-i18n="step3">下载原片 · 或生成分享页发给好友</span></span>
   </div>
 
   <div class="alert" id="alert" role="alert">
@@ -721,7 +728,7 @@ GET /api/v1/jobs/job_xxx
   <div class="faq-list">
     <details class="faq-item reveal">
       <summary data-i18n="faq_q1">这个抖音下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。浏览器直连播放或图片时，抖音会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。浏览器直连播放或图片时，抖音会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。仅当管理员开启「增强线路」且你主动使用文案提取时，对应的作品链接会提交给第三方服务（AnyToCopy）处理；未开启或不使用则不发送。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -746,6 +753,10 @@ GET /api/v1/jobs/job_xxx
     <details class="faq-item reveal">
       <summary data-i18n="faq_q5">有没有 API 可以批量调用？</summary>
       <p data-i18n="faq_a5">有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。</p>
+    </details>
+    <details class="faq-item reveal">
+      <summary data-i18n="faq_q8">怎么提取抖音视频的文案（语音转文字）？</summary>
+      <p data-i18n-html="faq_a8">解析后打开结果卡上的<strong>「获取文案（语音转文字）」</strong>开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。详见<a href="/transcript">文案提取</a>。</p>
     </details>
   </div>
 </section>
@@ -773,11 +784,17 @@ const I18N = {
     hero_h1:'Paste a link,<br>get the <span class="hl">watermark-free</span> original',
     hero_sub:"Open source & auditable · No media-file storage · No ads, ever · Reliable",
     hero_share:"You can also <strong>create a share page in one click</strong> — send it to friends on WeChat and they watch instantly, no Douyin app needed",
-    b_opensource:"🔓 Open source", b_privacy:"🔒 Data minimised", b_noads:"🚫 No ads", b_stable:"🛡 Reliable", b_nologin:"👤 Site account optional", b_share:"↗ One-click share",
     ph_input:"Paste one or more Douyin share texts / links — paste many at once and they're auto-split for batch parsing.\ne.g.\n3.89 ... https://v.douyin.com/xxxx/\n7.65 ... https://v.douyin.com/yyyy/",
-    btn_paste:"📋 Paste", btn_upload:"📎 Upload file", btn_clear:"Clear", btn_parse:"Parse",
-    hint:"💡 Paste <b>multiple</b> links at once (one per line or run-on) — auto-split, batch-parsed, and exportable to Excel.",
-    step1:"Paste / upload one or many links", step2:"Click Parse (multi = auto batch)", step3:"Download the original · or create a share page",
+    btn_paste:"📋 Paste", btn_parse:"Parse",
+    hint:"💡 Paste <b>multiple</b> links at once — auto-split, batch-parsed, exportable to Excel; or <a href=\"javascript:void(0)\" id=\"uploadBtn\">upload a link file</a>.",
+    quota_login_cta:"Sign in for 10/day →",
+    reg_tip:"Create an account: 10 free parses/day, 30-day share pages",
+    reg_tip_cta:"Sign up free",
+    ts_quota:(r,d)=>`${r}/${d} left today`,
+    ts_need_login:"Sign in to use",
+    ts_ing:"Extracting… usually 1-3 minutes",
+    ts_slow:"Still extracting — reopen the toggle later to see the result",
+    ts_copy:"Copy all", ts_audio:"Listen to audio ↗",
     trust_title:"Why you can trust it",
     tc1_h:"Open source · Data minimised", tc1_p:"The front end is open source and auditable. We <strong>do not store video or image files</strong>; compatibility routes only stream bytes. Basic parsing needs no Douyin login and the site account is optional. Free-quota, abuse-prevention and playback-diagnostic details have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. Registered-account data is kept with the account.",
     tc2_h:"Reliable · Always up", tc2_p:"We put real engineering into <strong>keeping downloads working</strong>: multi-route failover, automatic retries, live monitoring and ongoing maintenance. Other tools break and stay broken — ours keeps working.",
@@ -790,11 +807,12 @@ const I18N = {
     faq_title:"FAQ", faq_lead:"Douyin no-watermark download & sharing: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — or create a share page in one click and send it to friends on WeChat, who can watch it without installing Douyin. No Douyin login is required; basic parsing needs no site account or app installation.",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
-    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy. Only when the operator enables the “enhancement route” and you actively use transcript extraction is the corresponding video link submitted to a third-party service (AnyToCopy); otherwise nothing is sent.",
     faq_q2:"Do I need to log in or install anything?", faq_a2:"No Douyin login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
     faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
+    faq_q8:"How do I extract the transcript of a Douyin video (speech to text)?", faq_a8:"After parsing, switch on <strong>“Transcript (speech to text)”</strong> on the result card — extraction usually takes 1–3 minutes, and you can copy the full text or listen to the audio. Sign-in is required; signed-in users get a free daily quota, and each video is extracted only once site-wide (cached results cost nothing). See the <a href=\"/transcript\">transcript page</a>.",
     footer1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
     footer2:"Do not re-publish or use commercially without permission · No video or image files are stored; a site account is optional",
     auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
@@ -868,10 +886,17 @@ const _anonId = loadAnonId();
 refreshQuota();
 function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_anonId) h['X-FP']=_anonId; return h; }
 
+/* 登录态与文案提取额度（refreshQuota/refreshUser 维护，结果卡开关用） */
+let _loggedIn = false;
+let _atc = {enabled:false, daily:0, remaining:0};
+
 async function refreshQuota(){
   try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
     if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily);
+    if (q.atc) _atc = q.atc;
+    if (q.user) _loggedIn = true;
+    syncTranscriptUI();
   } catch {}
 }
 
@@ -888,18 +913,32 @@ $('#fileInput').onchange = async (e) => {
   try {
     const txt = await f.text();
     input.value = (input.value ? input.value + '\n' : '') + txt;
+    syncClearX();
     const n = (input.value.match(/https:\/\/v\.douyin\.com\/[\w-]+/g)||[]).length;
     showOk(`已读取文件，共识别 ${n} 个链接，点「解析」开始`);
   } catch { showError('读取文件失败，请确认是文本文件（.txt/.csv）'); }
   e.target.value = '';
 };
-$('#clearBtn').onclick = () => { input.value = ''; hideError(); result.classList.remove('show'); input.focus(); };
+function syncClearX(){ $('#clearBtn').style.display = input.value ? '' : 'none'; }
+input.addEventListener('input', syncClearX);
+$('#clearBtn').onclick = () => { input.value = ''; syncClearX(); hideError(); result.classList.remove('show'); input.focus(); };
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); parse(); }
 });
 
 /* ---------- 提示 ---------- */
 function showError(msg){ alertText.textContent = msg; alertBox.classList.remove('ok'); alertBox.classList.add('show'); }
+/* 配额用尽：错误文案后追加可点的注册引导（价值时刻引导，可忽略） */
+function showQuotaError(msg){
+  alertText.textContent = msg + ' ';
+  const a = document.createElement('a');
+  a.href = 'javascript:void(0)';
+  a.style.cssText = 'color:inherit;font-weight:700;text-decoration:underline';
+  a.textContent = t('quota_login_cta') || '登录后每天 10 次 →';
+  a.onclick = () => openAuth('login');
+  alertText.appendChild(a);
+  alertBox.classList.remove('ok'); alertBox.classList.add('show');
+}
 function showOk(msg){ alertText.textContent = msg; alertBox.classList.add('ok','show'); }
 function hideError(){ alertBox.classList.remove('show','ok'); }
 
@@ -920,7 +959,13 @@ async function parse(){
       body: JSON.stringify({text})
     });
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
+    if (!resp.ok){
+      if (resp.status === 429 && !_loggedIn){
+        showQuotaError(data.error || '今日免费次数已用完');
+        return;
+      }
+      throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
+    }
     render(data);
     refreshQuota();
   } catch (e) {
@@ -928,6 +973,31 @@ async function parse(){
   } finally {
     setLoading(false);
   }
+}
+
+/* 第 2 次成功解析后给匿名用户一条可关闭的注册轻提示（7 天内不再出现） */
+function maybeRegTip(){
+  if (_loggedIn) return;
+  try {
+    const off = +localStorage.getItem('dy_regtip_off') || 0;
+    if (Date.now() - off < 7 * 864e5) return;
+    const n = (+localStorage.getItem('dy_parse_n') || 0) + 1;
+    localStorage.setItem('dy_parse_n', String(n));
+    if (n < 2) return;
+  } catch { return; }
+  const tip = document.createElement('div');
+  tip.className = 'reg-tip';
+  tip.innerHTML = `<span>${esc(t('reg_tip') || '注册账号：每天 10 次免费解析、分享页 30 天有效')}</span>`;
+  const a = document.createElement('a');
+  a.href = 'javascript:void(0)';
+  a.textContent = t('reg_tip_cta') || '免费注册';
+  a.onclick = () => { tip.remove(); openAuth('register'); };
+  const x = document.createElement('button');
+  x.textContent = '✕'; x.setAttribute('aria-label', '关闭');
+  x.onclick = () => { tip.remove();
+    try { localStorage.setItem('dy_regtip_off', String(Date.now())); } catch {} };
+  tip.appendChild(a); tip.appendChild(x);
+  result.appendChild(tip);
 }
 
 /* ---------- 批量解析：表格视图 ---------- */
@@ -938,7 +1008,13 @@ async function parseBatch(text){
     method:'POST', headers: jsonHeaders(), body: JSON.stringify({text})
   });
   const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) throw new Error(data.error || '批量解析失败');
+  if (!resp.ok){
+    if (resp.status === 429 && !_loggedIn){
+      showQuotaError(data.error || '今日免费次数已用完');
+      return;
+    }
+    throw new Error(data.error || '批量解析失败');
+  }
   refreshQuota();
   _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
   const fails = data.results.filter(r=>!r.ok);
@@ -961,8 +1037,7 @@ function renderBatch(count, fails){
       <td class="bt-nums tnum">❤${fmtNum(st.digg)} · 💬${fmtNum(st.comment)} · ★${fmtNum(st.collect)}</td>
       <td class="bt-ops">
         ${isNote?`<button class="mini-btn" onclick="downloadAll('${esc(d.item_id)}')">下载图集</button>`
-                :`<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>
-                  <button class="mini-btn ghost" onclick="openPlayer(${i})">播放</button>`}
+                :`<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>`}
         <button class="mini-btn ghost" onclick="makeShare('${esc(d.item_id)}',this)">分享页</button>
       </td>
     </tr>`;
@@ -975,6 +1050,7 @@ function renderBatch(count, fails){
     <div class="batch-bar">
       <div class="batch-stat">共 <b>${count}</b> 条 · 成功 <b style="color:var(--ok)">${_batch.length}</b>${fails.length?` · 失败 <b style="color:var(--accent)">${fails.length}</b>`:''}</div>
       <div class="batch-actions">
+        <span style="font-size:12px;color:var(--faint);align-self:center">导出 Excel 可保存全部标题 / 链接 / 数据</span>
         <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note')?'':'style="display:none"'}>⬇ 下载全部视频</button>
         <button class="primary-btn" id="exportBtn" ${_batch.length?'':'disabled'}>📊 导出 Excel</button>
       </div>
@@ -988,6 +1064,7 @@ function renderBatch(count, fails){
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
   $('#exportBtn').onclick = exportBatch;
   const dlAll = $('#dlAllBtn'); if (dlAll) dlAll.onclick = downloadAllVideos;
+  maybeRegTip();
 }
 
 async function dlBatchOne(i, btn){
@@ -1097,6 +1174,109 @@ function render(d){
   result.classList.add('show');
   result.scrollIntoView({behavior:'smooth', block:'nearest'});
   wireAvatar(result, d.item_id);
+  maybeRegTip();
+}
+
+/* ================= 文案提取（语音转文字，注册用户每日限额）================= */
+let _tsTimer = null;
+const TS_BTN_LABEL = '📝 获取文案（语音转文字）';
+function syncTranscriptUI(){
+  const box = result.querySelector('.ts-box'); if (!box) return;
+  const note = box.querySelector('.ts-note');
+  if (!_atc.enabled){ box.style.display = 'none'; return; }
+  box.style.display = '';
+  note.textContent = _loggedIn
+    ? (t('ts_quota') || ((r,d)=>`今日剩余 ${r}/${d} 次`))(_atc.remaining, _atc.daily)
+    : (t('ts_need_login') || `登录后可用 · 每天 ${_atc.daily || 5} 次`);
+}
+result.addEventListener('click', (e) => {
+  const btn = e.target.closest('.ts-btn'); if (!btn) return;
+  const box = btn.closest('.ts-box');
+  const body = box.querySelector('.ts-body');
+  const state = box.dataset.state || '';
+  if (state === 'processing') return;
+  if (state === 'ready'){                       // 已有结果：开合查看，不再扣次
+    const show = body.style.display === 'none';
+    body.style.display = show ? '' : 'none';
+    btn.textContent = show ? '📝 收起文案' : '📝 查看文案';
+    return;
+  }
+  if (!_loggedIn){                     // 价值时刻引导：点了直接弹登录，成功后自动继续
+    window._afterLogin = () => { const b = result.querySelector('.ts-btn'); if (b) b.click(); };
+    openAuth('login');
+    return;
+  }
+  startTranscript(box.dataset.item, box);
+});
+function stopTs(){ if (_tsTimer){ clearTimeout(_tsTimer); _tsTimer = null; } }
+function _tsSetBusy(box, busy){
+  const btn = box.querySelector('.ts-btn');
+  btn.disabled = busy;
+  btn.textContent = busy ? (t('ts_ing_btn') || '提取中…') : TS_BTN_LABEL;
+  box.dataset.state = busy ? 'processing' : '';
+}
+async function startTranscript(itemId, box){
+  stopTs();
+  const body = box.querySelector('.ts-body');
+  _tsSetBusy(box, true);
+  body.style.display = '';
+  body.innerHTML = `<span class="ts-note">${esc(t('ts_ing') || '通常需要 1-3 分钟，请稍候（可离开，回来后再点按钮查看）')}</span>`;
+  try {
+    const r = await fetch('/api/atc/transcript', {method:'POST', headers: jsonHeaders(),
+      body: JSON.stringify({item_id: itemId})});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok){
+      if (r.status === 401){
+        body.style.display = 'none';
+        _tsSetBusy(box, false);
+        window._afterLogin = () => { const b = result.querySelector('.ts-btn'); if (b) b.click(); };
+        openAuth('login');
+        return;
+      }
+      throw new Error(d.error || '提交失败，请稍后重试');
+    }
+    if (d.state === 'ready'){ renderTranscript(box, d); refreshQuota(); return; }
+    refreshQuota();
+    pollTranscript(itemId, box, 0);
+  } catch (e2) {
+    _tsSetBusy(box, false);
+    body.innerHTML = `<span class="ts-note">${esc(e2.message)}</span>`;
+  }
+}
+async function pollTranscript(itemId, box, n){
+  stopTs();
+  if (n >= 45){ _tsSetBusy(box, false);
+    box.querySelector('.ts-body').innerHTML =
+    `<span class="ts-note">${esc(t('ts_slow') || '仍在提取，稍后再点按钮即可查看结果')}</span>`; return; }
+  _tsTimer = setTimeout(async () => {
+    if (!box.isConnected) return;
+    try {
+      const d = await (await fetch('/api/atc/transcript?item_id=' + encodeURIComponent(itemId))).json();
+      if (d.state === 'ready'){ renderTranscript(box, d); return; }
+      if (d.state === 'failed'){ _tsSetBusy(box, false);
+        box.querySelector('.ts-body').innerHTML =
+        `<span class="ts-note">${esc(d.error || '提取失败，请稍后重试')}</span>`; return; }
+      pollTranscript(itemId, box, n + 1);
+    } catch { pollTranscript(itemId, box, n + 1); }
+  }, 4000);
+}
+function renderTranscript(box, d){
+  const btn = box.querySelector('.ts-btn');
+  btn.disabled = false;
+  btn.textContent = '📝 收起文案';
+  box.dataset.state = 'ready';
+  const body = box.querySelector('.ts-body');
+  body.innerHTML = `<div class="ts-result">${esc(d.text || '')}</div>
+    <div class="ts-acts">
+      <button class="ghost-btn ts-copy">${esc(t('ts_copy') || '复制全文')}</button>
+      ${d.audio_url ? `<a href="${esc(d.audio_url)}" target="_blank" rel="noopener">${esc(t('ts_audio') || '试听音频 ↗')}</a>` : ''}
+    </div>`;
+  body.querySelector('.ts-copy').onclick = (e) => {
+    navigator.clipboard?.writeText(d.text || '').then(() => {
+      const o = e.target.textContent; e.target.textContent = '✓';
+      setTimeout(() => e.target.textContent = o, 1400);
+    }).catch(() => {});
+  };
 }
 
 function copyCard(btn){
@@ -1437,7 +1617,13 @@ function videoHTML(d){
           <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>
           <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
-          <a class="ghost-btn" href="${esc(d.video.proxy_url || d.video.alt_url || d.video.url)}" target="_blank" rel="noopener">新窗口播放</a>
+        </div>
+        <div class="ts-box" data-item="${esc(d.item_id)}">
+          <div class="ts-head">
+            <button class="ghost-btn ts-btn">📝 获取文案（语音转文字）</button>
+            <span class="ts-note"></span>
+          </div>
+          <div class="ts-body" style="display:none"></div>
         </div>
         <div class="tip">播放优先浏览器直连；下载使用本站同源流式转发，服务器不落地保存文件</div>
       </div>
@@ -1573,7 +1759,7 @@ function renderMine(list){
         <b>${esc(s.title)}</b>
         <div class="ms">@${esc(s.author||'未知')} · <span class="mine-state">${STATE_LABEL[s.state]||s.state}</span>
           ${s.expires_at ? (days > 0 ? ` · ${days} 天后过期` : ' · 已过期') : ''}</div>
-        <div class="mn"><span title="访问">👁 ${s.views}</span><span title="播放">▶ ${s.plays}</span><span title="下载">⬇ ${s.downloads}</span></div>
+        <div class="mn"><span title="访问">👁 ${s.views}</span><span title="播放">▶ ${s.plays>=10?'🔥':''} ${s.plays}</span><span title="下载">⬇ ${s.downloads}</span></div>
       </div>
       <div class="mo">
         <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a>
@@ -1613,13 +1799,19 @@ async function refreshUser(){
   try {
     const d = await (await fetch('/api/auth/me')).json();
     const logged = !!d.user;
+    _loggedIn = logged;
     $('#authBtn').style.display = logged ? 'none' : '';
     $('#userMenu').style.display = logged ? 'flex' : 'none';
-    $('#apiTabBtn').style.display = logged ? '' : 'none';
     if (logged) $('#userEmail').textContent = d.user.email;
     refreshQuota();
   } catch {}
 }
+/* 用户下拉菜单 */
+$('#userEmailBtn').onclick = (e) => { e.stopPropagation();
+  const dd = $('#userDrop'); dd.style.display = dd.style.display === 'none' ? '' : 'none'; };
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.user-menu')) $('#userDrop').style.display = 'none';
+});
 $('#authBtn').onclick = () => openAuth('login');
 $('#logoutBtn').onclick = async () => { await fetch('/api/auth/logout',{method:'POST'}); refreshUser(); };
 $('#authClose').onclick = closeAuth;
@@ -1637,7 +1829,9 @@ function openAuth(mode){
   showStep(1);
   authModal.classList.add('show'); document.body.style.overflow='hidden';
 }
-function closeAuth(){ authModal.classList.remove('show'); document.body.style.overflow=''; }
+function closeAuth(){ authModal.classList.remove('show'); document.body.style.overflow='';
+  window._afterLogin = null;          // 用户放弃登录时清掉挂起的续跑动作
+}
 function showStep(n){ $('#authStep1').style.display=n===1?'':'none'; $('#authStep2').style.display=n===2?'':'none'; }
 $('#authBack').onclick = () => showStep(1);
 
@@ -1743,14 +1937,14 @@ async function verifyCaptcha(){
       headers:{'Content-Type':'application/json'}, body: JSON.stringify({..._pending, pass_token:vd.pass_token})});
     const d = await r.json().catch(()=>({}));
     if(!r.ok) throw new Error(d.error || '操作失败');
-    setTimeout(()=>{ closeAuth(); refreshUser(); }, 350);
+    // 登录成功后自动继续被引导打断的操作（如开启文案提取），不让用户重操作
+    const after = window._afterLogin; window._afterLogin = null;
+    setTimeout(()=>{ closeAuth(); refreshUser().then(()=>{ if (after) after(); }); }, 350);
   } catch(e){
     track.classList.add('err'); $('#authErr2').textContent=e.message;
     setTimeout(loadCaptcha, 700);                       // 失败自动换一张
   }
 }
-
-$('#apiTabBtn').onclick = (e) => { e.preventDefault(); location.href='/api-console'; };
 
 refreshUser();
 </script>

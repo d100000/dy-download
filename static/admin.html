@@ -122,6 +122,14 @@ tr:last-child td{border-bottom:none}
 .row-actions{display:flex; gap:6px; justify-content:flex-end}
 .empty{text-align:center; color:var(--muted); padding:34px 12px; font-size:13.5px}
 
+.prio-list{display:flex; flex-direction:column; gap:8px; max-width:460px}
+.prio-item{display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--border);
+  border-radius:12px; background:var(--surface); user-select:none; touch-action:none; cursor:grab}
+.prio-item.dragging{opacity:.55; border-color:var(--accent); cursor:grabbing}
+.prio-item .grip{color:var(--faint); font-size:15px; letter-spacing:2px; cursor:grab}
+.prio-item .pn{font-weight:600; font-size:14px}
+.prio-item .pd{font-size:12px; color:var(--muted)}
+.prio-item .idx{margin-left:auto; font-size:12px; color:var(--faint); font-variant-numeric:tabular-nums}
 .switch{position:relative; display:inline-block; width:42px; height:24px; flex:none}
 .switch input{opacity:0; width:0; height:0}
 .slider{position:absolute; inset:0; background:var(--surface-2); border:1px solid var(--border); border-radius:99px; transition:.2s}
@@ -194,6 +202,7 @@ th.sortable:hover{color:var(--text)}
       <button class="admin-tab" data-view="keys">API 密钥</button>
       <button class="admin-tab" data-view="users">用户</button>
       <button class="admin-tab" data-view="shares">分享页</button>
+      <button class="admin-tab" data-view="atc">增强线路</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
     </div>
 
@@ -565,6 +574,67 @@ th.sortable:hover{color:var(--text)}
         </table></div>
       </div>
     </div>
+
+    <!-- AnyToCopy 增强线路 -->
+    <div class="view" id="v-atc" style="display:none">
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>AnyToCopy 增强线路</h3>
+          <div class="desc">第三方增值服务：语音转文字文案提取 + 分享页增强播放地址。异步任务（分钟级），永不进入同步主解析；故障自动降级，不影响主流程。</div></div>
+        <span id="atcState" class="badge idle">未启用</span>
+      </div>
+      <div class="panel-body">
+        <div class="setting-row">
+          <div class="label"><b>总开关</b><p>关闭时整条线路完全静默（不提交任何链接给第三方）</p></div>
+          <label class="switch ctl"><input type="checkbox" id="atc_enabled"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row" style="align-items:flex-start">
+          <div class="label" style="flex:1"><b>API 密钥</b>
+            <p>在 anytocopy.com「API Key 管理」创建（仅专业版会员）。Secret 保存后打码显示，留空表示不修改。</p>
+            <input class="ctl" id="atc_key" type="text" style="width:100%;margin-top:8px" placeholder="API Key（ak_…）">
+            <input class="ctl" id="atc_secret" type="password" style="width:100%;margin-top:8px" placeholder="API Secret（留空不修改）" autocomplete="new-password">
+            <input class="ctl" id="atc_base" type="text" style="width:100%;margin-top:8px" placeholder="Base URL">
+          </div>
+        </div>
+        <div class="setting-row">
+          <div class="label"><b>播放地址增强</b><p>把 API 返回的无水印地址纳入分享页播放链（带有效期判断，过期自动换下一条）</p></div>
+          <label class="switch ctl"><input type="checkbox" id="atc_play"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div class="label"><b>文案提取</b><p>开放注册用户的语音转文字提取（仅登录用户，按次限额）</p></div>
+          <label class="switch ctl"><input type="checkbox" id="atc_transcript"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div class="label"><b>文案提取每日次数</b><p>每个注册用户每天的免费提取次数</p></div>
+          <input class="ctl" type="number" id="atc_daily" min="0" max="100" style="width:90px">
+        </div>
+        <div class="setting-row">
+          <div class="label"><b>API 地址有效期（秒）</b><p>API 返回的播放地址是带签名的临时链，超过该时长视为过期</p></div>
+          <input class="ctl" type="number" id="atc_ttl" min="600" max="86400" style="width:110px">
+        </div>
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" id="atcSave">保存配置</button>
+          <button class="btn btn-ghost btn-sm" id="atcTest">测试连接</button>
+          <button class="btn btn-ghost btn-sm" id="atcRefresh">刷新状态</button>
+        </div>
+        <div id="atcInfo" class="desc mono" style="margin-top:10px"></div>
+        <div id="atcErr" class="desc" style="margin-top:6px;color:var(--danger);white-space:pre-wrap"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>分享页播放优先级</h3>
+          <div class="desc">拖动排序，保存即时生效。atc 线路无有效地址时自动跳过；全部失败仍回落提示。</div></div>
+      </div>
+      <div class="panel-body">
+        <div id="prioList" class="prio-list"></div>
+        <div class="row-actions" style="margin-top:12px">
+          <button class="btn btn-primary btn-sm" id="prioSave">保存顺序</button>
+        </div>
+      </div>
+    </div>
+    </div><!-- /v-atc -->
   </div>
 </div>
 
@@ -601,8 +671,123 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
   else if(v==='proxyset') loadMihomo(); else if(v==='keys') loadKeys();
+  else if(v==='atc') loadAtc();
   else if(v==='proxies') load();
 });
+
+/* ---------------- AnyToCopy 增强线路 ---------------- */
+const PRIO_META = {
+  dy1:  ['抖音直连 · 主域名', 'aweme.snssdk.com，浏览器直连，不耗服务器带宽，永久有效'],
+  dy2:  ['抖音直连 · 备用域名', 'iesdouyin.com，部分微信环境可达性与主域名互补'],
+  atc:  ['API 增强地址', 'AnyToCopy 返回的无水印地址，带签名会过期，过期自动跳过'],
+  proxy:['服务器代理兜底', '同源签名流 /api/video，必达但耗服务器带宽'],
+};
+let _prio = ['dy1','dy2','atc','proxy'];
+let atcTestPoll = null;
+
+function renderPrio(){
+  $('#prioList').innerHTML = _prio.map((k,i)=>`
+    <div class="prio-item" draggable="true" data-k="${k}">
+      <span class="grip">⠿</span>
+      <span><span class="pn">${PRIO_META[k][0]}</span><br><span class="pd">${PRIO_META[k][1]}</span></span>
+      <span class="idx">${i+1}</span>
+    </div>`).join('');
+  const items = [...document.querySelectorAll('.prio-item')];
+  let dragEl = null;
+  items.forEach(el => {
+    el.addEventListener('dragstart', () => { dragEl = el; el.classList.add('dragging'); });
+    el.addEventListener('dragend', () => { el.classList.remove('dragging'); dragEl = null; syncPrio(); });
+    el.addEventListener('dragover', e => {
+      e.preventDefault();
+      if (!dragEl || dragEl === el) return;
+      const r = el.getBoundingClientRect();
+      el.parentNode.insertBefore(dragEl, (e.clientY - r.top) > r.height/2 ? el.nextSibling : el);
+    });
+    /* 触屏：长按拖动 */
+    el.addEventListener('touchstart', () => { dragEl = el; el.classList.add('dragging'); }, {passive:true});
+    el.addEventListener('touchmove', e => {
+      if (!dragEl) return;
+      const y = e.touches[0].clientY;
+      const over = items.find(x => x !== dragEl && Math.abs(x.getBoundingClientRect().top + x.offsetHeight/2 - y) < x.offsetHeight/2);
+      if (over){ const r = over.getBoundingClientRect();
+        over.parentNode.insertBefore(dragEl, y > r.top + r.height/2 ? over.nextSibling : over); }
+      e.preventDefault();
+    }, {passive:false});
+    el.addEventListener('touchend', () => { if(dragEl){ dragEl.classList.remove('dragging'); dragEl = null; syncPrio(); } });
+  });
+}
+function syncPrio(){
+  _prio = [...document.querySelectorAll('.prio-item')].map(el => el.dataset.k);
+  document.querySelectorAll('.prio-item .idx').forEach((el,i) => el.textContent = i+1);
+}
+
+function renderAtc(d){
+  const on = d.master_on && d.configured;
+  const el = $('#atcState');
+  el.className = 'badge ' + (on ? 'ok' : 'idle');
+  el.textContent = on ? '已启用' : (d.master_on ? '已开但密钥缺失' : '未启用');
+  $('#atc_enabled').checked = !!d.master_on;
+  $('#atc_play').checked = !!d.play_enhance;
+  $('#atc_transcript').checked = !!d.transcript_enabled;
+  if (document.activeElement !== $('#atc_key')) $('#atc_key').value = d.api_key || '';
+  $('#atc_secret').placeholder = d.api_secret_masked ? `已保存（${d.api_secret_masked}），留空不修改` : 'API Secret';
+  if (document.activeElement !== $('#atc_base')) $('#atc_base').value = d.base_url || '';
+  $('#atc_daily').value = d.transcript_daily ?? 5;
+  $('#atc_ttl').value = d.url_ttl ?? 7200;
+  const parts = [`队列 ${d.queue_pending}`, `今日 提交${d.today_total}/成功${d.today_done}/失败${d.today_failed}`];
+  if (d.test){
+    try { const t = JSON.parse(d.test);
+      parts.push('测试: ' + ({submitted:`任务已提交（${t.ms}ms），结果异步到…`, success:`成功✓（提交 ${t.ms}ms${t.duration?`，视频 ${Math.round(t.duration)}s`:''}${t.has_text?'，含转录':''}）`, failed:'失败✗ '+(t.error||'')}[t.state] || t.state));
+    } catch {}
+  }
+  $('#atcInfo').textContent = parts.join(' · ');
+  $('#atcErr').textContent = d.last_error ? ('最近错误：' + d.last_error) : '';
+  _prio = (Array.isArray(d.play_priority) && d.play_priority.length===4) ? d.play_priority : ['dy1','dy2','atc','proxy'];
+  renderPrio();
+}
+
+async function loadAtc(){
+  let d; try { d = await api('/api/admin/atc'); } catch { return; }
+  renderAtc(d);
+  let testing = false;
+  try { testing = JSON.parse(d.test||'{}').state === 'submitted'; } catch {}
+  if (testing && !atcTestPoll) atcTestPoll = setInterval(loadAtc, 3000);
+  if (!testing && atcTestPoll){ clearInterval(atcTestPoll); atcTestPoll = null; }
+}
+
+$('#atcSave').onclick = async e => {
+  const btn = e.currentTarget, old = btn.textContent; btn.disabled = true; btn.textContent = '保存中…';
+  const body = {
+    api_key: $('#atc_key').value.trim(),
+    base_url: $('#atc_base').value.trim(),
+    enabled: $('#atc_enabled').checked,
+    play_enhance: $('#atc_play').checked,
+    transcript_enabled: $('#atc_transcript').checked,
+    transcript_daily: +$('#atc_daily').value,
+    url_ttl: +$('#atc_ttl').value,
+  };
+  const sec = $('#atc_secret').value.trim();
+  if (sec) body.api_secret = sec;
+  try { renderAtc(await api('/api/admin/atc', {method:'POST', body:JSON.stringify(body)}));
+    $('#atc_secret').value = ''; toast('已保存');
+  } catch(err){ toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = old; }
+};
+$('#atcRefresh').onclick = loadAtc;
+$('#atcTest').onclick = async e => {
+  const btn = e.currentTarget, old = btn.textContent; btn.disabled = true; btn.textContent = '提交中…';
+  try { const r = await api('/api/admin/atc/test', {method:'POST', body:'{}'});
+    toast(`测试任务已提交（${r.ms}ms），结果异步到`); loadAtc();
+  } catch(err){ toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = old; }
+};
+$('#prioSave').onclick = async e => {
+  const btn = e.currentTarget, old = btn.textContent; btn.disabled = true;
+  try { await api('/api/admin/atc', {method:'POST', body:JSON.stringify({play_priority:_prio})});
+    toast('播放优先级已保存');
+  } catch(err){ toast(err.message, true); }
+  finally { btn.disabled = false; btn.textContent = old; }
+};
 
 /* ---------------- 分享页管理 ---------------- */
 async function loadShares(){
@@ -988,7 +1173,8 @@ async function load(){
     <div class="stat"><div class="k">代理总数</div><div class="v tnum">${s.proxies.length} <small>/ 启用 ${en}</small></div></div>
     <div class="stat"><div class="k">已封禁 IP</div><div class="v tnum" style="${banned?'color:var(--danger)':''}">${banned}</div></div>
     <div class="stat"><div class="k">经代理 / 直连</div><div class="v tnum">${st.via_proxy}<small> / ${st.direct}</small></div></div>
-    <div class="stat"><div class="k">封禁 / 重试</div><div class="v tnum">${st.banned||0}<small> / ${st.retries||0}</small></div></div>`;
+    <div class="stat"><div class="k">封禁 / 重试</div><div class="v tnum">${st.banned||0}<small> / ${st.retries||0}</small></div></div>
+    <div class="stat"><div class="k">滑块验证 通过/失败</div><div class="v tnum">${(s.captcha&&s.captcha.ok)||0}<small> / ${(s.captcha&&s.captcha.fail)||0}（加载 ${(s.captcha&&s.captcha.load)||0}）</small></div></div>`;
 
   // settings
   const g = s.settings;

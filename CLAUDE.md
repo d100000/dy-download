@@ -19,12 +19,12 @@ swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位
 docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v $(pwd)/data:/data douyin-dl
 ```
 
-页面：`/` 下载器 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露） · `/s/{sid}` 分享页。
+页面：`/` 下载器 · `/transcript` 文案提取落地页 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露） · `/s/{sid}` 分享页。
 站点级路由（改站点文案/新增可收录页面时要一并同步）：`/robots.txt`、`/llms.txt`、`/sitemap.xml`、`/og.svg`（内联 SVG 卡片图）、`/og.png`（`static/og.png` 位图，微信/多数抓取器不渲染 SVG，卡片兜底必须用它）。
 
 依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。Dockerfile 只 `COPY server.py` + `COPY static`——新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
-测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（33 例，覆盖媒体签名与 Range/流租约、代理健康不被媒体错误污染、原子配额、持久化计费、隐私存储、文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；两个 Node 测试（`test_download_flow.js`、`test_share_playback.js`）是把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑的——改前端下载/播放代码时必须保留锚点或同步更新测试。测试不能替代真实链接实测：抖音接口随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
+测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（41 例，覆盖媒体签名与 Range/流租约、代理健康不被媒体错误污染、原子配额、持久化计费、隐私存储、ATC 增强线路（开关静默/登录门禁/原子配额/缓存命中不扣次/优先级校验/分享页注入）、文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；两个 Node 测试（`test_download_flow.js`、`test_share_playback.js`）是把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑的——改前端下载/播放代码时必须保留锚点或同步更新测试。测试不能替代真实链接实测：抖音接口随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
 
 ## 版本号与 README 维护（每次改动必做）
 
@@ -34,7 +34,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 ### 单文件后端 + 单文件前端
 
-`server.py`（约 5000 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 内置 mihomo 内核 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。定位代码用 `grep -n "^# -----" server.py` 列分隔线，不要记行号。新增功能应放进对应分区，不要拆包。
+`server.py`（约 5000 行）是全部后端，按注释分隔线（`# ----- 常量与存储`、`# ----- 代理池管理` …）分层，大体顺序即依赖顺序：常量 → SQLite 层 → 防薅羊毛/限频 → 用户鉴权/防机器人 → 代理池 → 内置 mihomo 内核 → 应用设置+计费 → HTTP 出站层 → 工具函数 → 核心解析 → 分享页 → **AnyToCopy 增强线路（ATC）** → 公共 API → 开放 API v1 → 管理后台 → 健康检查 → 页面+SEO → **用户鉴权 API**。定位代码用 `grep -n "^# -----" server.py` 列分隔线，不要记行号。新增功能应放进对应分区，不要拆包。
 
 注意用户体系被拆成了相距很远的两块：**底层**（`hash_pw`/`current_user`/滑块验证码，在「用户鉴权 / 防机器人」分区）在文件前部，**路由**（`/api/auth/*`）在文件**最末尾**的同名分区。改用户相关功能时两处都要看。
 
@@ -76,7 +76,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 分享页 SEO 走 `_share_head()`（per-share OG）而非 `_seo_head()`，且**一律 noindex**，`robots.txt` 也 Disallow `/s/`——不收录他人作品是合规底线，不要"优化"掉。
 
-播放线路 v1.11 起**全环境统一 `dy1`（`video.url`）→ `dy2`（`video.alt_url`）→ `proxy`（`video.proxy_url`）→ 失败提示**：抖音域名直连不花服务器带宽，同源代理只做兜底（v1.10.1 的全页 no-referrer 解决了直连 403，微信内直连才可行）。微信 WebView 拦截直连时常不报 error 只挂起，因此微信内直连看门狗缩短为 4 秒（普通浏览器 7 秒），最坏 8 秒落到代理线路。`alt_url` 仍必须保留，它是免费直连的重要备线。首页微信内同样直连优先：`videoPlaySrc()` 不再特判微信，`onerror` 走 `videoProxyFallback()` 自动切同源代理，手动「改用服务器代理播放」入口对微信内也开放。每级开始尝试上报 `play_try`、切换上报 `fallback`、成败上报 `play_ok`/`play_fail`（带 `source`=dy1/dy2/proxy、`stage`=ok/error/timeout/giveup、`detail`=media error code、`ms`），落 `share_events` 的 `source/stage/detail/ms` 四列；后台「分享页」页签有「播放诊断」（微信内/外 × 线路成功率）与「播放尝试日志」（try/ok/fail 全量明细）两块看板，微信内 `proxy` 占比是服务器带宽的先导指标。注意 `share_events` 这四列是启动时用 `PRAGMA table_info` + `ALTER TABLE` 就地补的（无迁移框架），再加列照此办理。
+播放线路 v1.11 起全环境统一抖音直连优先、同源代理兜底（v1.10.1 的全页 no-referrer 解决了直连 403，微信内直连才可行）；v1.12 起**线路顺序不再写死**，由 `app_settings.share_play_priority`（默认 `["dy1","dy2","atc","proxy"]`，后台「增强线路」页签拖拽排序）驱动，`share.html` 按 `play_priority` 动态构建线路。其中 `atc` 是 AnyToCopy 增强地址（带签名会过期）：仅当缓存新鲜（`atc_url_ttl`）时注入 `video.atc_url`，过期不注入并后台惰性重新入队，无地址时前端自动跳过。微信 WebView 拦截直连时常不报 error 只挂起，因此微信内直连看门狗缩短为 4 秒（普通浏览器 7 秒），最坏 8 秒落到代理线路。`alt_url` 仍必须保留，它是免费直连的重要备线。首页微信内同样直连优先：`videoPlaySrc()` 不再特判微信，`onerror` 走 `videoProxyFallback()` 自动切同源代理，手动「改用服务器代理播放」入口对微信内也开放。每级开始尝试上报 `play_try`、切换上报 `fallback`、成败上报 `play_ok`/`play_fail`（带 `source`=dy1/dy2/atc/proxy、`stage`=ok/error/timeout/giveup、`detail`=media error code、`ms`），落 `share_events` 的 `source/stage/detail/ms` 四列；后台「分享页」页签有「播放诊断」（微信内/外 × 线路成功率）与「播放尝试日志」（try/ok/fail 全量明细）两块看板，微信内 `proxy` 占比是服务器带宽的先导指标。注意 `share_events` 这四列是启动时用 `PRAGMA table_info` + `ALTER TABLE` 就地补的（无迁移框架），再加列照此办理。
 
 **转发流量统计**：`/api/video` 每条流结束时按实际转发字节计量（`_ResumableVideoStream.sent`，经 `_media_finalizer` 的 `on_close` 钩子），先进内存 `_traffic_pending`（finalize 可能跑在事件循环线程，不能直接写 SQLite），由 `_sweeper` 每 5 分钟、后台读取时与 shutdown 时 `_flush_media_traffic()` 落库到 `media_traffic` 表（天 × 用途聚合，`scope`=play/download，无个人标识，保留 1 年）。后台「转发流量统计」看板走 `GET /api/admin/traffic-stats?days=`。浏览器直连抖音 CDN 的流量不经过服务器，无法也不需要统计。
 
@@ -89,6 +89,10 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 **微信 JS-SDK**：`/api/wx/jssdk` 出签名，未配置公众号时返回 `enabled:false`，前端静默降级到微信默认卡片。`jsapi_ticket` **存 app_settings 表**（全局唯一 + 有频次上限，存内存会导致多 worker 互相顶掉）。这里的出站请求**刻意不走 `open_url()`**：公众号要求服务器出口 IP 在白名单内，走代理反而失败。
 
 **海报**在前端用 canvas 合成（封面走 CDN 的 `ACAO:*` 跨域绘制，二维码用同源 PNG——SVG 在部分内核会污染画布导致导出抛 SecurityError），服务器同样不参与、不落地。微信封图片远少于封链接，海报是链接被封时的传播兜底。导出**必须用 `toDataURL()` 出 `data:` URI，不要用 `toBlob`+`createObjectURL`**：微信 WebView 对 `blob:` 图片长按不弹「保存图片／发送给朋友」，海报就既存不下也发不出去。
+
+### AnyToCopy 增强线路（ATC）
+
+可选的第三方增值服务（`server.py`「AnyToCopy 增强线路」分区，默认关闭、关闭时完全静默）：语音转文字文案提取 + 分享页增强播放地址。硬约束：① **永不进入同步主解析**——ATC 是异步任务（提交→轮询，分钟级），`/api/parse` 不感知它；② 对方并发上限 5，所有请求必须经 `atc_jobs` 表串行排队（`_atc_enqueue` 幂等去重），由 `_atc_worker` 守护线程提交/轮询（在途 ≤2），用户请求绝不直连 ATC；③ 结果按 `item_id` 全站共享缓存在 `atc_cache`（播放地址带签名会过期，用 `atc_url_ttl` 判新鲜；文案永久有效），命中缓存不扣配额；④ 出站**刻意不走代理池**（同微信 JS-SDK：第三方 API 要求出口稳定）；⑤ 只存 URL 与文案元数据，缓存随保留期清理。文案提取 API（`POST/GET /api/atc/transcript`）仅登录用户，配额主体用 `atc:user:{id}` 前缀与网页解析配额隔离，原子预占/失败退款与 `reserve_quota` 同款模式。后台「增强线路」页签：密钥配置（Secret 打码回显）、开关组、测试连接（任务异步，GET 时顺带推进）、播放优先级拖拽。
 
 ### 滑块验证码与 `pass_token` 门禁
 
@@ -121,7 +125,7 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 
 `ADMIN_PASSWORD`(默认 douyin-admin，生产必改) · `DATA_DIR`(默认 `data`) · `APP_SECRET`(可选；未设则原子生成 `data/.app-secret`) · `CAPTCHA_SECRET`(旧部署兼容/可单独覆盖) · `DATA_RETENTION_DAYS`(1–30，默认 30) · `FREE_ANON_DAILY`(3) · `FREE_USER_DAILY`(10) · `QUOTA_RESERVATION_TTL`(3600 秒) · `NEW_KEY_BALANCE`(新 Key 试用余额，分) · `API_JOB_WORKERS`(2) · `API_JOB_LEASE_SECONDS`(600) · `API_JOB_HEARTBEAT_SECONDS`(30) · `MEDIA_TOKEN_TTL`(43200) · `MEDIA_REQUESTS_PER_MIN`(120) · `MEDIA_MAX_CONCURRENT`(6) · `TRUST_PROXY` · `TRUST_PROXY_HOPS`(1) · `COOKIE_SECURE` · `SHARE_DOMAINS`(分享域名池，逗号分隔) · `SHARE_TTL_ANON_DAYS`(7) · `SHARE_TTL_USER_DAYS`(30) · `MIHOMO_VERSION` / `MIHOMO_DL_BASE` / `MIHOMO_OFF`(内置内核版本/下载源/总开关) · `HOST`(run.sh 默认 127.0.0.1) · `PORT`(仅 `run.sh` 用)。
 
-**运行时可改的配置不走环境变量**：API 单价、微信公众号密钥、机场订阅、分享主域名都在 `app_settings` 表（`api_price_cents` / `wx_appid` / `wx_secret` / `mihomo_sub_url` / `share_primary_domain`，后台改、即时生效）；代理列表与轮换策略在 `data/config.json`。新增"运营要随时调"的开关优先进 `app_settings` + 后台，而不是加环境变量。
+**运行时可改的配置不走环境变量**：API 单价、微信公众号密钥、机场订阅、分享主域名、ATC 增强线路都在 `app_settings` 表（`api_price_cents` / `wx_appid` / `wx_secret` / `mihomo_sub_url` / `share_primary_domain` / `atc_api_key` / `atc_api_secret` / `atc_base_url` / `atc_enabled` / `atc_play_enhance` / `atc_transcript_enabled` / `atc_transcript_daily` / `atc_url_ttl` / `share_play_priority`，后台改、即时生效）；代理列表与轮换策略在 `data/config.json`。新增"运营要随时调"的开关优先进 `app_settings` + 后台，而不是加环境变量。
 
 ### 前端 i18n / SEO
 

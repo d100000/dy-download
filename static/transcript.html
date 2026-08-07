@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="{{HTMLLANG}}">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+{{SEO_HEAD}}
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%230E1013'/%3E%3Cg fill='none' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%2325F4EE' transform='translate(-2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23FE2C55' transform='translate(2 0)'/%3E%3Cpath d='M32 15 V37 M22 30 l10 10 10-10' stroke='%23fff'/%3E%3C/g%3E%3Cpath d='M20 46 h24' stroke='%23fff' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0E1013; --surface:#16191E; --surface-2:#1C2026; --border:#272C34; --border-strong:#343B45;
+  --text:#EDEFF2; --muted:#8A93A0; --faint:#5B6470;
+  --accent:#FE2C55; --accent-hover:#FF4D6F; --accent-ink:#FFFFFF; --accent-soft:#33161E;
+  --shadow:0 24px 60px -24px rgba(0,0,0,.6);
+}
+:root[data-theme="light"]{
+  --bg:#F7F8FA; --surface:#FFFFFF; --surface-2:#F2F4F7; --border:#E4E7EC; --border-strong:#CBD2DB;
+  --text:#17191D; --muted:#6B7280; --faint:#9AA1AC;
+  --accent:#E0234E; --accent-hover:#C71D44; --accent-ink:#FFFFFF; --accent-soft:#FDEDF1;
+  --shadow:0 20px 50px -24px rgba(23,25,29,.18);
+}
+*{box-sizing:border-box; margin:0}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh;
+  font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  font-size:15px; line-height:1.7; -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent); text-decoration:none}
+.container{max-width:760px; margin:0 auto; padding:0 20px}
+nav{display:flex; align-items:center; justify-content:space-between; padding:20px 0}
+.brand{font-weight:700; font-size:16px; color:var(--text)}
+.brand small{display:block; font-weight:500; color:var(--muted); font-size:11px}
+.lang-switch{font-size:12.5px; font-weight:600; color:var(--muted); border:1px solid var(--border); border-radius:10px; padding:7px 11px; cursor:pointer; background:var(--surface)}
+.hero{padding:48px 0 28px; text-align:center}
+h1{font-size:clamp(28px,5.4vw,40px); font-weight:800; line-height:1.25; letter-spacing:-.02em}
+h1 .hl{background:linear-gradient(100deg,#FE2C55 10%,#FF6AC2 40%,#25F4EE 90%);
+  -webkit-background-clip:text; background-clip:text; color:transparent}
+.hero p{color:var(--muted); margin-top:14px; font-size:16px}
+.cta{display:inline-flex; align-items:center; gap:8px; margin-top:26px; padding:12px 30px;
+  border-radius:12px; background:linear-gradient(135deg,var(--accent),#FF5C8A); color:#fff;
+  font-weight:700; font-size:15px; box-shadow:0 8px 22px -8px rgba(254,44,85,.6)}
+.cta:hover{background:var(--accent-hover)}
+section{margin-top:52px}
+h2{font-size:21px; font-weight:800; text-align:center; margin-bottom:20px; letter-spacing:-.01em}
+.steps{display:flex; flex-direction:column; gap:12px}
+.step{display:flex; gap:14px; align-items:flex-start; background:var(--surface);
+  border:1px solid var(--border); border-radius:14px; padding:16px 18px}
+.step b{flex:none; width:28px; height:28px; border-radius:50%; background:var(--accent-soft);
+  color:var(--accent); display:grid; place-items:center; font-size:14px}
+.step .st{font-weight:600; font-size:15px}
+.step .sd{color:var(--muted); font-size:13.5px; margin-top:2px}
+.faq-list{display:flex; flex-direction:column; gap:10px}
+.faq-item{background:var(--surface); border:1px solid var(--border); border-radius:14px; overflow:hidden}
+.faq-item summary{list-style:none; cursor:pointer; padding:16px 18px; font-weight:600; font-size:15px;
+  display:flex; justify-content:space-between; align-items:center; gap:12px}
+.faq-item summary::-webkit-details-marker{display:none}
+.faq-item summary::after{content:"+"; color:var(--accent); font-size:22px; font-weight:400; line-height:1; transition:transform .2s; flex:none}
+.faq-item[open] summary::after{transform:rotate(45deg)}
+.faq-item p{padding:0 18px 18px; color:var(--muted); font-size:14px; line-height:1.8}
+.note{margin-top:18px; font-size:12.5px; color:var(--faint); text-align:center; line-height:1.8}
+footer{margin-top:64px; padding:24px 0 36px; border-top:1px solid var(--border);
+  color:var(--faint); font-size:12.5px; text-align:center; line-height:1.9}
+</style>
+</head>
+<body>
+<div class="container">
+<nav>
+  <a class="brand" href="/">抖音下载器 <small data-i18n="brand_sub">无水印 · 开源 · 无广告</small></a>
+  <button class="lang-switch" id="langBtn"><span id="langLabel">EN</span></button>
+</nav>
+
+<section class="hero">
+  <h1 data-i18n-html="h1">抖音视频<span class="hl">文案提取</span><br>语音一键转文字</h1>
+  <p data-i18n="sub">粘贴链接，自动把视频里的语音转成完整文字——标题、正文、口播全文一次拿全</p>
+  <a class="cta" href="/" data-i18n="cta">去首页粘贴链接 →</a>
+</section>
+
+<section>
+  <h2 data-i18n="how">怎么用</h2>
+  <div class="steps">
+    <div class="step"><b>1</b><div><div class="st" data-i18n="s1t">粘贴并解析</div>
+      <div class="sd" data-i18n="s1d">把抖音分享链接粘贴到首页输入框，点击解析。</div></div></div>
+    <div class="step"><b>2</b><div><div class="st" data-i18n="s2t">打开「获取文案」开关</div>
+      <div class="sd" data-i18n="s2d">登录后在解析结果卡上打开「获取文案（语音转文字）」；未登录时点开关会引导你先登录。</div></div></div>
+    <div class="step"><b>3</b><div><div class="st" data-i18n="s3t">等待并复制</div>
+      <div class="sd" data-i18n="s3d">提取通常 1–3 分钟，完成后可一键复制全文或试听音频。</div></div></div>
+  </div>
+</section>
+
+<section>
+  <h2 data-i18n="faq">常见问题</h2>
+  <div class="faq-list">
+    <details class="faq-item">
+      <summary data-i18n="q1">什么是抖音文案提取？</summary>
+      <p data-i18n="a1">把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。该功能由可选的增强线路处理，异步任务通常 1–3 分钟完成。</p>
+    </details>
+    <details class="faq-item">
+      <summary data-i18n="q2">文案提取收费吗？</summary>
+      <p data-i18n="a2">注册用户每天有免费提取次数（默认 5 次，以页面显示为准）。同一视频全站只提取一次，再次打开命中缓存不重复扣次。</p>
+    </details>
+    <details class="faq-item">
+      <summary data-i18n="q3">我的链接会发给第三方吗？</summary>
+      <p data-i18n="a3">仅在管理员开启增强线路后，你请求提取的作品链接会提交给第三方服务（AnyToCopy）处理，用于获取语音转文字结果与播放地址；未开启则不发送。本站只保存处理结果元数据，不保存视频文件。</p>
+    </details>
+    <details class="faq-item">
+      <summary data-i18n="q4">提取要等多久？</summary>
+      <p data-i18n="a4">通常 1–3 分钟，取决于视频时长，短视频更快。提交后可以离开页面，回来后重新打开开关即可查看结果。</p>
+    </details>
+  </div>
+  <p class="note" data-i18n="note">本站不保存视频或图片文件；文案提取结果按数据保留期自动清理。内容版权归原作者所有，仅供个人学习与获得授权的素材整理使用。</p>
+</section>
+
+<footer>
+  <span data-i18n="footer1">仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有</span><br>
+  <a href="/" data-i18n="back">返回首页</a>
+</footer>
+</div>
+
+<script>
+const LANG = window.__LANG || 'zh';
+const I18N = { en: {
+  brand_sub:"No watermark · Open source · No ads",
+  h1:'Douyin <span class="hl">Transcript Extractor</span><br>Speech to text in one click',
+  sub:"Paste a link and turn a video's speech into full text — title, caption and transcript in one go",
+  cta:"Paste a link on the homepage →",
+  how:"How it works",
+  s1t:"Paste and parse", s1d:"Paste the Douyin share link into the input box on the homepage and click Parse.",
+  s2t:"Turn on the transcript toggle", s2d:"After signing in, switch on “Transcript (speech to text)” on the result card; signed-out users are guided to sign in first.",
+  s3t:"Wait and copy", s3d:"Extraction usually takes 1–3 minutes. When done, copy the full text or listen to the audio.",
+  faq:"FAQ",
+  q1:"What is Douyin transcript extraction?",
+  a1:"It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Powered by an optional enhancement route as an async job, usually done in 1–3 minutes.",
+  q2:"Is transcript extraction free?",
+  a2:"Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing.",
+  q3:"Is my link sent to a third party?",
+  a3:"Only when the enhancement route is enabled by the site operator: the link you ask to transcribe is submitted to a third-party service (AnyToCopy) to produce the transcript and a playback URL; otherwise nothing is sent. Only result metadata is kept — never the video file.",
+  q4:"How long does it take?",
+  a4:"Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result.",
+  note:"No video or image files are stored; transcript results are removed automatically per the data retention period. Copyright belongs to the original creators — for personal study and authorized material archiving only.",
+  footer1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
+  back:"Back to homepage",
+}};
+function t(k){ const d=I18N[LANG]; return d && d[k]!==undefined ? d[k] : null; }
+if (LANG !== 'zh'){
+  document.querySelectorAll('[data-i18n]').forEach(el=>{ const v=t(el.dataset.i18n); if(v!=null) el.textContent=v; });
+  document.querySelectorAll('[data-i18n-html]').forEach(el=>{ const v=t(el.dataset.i18nHtml); if(v!=null) el.innerHTML=v; });
+}
+document.getElementById('langLabel').textContent = LANG==='zh' ? 'EN' : '中';
+document.getElementById('langBtn').onclick = () => {
+  const to = LANG==='zh' ? 'en' : 'zh';
+  document.cookie = 'lang='+to+';path=/;max-age=31536000';
+  const u = new URL(location.href); u.searchParams.set('lang', to); location.href = u.toString();
+};
+if (localStorage.getItem('theme') === 'light' ||
+    (!localStorage.getItem('theme') && matchMedia('(prefers-color-scheme: light)').matches))
+  document.documentElement.dataset.theme = 'light';
+</script>
+</body>
+</html>

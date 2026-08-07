@@ -63,7 +63,9 @@ def clear_billing():
 class StaticRegressionTests(unittest.TestCase):
     def test_homepage_has_api_tab_and_no_hardware_fingerprint(self):
         html = Path("static/index.html").read_text("utf-8")
-        self.assertIn('id="apiTabBtn"', html)
+        # 登录后用户菜单里必须有 API 控制台入口（现为用户邮箱下拉菜单内）
+        self.assertIn('id="userDrop"', html)
+        self.assertIn('href="/api-console"', html)
         self.assertIn("const ANON_ID_KEY = 'dyanon'", html)
         self.assertIn("localStorage.removeItem('dyfp')", html)
         self.assertNotIn("navigator.hardwareConcurrency", html)
@@ -1110,6 +1112,157 @@ class PrivacyStorageTests(unittest.TestCase):
             server.db_exec(
                 "SELECT COUNT(*) n FROM usage_daily "
                 "WHERE subject='ip:h:retention-boundary'", (), "one")["n"], 0)
+
+
+class AtcEnhancementTests(unittest.TestCase):
+    """AnyToCopy 增强线路：开关静默、登录门禁、原子配额、缓存命中不扣次、优先级校验。"""
+
+    def setUp(self):
+        server.db_exec("DELETE FROM atc_cache")
+        server.db_exec("DELETE FROM atc_jobs")
+        server.db_exec("DELETE FROM quota_reservations WHERE endpoint='atc_transcript'")
+        server.db_exec("DELETE FROM usage_daily WHERE subject LIKE 'atc:%'")
+        for k in ("atc_enabled", "atc_api_key", "atc_api_secret", "atc_base_url",
+                  "atc_play_enhance", "atc_transcript_enabled", "atc_transcript_daily",
+                  "atc_url_ttl", "share_play_priority", "atc_test_state"):
+            server.db_exec("DELETE FROM app_settings WHERE k=?", (k,))
+        # 直接造一个登录用户会话（绕过滑块，滑块链路本身由其他用例覆盖）
+        now = int(time.time())
+        server.db_exec(
+            "INSERT OR IGNORE INTO users(id,email,pw_salt,pw_hash,created_at,disabled) "
+            "VALUES(424242,'atc@test.dev','s','h',?,0)", (now,))
+        self.token = server._new_user_session(424242)
+        self.client = TestClient(server.app)
+        self.client.cookies.set("sess", self.token)
+
+    def tearDown(self):
+        server._user_sessions.pop(self.token, None)
+        server.db_exec("DELETE FROM users WHERE id=424242")
+        server.db_exec("DELETE FROM usage_daily WHERE subject LIKE 'atc:%'")
+
+    def _enable(self, daily="5"):
+        server.set_app_setting("atc_enabled", "1")
+        server.set_app_setting("atc_api_key", "ak_test")
+        server.set_app_setting("atc_api_secret", "sk_test")
+        server.set_app_setting("atc_transcript_daily", daily)
+
+    def test_master_switch_off_is_silent(self):
+        # 未配置密钥/未开启 → 404，不暴露功能存在
+        r = self.client.post("/api/atc/transcript", json={"item_id": "1"})
+        self.assertEqual(r.status_code, 404)
+        r = self.client.get("/api/atc/transcript", params={"item_id": "1"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_anonymous_gets_401(self):
+        self._enable()
+        anon = TestClient(server.app)
+        r = anon.post("/api/atc/transcript", json={"item_id": "7001"})
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("登录", r.json()["error"])
+
+    def test_submit_reserves_quota_and_dedups(self):
+        self._enable()
+        r = self.client.post("/api/atc/transcript", json={"item_id": "7002"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["state"], "processing")
+        self.assertEqual(r.json()["remaining"], 4)
+        # 预占已结算为实际使用
+        row = server.db_exec(
+            "SELECT count FROM usage_daily WHERE subject='atc:user:424242'", (), "one")
+        self.assertEqual(row[0], 1)
+        # 幂等入队：同一 item 只有一个在途任务
+        self.assertTrue(server._atc_enqueue("7002", purpose="transcript") is False)
+        n = server.db_exec(
+            "SELECT COUNT(*) FROM atc_jobs WHERE item_id='7002'", (), "one")[0]
+        self.assertEqual(n, 1)
+
+    def test_cache_hit_is_free(self):
+        self._enable()
+        now = int(time.time())
+        server.db_exec(
+            "INSERT INTO atc_cache(item_id,text_content,video_url,url_fetched_at,"
+            "created,updated) VALUES('7003','全文','',0,?,?)", (now, now))
+        r = self.client.post("/api/atc/transcript", json={"item_id": "7003"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["state"], "ready")
+        self.assertEqual(r.json()["text"], "全文")
+        # 命中缓存不扣次、不产生任务
+        row = server.db_exec(
+            "SELECT count FROM usage_daily WHERE subject='atc:user:424242'", (), "one")
+        self.assertIsNone(row)
+        n = server.db_exec(
+            "SELECT COUNT(*) FROM atc_jobs WHERE item_id='7003'", (), "one")[0]
+        self.assertEqual(n, 0)
+
+    def test_daily_limit_and_429(self):
+        self._enable(daily="2")
+        for i in range(2):
+            r = self.client.post("/api/atc/transcript",
+                                 json={"item_id": f"71{i}"})
+            self.assertEqual(r.status_code, 200)
+        r = self.client.post("/api/atc/transcript", json={"item_id": "7199"})
+        self.assertEqual(r.status_code, 429)
+        # 超限不产生新任务
+        n = server.db_exec(
+            "SELECT COUNT(*) FROM atc_jobs WHERE item_id='7199'", (), "one")[0]
+        self.assertEqual(n, 0)
+
+    def test_reservation_refund_on_enqueue_failure(self):
+        self._enable()
+        with mock.patch.object(server, "_atc_enqueue", side_effect=RuntimeError("x")):
+            with self.assertRaises(RuntimeError):
+                self.client.post("/api/atc/transcript", json={"item_id": "7200"})
+        # 失败已退款
+        row = server.db_exec(
+            "SELECT count FROM usage_daily WHERE subject='atc:user:424242'", (), "one")
+        self.assertTrue(row is None or row[0] == 0)
+
+    def test_play_priority_validation(self):
+        admin = TestClient(server.app)
+        r = admin.post("/api/admin/login",
+                       json={"password": "test-only-admin-password"})
+        self.assertEqual(r.status_code, 200)
+        r = admin.post("/api/admin/atc", json={"play_priority": ["dy1", "dy2"]})
+        self.assertEqual(r.status_code, 400)
+        r = admin.post("/api/admin/atc",
+                       json={"play_priority": ["proxy", "atc", "dy2", "dy1"]})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(server._atc_cfg()["play_priority"],
+                         ["proxy", "atc", "dy2", "dy1"])
+        # 非法 JSON 落库也不炸：自动回退默认顺序
+        server.set_app_setting("share_play_priority", "not-json")
+        self.assertEqual(server._atc_cfg()["play_priority"],
+                         ["dy1", "dy2", "atc", "proxy"])
+
+    def test_share_view_injects_atc_only_when_fresh(self):
+        import json as _json
+        row = {"id": "atcv123", "item_id": "7300", "kind": "video", "vid": "v9",
+               "title": "t", "author": "a", "avatar": "", "cover": "",
+               "custom_title": "", "payload": _json.dumps({"video": {}}),
+               "expires_at": 0, "status": "ok", "views": 0, "plays": 0,
+               "downloads": 0, "cta_clicks": 0, "created": int(time.time())}
+        # 关闭时：无 atc_url，但有默认优先级
+        view = server._share_view(row)
+        self.assertNotIn("atc_url", view["data"]["video"])
+        self.assertEqual(view["data"]["play_priority"], ["dy1", "dy2", "atc", "proxy"])
+        # 开启 + 新鲜缓存：注入
+        self._enable()
+        now = int(time.time())
+        server.db_exec(
+            "INSERT INTO atc_cache(item_id,video_url,url_fetched_at,created,updated) "
+            "VALUES('7300','https://cdn.example.com/x.mp4',?,?,?)", (now, now, now))
+        view = server._share_view(row)
+        self.assertEqual(view["data"]["video"].get("atc_url"),
+                         "https://cdn.example.com/x.mp4")
+        # 过期：不注入且惰性入队
+        server.db_exec(
+            "UPDATE atc_cache SET url_fetched_at=? WHERE item_id='7300'",
+            (now - 100000,))
+        view = server._share_view(row)
+        self.assertNotIn("atc_url", view["data"]["video"])
+        job = server.db_exec(
+            "SELECT purpose,status FROM atc_jobs WHERE item_id='7300'", (), "one")
+        self.assertEqual(tuple(job), ("play", "pending"))
 
 
 if __name__ == "__main__":

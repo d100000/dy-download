@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.12.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -232,6 +232,24 @@ CREATE TABLE IF NOT EXISTS media_traffic(
   requests INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0,
   PRIMARY KEY(day, scope)
 );
+-- AnyToCopy 增强线路：结果缓存（按 item_id 全站共享，热门视频只调一次 API）
+CREATE TABLE IF NOT EXISTS atc_cache(
+  item_id TEXT PRIMARY KEY,
+  video_url TEXT, url_fetched_at INTEGER,
+  content TEXT, text_content TEXT,
+  audio_url TEXT, duration REAL,
+  created INTEGER, updated INTEGER
+);
+-- ATC 内部任务队列（对方并发上限 5，串行化提交；重启后按 task_id 续查）
+CREATE TABLE IF NOT EXISTS atc_jobs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id TEXT, work_url TEXT,
+  purpose TEXT,
+  task_id TEXT,
+  status TEXT DEFAULT 'pending',
+  error TEXT, created INTEGER, updated INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_atc_jobs_status ON atc_jobs(status, id);
 """
 
 
@@ -1004,6 +1022,7 @@ def _sweeper():
             _refund_stale_quota_reservations()
             _cleanup_retained_data()
             _flush_media_traffic()
+            _atc_cleanup()
         except Exception:
             pass
 
@@ -2764,6 +2783,7 @@ def _refresh_share(row: dict) -> dict:
 def _share_view(row: dict, origin: str = "") -> dict:
     """把 shares 行转成分享页要用的数据结构（含重拼后的播放地址）。"""
     data = json.loads(row["payload"] or "{}")
+    cfg = _atc_cfg()                                   # 一次读取，避免重复查库
     if row["kind"] != "note" and row["vid"]:
         data.setdefault("video", {})
         data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
@@ -2773,6 +2793,15 @@ def _share_view(row: dict, origin: str = "") -> dict:
             _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
         data["video"]["filename"] = filename
         data["video"]["download_url"] = _video_download_url(row["vid"], filename)
+        # ATC 增强线路：地址新鲜才注入；过期则后台惰性重新入队，本次走其他线路
+        if cfg["enabled"] and cfg["play_enhance"]:
+            cached = _atc_cache_get(row["item_id"])
+            if _atc_url_fresh(cached, cfg["url_ttl"]):
+                data["video"]["atc_url"] = cached["video_url"]
+            elif cached:
+                _atc_enqueue(row["item_id"], purpose="play")
+    # 播放线路优先级（后台可拖拽排序；atc 无地址时前端自动跳过）
+    data["play_priority"] = cfg["play_priority"]
     return {
         "sid": row["id"],
         "kind": row["kind"],
@@ -2811,6 +2840,12 @@ def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
          json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
          "link", now + _share_ttl(request), now, "ok", now))
     row = dict(db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one"))
+    # ATC 播放地址增强：后台异步入队（分钟级），不阻塞分享页返回
+    if data.get("kind") != "note" and data.get("item_id"):
+        try:
+            _atc_enqueue(data["item_id"], purpose="play")
+        except Exception:
+            pass
     return _share_view(row, _share_origin(request))      # 新链接按域名池分配
 
 
@@ -3028,6 +3063,364 @@ def wx_jssdk(request: Request, url: str = ""):
     raw = (f"jsapi_ticket={ticket}&noncestr={nonce}&timestamp={ts}&url={page}")
     return {"enabled": True, "appId": appid, "timestamp": ts, "nonceStr": nonce,
             "signature": hashlib.sha1(raw.encode()).hexdigest()}
+
+
+# ---------------------------------------------------------------- AnyToCopy 增强线路（ATC）
+#
+# 第三方增值服务（可选，默认关闭）：语音转文字文案提取 + 分享页增强播放地址。
+# 硬约束：
+#   · 永不进入同步主解析（/api/parse 不感知本分区）；ATC 是异步任务（提交→轮询，分钟级）
+#   · 总开关 atc_enabled=0 时整条线路完全静默，任何主流程不受影响
+#   · ATC 并发上限 5 → 全部请求经 atc_jobs 表串行排队，用户请求绝不直连 ATC
+#   · 只存 URL 与文案元数据，不落地媒体字节；缓存随 DATA_RETENTION_DAYS 清理
+#   · 出站刻意不走代理池（同微信 JS-SDK 先例：第三方 API 要求出口稳定，且非抖音无封 IP 风险）
+
+ATC_DEFAULT_BASE = "https://api.anytocopy.com/vip/open-api/v1"
+ATC_POLL_INTERVAL = 4          # 官方建议 3-5 秒
+ATC_JOB_TIMEOUT = 300          # 单任务最长 5 分钟
+ATC_INFLIGHT_MAX = 2           # 同时在轮询的任务数（对方并发上限 5，留余量给其网页端）
+ATC_WORK_URL = "https://www.douyin.com/video/{item_id}"   # 由 item_id 还原作品链接
+SHARE_PLAY_SOURCES = ("dy1", "dy2", "atc", "proxy")
+
+
+def _atc_cfg() -> dict:
+    """读取运行时配置（app_settings，后台改即时生效）。未启用/未配密钥 → enabled=False。"""
+    key = app_setting("atc_api_key").strip()
+    secret = app_setting("atc_api_secret").strip()
+    try:
+        daily = max(0, min(100, int(app_setting("atc_transcript_daily", "5"))))
+    except ValueError:
+        daily = 5
+    try:
+        ttl = max(600, min(86400, int(app_setting("atc_url_ttl", "7200"))))
+    except ValueError:
+        ttl = 7200
+    try:
+        priority = json.loads(app_setting("share_play_priority", ""))
+        if not (isinstance(priority, list)
+                and sorted(priority) == sorted(SHARE_PLAY_SOURCES)):
+            raise ValueError
+    except (ValueError, TypeError):
+        priority = list(SHARE_PLAY_SOURCES)
+    return {
+        "enabled": app_setting("atc_enabled") == "1" and bool(key and secret),
+        "key": key, "secret": secret,
+        "base": (app_setting("atc_base_url") or ATC_DEFAULT_BASE).rstrip("/"),
+        "play_enhance": app_setting("atc_play_enhance", "1") == "1",
+        "transcript_enabled": app_setting("atc_transcript_enabled", "1") == "1",
+        "transcript_daily": daily,
+        "url_ttl": ttl,
+        "play_priority": priority,
+    }
+
+
+def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
+    """调 ATC 开放 API。返回解析后的 JSON；网络/协议错误抛异常。"""
+    url = cfg["base"] + path + "?" + urlparse.urlencode(params)
+    req = urlreq.Request(url, method=method)
+    req.add_header("X-API-Key", cfg["key"])
+    req.add_header("X-API-Secret", cfg["secret"])
+    req.add_header("User-Agent", pick_ua())
+    with urlreq.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _atc_cache_get(item_id: str) -> Optional[dict]:
+    row = db_exec("SELECT * FROM atc_cache WHERE item_id=?", (item_id,), "one")
+    return dict(row) if row else None
+
+
+def _atc_url_fresh(row: Optional[dict], ttl: int) -> bool:
+    """缓存里的 API 播放地址是否仍在有效期内（签名链接会过期）。"""
+    return bool(row and row.get("video_url") and row.get("url_fetched_at")
+                and time.time() - row["url_fetched_at"] < ttl)
+
+
+def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> bool:
+    """入队一个 ATC 任务。幂等：同 item_id 有在途任务或缓存仍新鲜 → 不再入队。"""
+    cfg = _atc_cfg()
+    if not cfg["enabled"] or not item_id:
+        return False
+    if purpose == "play" and not cfg["play_enhance"]:
+        return False
+    if purpose == "transcript" and not cfg["transcript_enabled"]:
+        return False
+    cached = _atc_cache_get(item_id)
+    if purpose == "play" and _atc_url_fresh(cached, cfg["url_ttl"]):
+        return False
+    if purpose == "transcript" and cached and cached.get("text_content"):
+        return False
+    if db_exec("SELECT id FROM atc_jobs WHERE item_id=? AND status IN ('pending','submitted')",
+               (item_id,), "one"):
+        return False
+    # 防任务空转：近期已跑完一轮但仍没有新鲜地址（对方也取不到）→ 冷却期内不再入队
+    cooldown = db_exec(
+        "SELECT updated FROM atc_jobs WHERE item_id=? AND status IN ('done','failed') "
+        "ORDER BY updated DESC LIMIT 1", (item_id,), "one")
+    if cooldown and time.time() - cooldown[0] < cfg["url_ttl"]:
+        return False
+    now = int(time.time())
+    db_exec("INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
+            "VALUES(?,?,?,'pending',?,?)",
+            (item_id, (work_url or ATC_WORK_URL.format(item_id=item_id))[:300],
+             purpose, now, now))
+    return True
+
+
+def _atc_save_result(item_id: str, data: dict) -> None:
+    """任务成功：upsert 缓存。只覆盖返回里实际带值的字段（转录任务不该清掉旧播放地址）。"""
+    now = int(time.time())
+    old = _atc_cache_get(item_id) or {}
+    video_url = data.get("videoUrl") or old.get("video_url") or ""
+    fetched = now if data.get("videoUrl") else (old.get("url_fetched_at") or 0)
+    db_exec(
+        "INSERT INTO atc_cache(item_id,video_url,url_fetched_at,content,text_content,"
+        "audio_url,duration,created,updated) VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(item_id) DO UPDATE SET video_url=?,url_fetched_at=?,content=?,"
+        "text_content=?,audio_url=?,duration=?,updated=?",
+        (item_id, video_url, fetched,
+         (data.get("content") or old.get("content") or "")[:2000],
+         (data.get("textContent") or old.get("text_content") or ""),
+         (data.get("audioUrl") or old.get("audio_url") or ""),
+         data.get("duration") or old.get("duration"),
+         old.get("created") or now, now,
+         video_url, fetched,
+         (data.get("content") or old.get("content") or "")[:2000],
+         (data.get("textContent") or old.get("text_content") or ""),
+         (data.get("audioUrl") or old.get("audio_url") or ""),
+         data.get("duration") or old.get("duration"), now))
+
+
+def _atc_worker():
+    """守护线程（5s 一轮）：提交 pending 任务、轮询 submitted 任务、写缓存。
+    同时在途任务不超过 ATC_INFLIGHT_MAX；重启后 submitted 任务凭 task_id 直接续查。"""
+    while True:
+        time.sleep(5)
+        try:
+            cfg = _atc_cfg()
+            if not cfg["enabled"]:
+                continue
+            now = int(time.time())
+            inflight = db_exec(
+                "SELECT COUNT(*) FROM atc_jobs WHERE status='submitted'", (), "one")[0]
+            if inflight < ATC_INFLIGHT_MAX:
+                job = db_exec(
+                    "SELECT * FROM atc_jobs WHERE status='pending' ORDER BY id LIMIT 1",
+                    (), "one")
+                if job:
+                    job = dict(job)
+                    try:
+                        resp = _atc_request("POST", "/video/extract",
+                                            {"workUrl": job["work_url"],
+                                             "taskType": "TEXT"}, cfg)
+                        if resp.get("code") == 200 and resp.get("data"):
+                            db_exec("UPDATE atc_jobs SET status='submitted',task_id=?,"
+                                    "updated=? WHERE id=?", (str(resp["data"]), now, job["id"]))
+                        elif "并发" in str(resp.get("msg") or ""):
+                            # 对方并发已满：保持 pending 等下一轮，不判死
+                            db_exec("UPDATE atc_jobs SET updated=?,error=? WHERE id=?",
+                                    (now, "对方并发已满，排队重试中", job["id"]))
+                        else:
+                            raise RuntimeError(str(resp.get("msg") or resp)[:200])
+                    except Exception as e:
+                        db_exec("UPDATE atc_jobs SET status='failed',error=?,updated=? "
+                                "WHERE id=?",
+                                (f"提交失败: {type(e).__name__}: {e}"[:300], now, job["id"]))
+                    continue
+            job = db_exec(
+                "SELECT * FROM atc_jobs WHERE status='submitted' ORDER BY id LIMIT 1",
+                (), "one")
+            if not job:
+                continue
+            job = dict(job)
+            if now - (job["updated"] or now) < ATC_POLL_INTERVAL:
+                continue                       # 距上次轮询不足 4 秒
+            if now - job["created"] > ATC_JOB_TIMEOUT:
+                db_exec("UPDATE atc_jobs SET status='failed',error='轮询超时',updated=? "
+                        "WHERE id=?", (now, job["id"]))
+                continue
+            try:
+                resp = _atc_request("GET", "/video/query", {"taskId": job["task_id"]}, cfg)
+                data = resp.get("data") or {}
+                status = data.get("status", "")
+                if status == "SUCCESS":
+                    _atc_save_result(job["item_id"], data)
+                    db_exec("UPDATE atc_jobs SET status='done',updated=? WHERE id=?",
+                            (now, job["id"]))
+                elif status in ("FAILED", "FAILURE"):
+                    db_exec("UPDATE atc_jobs SET status='failed',error=?,updated=? WHERE id=?",
+                            ((data.get("errorMessage") or "任务失败")[:300], now, job["id"]))
+                else:
+                    db_exec("UPDATE atc_jobs SET updated=? WHERE id=?", (now, job["id"]))
+            except Exception as e:
+                # 单次轮询网络错误不判死，只刷新时间戳；超时由上面的 created 判定兜底
+                db_exec("UPDATE atc_jobs SET updated=?,error=? WHERE id=?",
+                        (now, f"轮询异常: {type(e).__name__}"[:200], job["id"]))
+        except Exception:
+            pass
+
+
+def _atc_cleanup() -> int:
+    """缓存按保留期清理；终态任务记录保留 7 天。由 _sweeper 调用。"""
+    now = int(time.time())
+    n = db_exec("DELETE FROM atc_cache WHERE updated<?",
+                (now - DATA_RETENTION_DAYS * 86400,), "rowcount") or 0
+    n += db_exec("DELETE FROM atc_jobs WHERE status IN ('done','failed') AND updated<?",
+                 (now - 7 * 86400,), "rowcount") or 0
+    return n
+
+
+def _atc_status() -> dict:
+    """后台状态面板数据（不含密钥本体）。"""
+    cfg = _atc_cfg()
+    today0 = _today() * 86400
+    row = db_exec(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done, "
+        "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed "
+        "FROM atc_jobs WHERE created>=?", (today0,), "one")
+    pending = db_exec(
+        "SELECT COUNT(*) FROM atc_jobs WHERE status IN ('pending','submitted')", (), "one")[0]
+    last_err = db_exec(
+        "SELECT error FROM atc_jobs WHERE status='failed' AND error IS NOT NULL "
+        "ORDER BY updated DESC LIMIT 1", (), "one")
+    secret = cfg["secret"]
+    return {
+        "enabled": cfg["enabled"],
+        "configured": bool(cfg["key"] and secret),
+        "master_on": app_setting("atc_enabled") == "1",
+        "api_key": cfg["key"],
+        "api_secret_masked": (secret[:3] + "****" + secret[-2:]) if len(secret) > 5 else "",
+        "base_url": cfg["base"],
+        "play_enhance": cfg["play_enhance"],
+        "transcript_enabled": cfg["transcript_enabled"],
+        "transcript_daily": cfg["transcript_daily"],
+        "url_ttl": cfg["url_ttl"],
+        "play_priority": cfg["play_priority"],
+        "queue_pending": pending,
+        "today_total": int(row[0] or 0), "today_done": int(row[1] or 0),
+        "today_failed": int(row[2] or 0),
+        "last_error": (last_err[0] if last_err else "") or "",
+        "test": app_setting("atc_test_state", ""),
+    }
+
+
+# ---- 文案提取（注册用户专属，每日限额；缓存命中不扣次）----
+
+def _atc_transcript_status(user_id: int) -> tuple[int, int, int]:
+    """返回 (limit, used, remaining)。计数主体与网页解析配额隔离（atc: 前缀）。"""
+    cfg = _atc_cfg()
+    limit = cfg["transcript_daily"]
+    row = db_exec("SELECT count FROM usage_daily WHERE day=? AND subject=?",
+                  (_today(), f"atc:user:{user_id}"), "one")
+    used = int(row[0]) if row else 0
+    return limit, used, max(0, limit - used)
+
+
+def _atc_transcript_reserve(user_id: int) -> dict:
+    """原子预占一次文案提取额度（与 reserve_quota 同款 BEGIN IMMEDIATE 模式）。"""
+    cfg = _atc_cfg()
+    day = _today()
+    subject = f"atc:user:{user_id}"
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT count FROM usage_daily WHERE day=? AND subject=?",
+                (day, subject)).fetchone()
+            used = int(row[0]) if row else 0
+            take = 1 if used < cfg["transcript_daily"] else 0
+            reservation_id = ""
+            if take:
+                conn.execute(
+                    "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,1) "
+                    "ON CONFLICT(day,subject) DO UPDATE SET count=count+1",
+                    (day, subject))
+                reservation_id = "qr_" + secrets.token_urlsafe(12)
+                now = int(time.time())
+                conn.execute(
+                    "INSERT INTO quota_reservations("
+                    "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
+                    ") VALUES(?,?,?,1,0,'pending','atc_transcript',?,?)",
+                    (reservation_id, day, json.dumps([subject]), now,
+                     now + QUOTA_RESERVATION_TTL))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"ok": bool(take), "id": reservation_id,
+            "limit": cfg["transcript_daily"], "used_after": used + take,
+            "remaining": max(0, cfg["transcript_daily"] - used - take)}
+
+
+class AtcTranscriptBody(BaseModel):
+    item_id: str = ""
+
+
+@app.post("/api/atc/transcript")
+def api_atc_transcript(body: AtcTranscriptBody, request: Request):
+    """提交文案提取。缓存命中秒回不扣次；否则扣一次额度并异步入队。"""
+    cfg = _atc_cfg()
+    if not (cfg["enabled"] and cfg["transcript_enabled"]):
+        raise ApiError(404, "文案提取功能未开启")
+    u = current_user(request)
+    if not u:
+        raise ApiError(401, "获取文案需要登录，注册后每天免费提取 "
+                         f"{cfg['transcript_daily']} 次")
+    item_id = (body.item_id or "").strip()[:40]
+    if not item_id:
+        raise ApiError(400, "缺少 item_id，请先解析作品")
+    cached = _atc_cache_get(item_id)
+    if cached and cached.get("text_content"):
+        limit, used, remaining = _atc_transcript_status(u["id"])
+        return {"state": "ready", "text": cached["text_content"],
+                "audio_url": cached.get("audio_url") or "",
+                "duration": cached.get("duration"), "cached": True,
+                "remaining": remaining, "daily": limit}
+    reservation = _atc_transcript_reserve(u["id"])
+    if not reservation["ok"]:
+        raise ApiError(429, f"今日文案提取次数已用完（每天 {reservation['limit']} 次）")
+    try:
+        _atc_enqueue(item_id, purpose="transcript")
+    except Exception:
+        release_quota(reservation)
+        raise
+    settle_quota(reservation, 1)
+    return {"state": "processing", "cached": False,
+            "remaining": reservation["remaining"], "daily": reservation["limit"]}
+
+
+@app.get("/api/atc/transcript")
+def api_atc_transcript_get(item_id: str, request: Request):
+    """轮询提取状态：ready / processing / none。"""
+    cfg = _atc_cfg()
+    if not (cfg["enabled"] and cfg["transcript_enabled"]):
+        raise ApiError(404, "文案提取功能未开启")
+    u = current_user(request)
+    if not u:
+        raise ApiError(401, "请先登录")
+    limit, used, remaining = _atc_transcript_status(u["id"])
+    item_id = (item_id or "").strip()[:40]
+    cached = _atc_cache_get(item_id) if item_id else None
+    if cached and cached.get("text_content"):
+        return {"state": "ready", "text": cached["text_content"],
+                "audio_url": cached.get("audio_url") or "",
+                "duration": cached.get("duration"),
+                "remaining": remaining, "daily": limit}
+    if item_id and db_exec(
+            "SELECT id FROM atc_jobs WHERE item_id=? AND status IN ('pending','submitted')",
+            (item_id,), "one"):
+        return {"state": "processing", "remaining": remaining, "daily": limit}
+    failed = db_exec(
+        "SELECT error FROM atc_jobs WHERE item_id=? AND status='failed' "
+        "ORDER BY updated DESC LIMIT 1", (item_id,), "one") if item_id else None
+    if failed:
+        return {"state": "failed", "error": "提取失败，请稍后重试",
+                "remaining": remaining, "daily": limit}
+    return {"state": "none", "remaining": remaining, "daily": limit}
 
 
 # ---------------------------------------------------------------- 公共 API
@@ -4015,6 +4408,7 @@ def admin_state(request: Request):
         "settings": proxy_mgr.settings,
         "stats": proxy_mgr.stats,
         "ua_pool_size": len(UA_POOL),
+        "captcha": dict(_captcha_stats),     # 滑块漏斗（内存计数，重启清零）
     }
 
 
@@ -4334,6 +4728,112 @@ def admin_api_logs(request: Request, limit: int = 100):
     return {"logs": [dict(r) for r in rows]}
 
 
+# ---- AnyToCopy 增强线路（配置 / 测试 / 播放优先级）----
+
+@app.get("/api/admin/atc")
+def admin_atc_get(request: Request):
+    _require_admin(request)
+    status = _atc_status()
+    # 有在途的测试任务时顺带推进一次（管理操作，频率极低）
+    try:
+        test = json.loads(app_setting("atc_test_state", "") or "{}")
+    except ValueError:
+        test = {}
+    if test.get("state") == "submitted" and test.get("task_id"):
+        cfg = _atc_cfg()
+        try:
+            resp = _atc_request("GET", "/video/query",
+                                {"taskId": test["task_id"]}, cfg)
+            data = resp.get("data") or {}
+            st = data.get("status", "")
+            if st == "SUCCESS":
+                test = {"state": "success", "ms": test.get("ms"),
+                        "duration": data.get("duration"),
+                        "has_text": bool(data.get("textContent"))}
+            elif st in ("FAILED", "FAILURE"):
+                test = {"state": "failed",
+                        "error": (data.get("errorMessage") or "任务失败")[:200]}
+            set_app_setting("atc_test_state", json.dumps(test, ensure_ascii=False))
+            status["test"] = json.dumps(test, ensure_ascii=False)
+        except Exception:
+            pass
+    return status
+
+
+class AtcSettingsBody(BaseModel):
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    base_url: Optional[str] = None
+    enabled: Optional[bool] = None
+    play_enhance: Optional[bool] = None
+    transcript_enabled: Optional[bool] = None
+    transcript_daily: Optional[int] = None
+    url_ttl: Optional[int] = None
+    play_priority: Optional[list] = None
+
+
+@app.post("/api/admin/atc")
+def admin_atc_set(body: AtcSettingsBody, request: Request):
+    _require_admin(request)
+    if body.api_key is not None:
+        set_app_setting("atc_api_key", body.api_key.strip()[:100])
+    if body.api_secret is not None:      # 空串 = 清除；前端不回传打码值
+        set_app_setting("atc_api_secret", body.api_secret.strip()[:100])
+    if body.base_url is not None:
+        base = body.base_url.strip().rstrip("/")
+        if base and not base.startswith("https://"):
+            raise ApiError(400, "Base URL 必须是 https:// 地址")
+        set_app_setting("atc_base_url", base[:200])
+    if body.enabled is not None:
+        set_app_setting("atc_enabled", "1" if body.enabled else "0")
+    if body.play_enhance is not None:
+        set_app_setting("atc_play_enhance", "1" if body.play_enhance else "0")
+    if body.transcript_enabled is not None:
+        set_app_setting("atc_transcript_enabled", "1" if body.transcript_enabled else "0")
+    if body.transcript_daily is not None:
+        set_app_setting("atc_transcript_daily",
+                        str(max(0, min(100, int(body.transcript_daily)))))
+    if body.url_ttl is not None:
+        set_app_setting("atc_url_ttl", str(max(600, min(86400, int(body.url_ttl)))))
+    if body.play_priority is not None:
+        if not (isinstance(body.play_priority, list)
+                and sorted(body.play_priority) == sorted(SHARE_PLAY_SOURCES)):
+            raise ApiError(400, "播放优先级必须且只能包含 dy1 / dy2 / atc / proxy 四项")
+        set_app_setting("share_play_priority", json.dumps(body.play_priority))
+    return _atc_status()
+
+
+class AtcTestBody(BaseModel):
+    work_url: str = ""
+
+
+@app.post("/api/admin/atc/test")
+def admin_atc_test(body: AtcTestBody, request: Request):
+    """测试连接：真实提交一个提取任务验证密钥可用，结果异步到。
+    状态写 app_settings.atc_test_state（task_id + 提交耗时），由 GET 轮询推进。"""
+    _require_admin(request)
+    cfg = _atc_cfg()
+    if not (cfg["key"] and cfg["secret"]):
+        raise ApiError(400, "请先保存 API Key 与 Secret")
+    work_url = body.work_url.strip() or "https://v.douyin.com/uc_Eukb0zUM/"
+    t0 = time.time()
+    try:
+        resp = _atc_request("POST", "/video/extract",
+                            {"workUrl": work_url, "taskType": "TEXT"}, cfg)
+    except Exception as e:
+        set_app_setting("atc_test_state", json.dumps(
+            {"state": "failed", "error": f"{type(e).__name__}: {e}"}))
+        raise ApiError(502, f"连接失败：{type(e).__name__}: {e}")
+    ms = int((time.time() - t0) * 1000)
+    if resp.get("code") != 200 or not resp.get("data"):
+        set_app_setting("atc_test_state", json.dumps(
+            {"state": "failed", "error": str(resp.get("msg") or resp)[:200]}))
+        raise ApiError(502, f"任务提交被拒：{resp.get('msg') or '未知错误'}")
+    set_app_setting("atc_test_state", json.dumps(
+        {"state": "submitted", "task_id": str(resp["data"]), "ms": ms}))
+    return {"ok": True, "task_id": str(resp["data"]), "ms": ms}
+
+
 # ---- 分享页管理（含侵权下架）----
 
 @app.get("/api/admin/shares")
@@ -4604,6 +5104,7 @@ def _start_health():
     _start_api_job_workers(prepared=True)
     threading.Thread(target=_health_loop, daemon=True).start()
     threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
+    threading.Thread(target=_atc_worker, daemon=True).start()
 
 
 @app.on_event("shutdown")
@@ -4644,7 +5145,64 @@ def _pick_lang(request: Request) -> str:
     return "zh" if al.startswith("zh") or not al else ("en" if al[:2] not in ("zh",) else "zh")
 
 
-def _seo_head(lang: str, origin: str, path: str = "/") -> str:
+# 落地页 SEO 覆盖：键为路径，内容与该页可见文案保持一致（FAQ 与页面对应）
+_LANDING_SEO = {
+    "/transcript": {
+        "meta": {
+            "zh": {
+                "title": "抖音文案提取 · 视频语音转文字 — 抖音无水印下载器",
+                "desc": "把抖音视频里的语音自动转成文字：注册用户每天免费提取，标题、正文、口播全文一次拿全，适合素材收集与内容分析。开源可审查、不保存媒体文件。",
+                "kw": "抖音文案提取,视频转文字,抖音语音转文字,口播文案提取,视频文案提取,douyin transcript,抖音字幕提取",
+                "site": "抖音无水印下载器",
+                "ogt": "抖音文案提取 · 视频语音一键转文字",
+                "ogd": "粘贴抖音链接，自动把视频语音转成完整文字。注册用户每天免费提取，不保存媒体文件。",
+                "locale": "zh_CN",
+            },
+            "en": {
+                "title": "Douyin Transcript Extractor — Speech to Text, Free Daily",
+                "desc": "Turn the speech in any Douyin video into text: title, caption and full transcript in one go. Free daily quota for signed-in users. Open source, no media-file storage.",
+                "kw": "douyin transcript,video to text,douyin speech to text,extract video caption,douyin subtitle extractor",
+                "site": "Douyin Downloader",
+                "ogt": "Douyin Transcript Extractor — Speech to Text",
+                "ogd": "Paste a Douyin link and get the full transcript of its speech. Free daily quota, no media-file storage.",
+                "locale": "en_US",
+            },
+        },
+        "ld": {
+            "zh": {
+                "app_desc": "抖音视频文案提取工具：粘贴链接即可把视频语音转成文字，同时获得标题与正文。注册用户每天免费提取，同一视频只计一次；本站不保存媒体文件。",
+                "features": ["抖音视频语音转文字", "标题与正文提取", "音频试听", "注册用户每日免费", "结果可复制", "不保存媒体文件"],
+                "faq": [
+                    ("什么是抖音文案提取？", "把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。该功能由可选的增强线路处理，异步任务通常 1–3 分钟完成。"),
+                    ("文案提取收费吗？", "注册用户每天有免费提取次数（默认 5 次，以页面显示为准）。同一视频全站只提取一次，再次打开命中缓存不重复扣次。"),
+                    ("我的链接会发给第三方吗？", "仅在管理员开启增强线路后，你请求提取的作品链接会提交给第三方服务（AnyToCopy）处理，用于获取语音转文字结果与播放地址；未开启则不发送。本站只保存处理结果元数据，不保存视频文件。"),
+                    ("提取要等多久？", "通常 1–3 分钟，取决于视频时长，短视频更快。提交后可以离开页面，回来后重新打开开关即可查看结果。"),
+                ],
+                "howto": ("如何提取抖音视频文案", [
+                    ("粘贴并解析", "把抖音分享链接粘贴到本站输入框，点击解析。"),
+                    ("打开「获取文案」开关", "登录后在解析结果卡上打开「获取文案（语音转文字）」开关。未登录时点开关会引导你先登录。"),
+                    ("等待并复制", "提取通常 1–3 分钟，完成后可一键复制全文或试听音频。")]),
+            },
+            "en": {
+                "app_desc": "A Douyin transcript extractor: paste a link to turn a video's speech into text, together with its title and caption. Signed-in users get a free daily quota; only one extraction per video site-wide. No media files are stored.",
+                "features": ["Douyin speech to text", "Title & caption extraction", "Audio preview", "Free daily quota", "One-click copy", "No media-file storage"],
+                "faq": [
+                    ("What is Douyin transcript extraction?", "It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Powered by an optional enhancement route as an async job, usually done in 1–3 minutes."),
+                    ("Is transcript extraction free?", "Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing."),
+                    ("Is my link sent to a third party?", "Only when the enhancement route is enabled by the site operator: the link you ask to transcribe is submitted to a third-party service (AnyToCopy) to produce the transcript and a playback URL; otherwise nothing is sent. Only result metadata is kept — never the video file."),
+                    ("How long does it take?", "Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result."),
+                ],
+                "howto": ("How to extract the transcript of a Douyin video", [
+                    ("Paste and parse", "Paste the Douyin share link into the input box and click Parse."),
+                    ("Turn on the transcript toggle", "After signing in, switch on “Transcript (speech to text)” on the result card. Signed-out users are guided to sign in first."),
+                    ("Wait and copy", "Extraction usually takes 1–3 minutes. When done, copy the full text or listen to the audio.")]),
+            },
+        },
+    },
+}
+
+
+def _seo_head(lang: str, origin: str, path = "/") -> str:
     """按语言生成整段 SEO 头（title/description/OG/Twitter/hreflang/JSON-LD）。"""
     zh = lang == "zh"
     base = f"{origin}{path}"
@@ -4675,13 +5233,14 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
             "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。播放直连、视频签名流式下载，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
             "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "播放直连且媒体不落地", "开发者 API"],
             "faq": [
-                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；浏览器直连播放或图片时抖音会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。"),
+                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；浏览器直连播放或图片时抖音会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。仅当管理员开启「增强线路」且用户主动使用文案提取时，对应作品链接会提交给第三方服务（AnyToCopy）处理；未开启或不使用则不发送。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录抖音账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
                 ("下载的抖音视频有水印吗？", "没有水印。下载的是无水印原片，也不会加入本站自己的二次水印。"),
                 ("支持图集（图片作品）下载吗？", "支持。图集作品会自动识别，可逐张下载原图，也可批量下载。"),
                 ("有没有 API 可以批量调用？", "有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。"),
+                ("怎么提取抖音视频的文案（语音转文字）？", "解析后打开结果卡上的「获取文案（语音转文字）」开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。"),
             ],
             "howto": ("如何下载抖音无水印视频并分享给微信好友", [
                 ("复制分享链接", "在抖音 App 里点分享，复制作品链接或整段分享文案。"),
@@ -4692,13 +5251,14 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
             "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. Playback is browser-direct while video downloads use a signed streaming route. It is open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
             "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Direct playback with no media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy. Only when the operator enables the enhancement route and the user actively uses transcript extraction is the corresponding video link submitted to a third-party service (AnyToCopy); otherwise nothing is sent."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
                 ("Do downloaded videos have a watermark?", "No. You get the original video with no watermark, and we never add our own."),
                 ("Can I download photo galleries (image posts)?", "Yes. Image posts are detected automatically; download each original image or batch-download them."),
                 ("Is there an API for bulk use?", "Yes. After signing in you can create an API key in the console, submit links in bulk via the async API and poll for results, billed per request."),
+                ("How do I extract the transcript of a Douyin video?", "After parsing, switch on the transcript toggle on the result card — extraction usually takes 1–3 minutes and the full text can be copied. Sign-in is required, with a free daily quota; each video is extracted only once site-wide."),
             ],
             "howto": ("How to download a Douyin video without watermark and share it on WeChat", [
                 ("Copy the share link", "In the Douyin app tap Share and copy the link or the whole share text."),
@@ -4706,6 +5266,12 @@ def _seo_head(lang: str, origin: str, path: str = "/") -> str:
                 ("Download or create a share page", "Download the original file, or create a share page for WeChat. A pasted URL remains a plain link; open the page in WeChat and forward it from the top-right menu to send a card.")]),
         },
     }[lang]
+
+    # 落地页（如 /transcript）用独立文案覆盖默认首页 SEO
+    landing = _LANDING_SEO.get(path)
+    if landing:
+        meta = landing["meta"][lang]
+        ld = landing["ld"][lang]
 
     org_id = f"{origin}/#org"
     site_id = f"{origin}/#website"
@@ -4869,14 +5435,38 @@ def api_docs(request: Request):
     return resp
 
 
+@app.get("/transcript", response_class=HTMLResponse)
+def transcript_page(request: Request):
+    """文案提取落地页（SEO）：功能本体在首页结果卡，本页负责被搜到。"""
+    log_pageview(request)
+    lang = _pick_lang(request)
+    origin = _origin(request)
+    html = Path("static/transcript.html").read_text("utf-8")
+    html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
+                .replace("{{SEO_HEAD}}", _seo_head(lang, origin, "/transcript"))
+                .replace("{{ORIGIN}}", origin))
+    resp = HTMLResponse(html)
+    resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
+    return resp
+
+
 @app.get("/api/quota")
 def api_quota(request: Request):
-    """前端查询今日剩余免费次数。"""
+    """前端查询今日剩余免费次数（含文案提取额度，供结果卡开关展示）。"""
     limit, used, remaining = quota_status(request)
     u = current_user(request)
+    cfg = _atc_cfg()
+    atc_on = cfg["enabled"] and cfg["transcript_enabled"]
+    if u and atc_on:
+        atc_limit, atc_used, atc_remaining = _atc_transcript_status(u["id"])
+    else:
+        # 匿名也返回真实每日上限（前端提示"登录后每天 N 次"要用），剩余恒 0
+        atc_limit, atc_remaining = (cfg["transcript_daily"] if atc_on else 0), 0
     return {"limit": limit, "used": used, "remaining": remaining,
             "user_daily": FREE_USER_DAILY,
-            "user": {"email": u["email"]} if u else None}
+            "user": {"email": u["email"]} if u else None,
+            "atc": {"enabled": atc_on,
+                    "daily": atc_limit, "remaining": atc_remaining}}
 
 
 # ---------------------------------------------------------------- 用户鉴权 API
@@ -4884,10 +5474,15 @@ def api_quota(request: Request):
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
+# 滑块漏斗观测（内存计数，重启清零；只看失败率趋势，不落库、不含个人标识）
+_captcha_stats = {"load": 0, "ok": 0, "fail": 0}
+
+
 @app.get("/api/auth/captcha")
 def auth_captcha(request: Request):
     if not _captcha_rate_ok(_client_ip(request)):        # 防验证码 CPU-DoS
         raise ApiError(429, "操作过于频繁，请稍后再试")
+    _captcha_stats["load"] += 1
     return make_captcha(request)
 
 
@@ -4902,6 +5497,7 @@ class CaptchaBody(BaseModel):
 def auth_captcha_verify(body: CaptchaBody, request: Request):
     """滑块校验独立成步。通过后返回一次性通行令牌，注册/登录必须携带它。"""
     ok, err = verify_captcha(body.cid, body.x, body.trajectory, body.nonce, request)
+    _captcha_stats["ok" if ok else "fail"] += 1
     if not ok:
         raise ApiError(400, err)
     return {"ok": True, "pass_token": issue_pass(request)}
@@ -5016,6 +5612,7 @@ def llms_txt(request: Request):
 - **免 App 观看**：接收方无需安装抖音、无需登录，微信内置浏览器直接播放。
 - **分享海报**：前端合成带二维码的海报图，长按保存后可发朋友圈；链接被拦截时的传播兜底。
 - 在线预览：下载前可直接在网页中预览播放。
+- **文案提取（语音转文字）**：解析后打开「获取文案」开关，自动把视频语音转成完整文字；注册用户每天免费提取，同一视频全站只计一次。仅在管理员开启增强线路时，链接才会提交给第三方服务（AnyToCopy）处理；未开启则不发送。
 - 可靠媒体链路：播放与图片直连优先，视频下载走同源签名流式转发，本站不缓存、不留存。
 - 开源可审查、数据最小化：不保存媒体文件；免费额度和诊断只处理必要的用途化摘要、粗粒度环境与事件，保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；站内账号可选。
 - 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
@@ -5036,6 +5633,7 @@ def llms_txt(request: Request):
 
 ## 相关链接
 - 首页（下载 + 生成分享页）：{o}/
+- 文案提取（语音转文字）：{o}/transcript
 - API 文档：{o}/api-docs
 - API 控制台：{o}/api-console
 """
@@ -5056,6 +5654,7 @@ def sitemap(request: Request):
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
            'xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
            + entry("/", "1.0") + entry("/api-docs", "0.7")
+           + entry("/transcript", "0.8")
            + '</urlset>\n')
     return Response(xml, media_type="application/xml")
 
