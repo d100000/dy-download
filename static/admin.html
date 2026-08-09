@@ -883,17 +883,20 @@ async function loadShares(){
     <div class="stat"><div class="k">CTA 点击</div><div class="v tnum">${d.cta}<small> / 回流首页</small></div></div>`;
   $('#sharesEmpty').style.display = d.shares.length ? 'none' : '';
   const label = {ok:'生效中', dead:'源已删', takedown:'已下架'};
+  const parseLabel = {pending:'排队中', processing:'解析中', failed:'解析失败'};
   $('#sharesBody').innerHTML = d.shares.map(s => {
     const expired = s.expires_at && s.expires_at * 1000 < Date.now();
-    const state = expired && s.status === 'ok' ? '已过期' : (label[s.status] || s.status);
+    const state = expired && s.status === 'ok' ? '已过期'
+      : (s.status === 'ok' && s.parse_status !== 'ready'
+        ? (parseLabel[s.parse_status] || s.parse_status) : (label[s.status] || s.status));
     return `<tr>
       <td class="mono"><a href="/s/${esc(s.id)}" target="_blank" rel="noopener">${esc(s.id)}</a></td>
       <td style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(s.title||'')}">${esc(s.title||'')}</td>
       <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.author||'')}</td>
-      <td>${s.kind === 'note' ? '图集' : '视频'}</td>
+      <td>${s.parse_status !== 'ready' ? '待识别' : (s.kind === 'note' ? '图集' : '视频')}</td>
       <td class="tnum">${s.views}</td><td class="tnum">${s.plays}</td>
       <td class="tnum">${s.downloads}</td><td class="tnum">${s.cta_clicks}</td>
-      <td><span class="badge${s.status === 'ok' && !expired ? '' : ' bad'}">${state}</span></td>
+      <td><span class="badge${s.status === 'ok' && !expired && s.parse_status === 'ready' ? '' : ' bad'}">${state}</span></td>
       <td class="tnum">${ago2(s.created)}</td>
       <td style="white-space:nowrap">
         ${s.status === 'takedown' ? '' : `<button class="btn btn-ghost btn-sm" onclick="takedownShare('${esc(s.id)}')">下架</button>`}

@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -120,6 +121,445 @@ class StaticRegressionTests(unittest.TestCase):
         self.assertEqual(share.headers.get("cache-control"), "private, no-store")
         self.assertEqual(share.headers.get("pragma"), "no-cache")
         self.assertEqual(share.headers.get("vary"), "User-Agent")
+
+
+class AsyncShareTests(unittest.TestCase):
+    def setUp(self):
+        server._share_hits.clear()
+        with server._db_lock:
+            conn = server._db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM shares")
+                conn.execute("DELETE FROM share_submissions")
+                conn.execute("DELETE FROM blocked_share_items")
+                conn.execute("DELETE FROM blocked_share_sources")
+                conn.execute("DELETE FROM quota_reservations")
+                conn.execute("DELETE FROM usage_daily")
+                conn.execute("DELETE FROM app_settings WHERE k='share_primary_domain'")
+                conn.commit()
+            finally:
+                conn.close()
+        self.request = make_request(
+            "/api/shares", client_ip="203.0.113.91",
+            headers={"Idempotency-Key": "share-test-001"})
+
+    def _create(self, text="https://v.douyin.com/Abc_123-/", title=""):
+        with mock.patch.object(server, "_wake_share_parse_workers"):
+            return server.api_share_create_async(
+                server.AsyncShareBody(text=text, title=title), self.request)
+
+    def test_create_returns_before_network_and_is_idempotent(self):
+        with mock.patch.object(
+                server, "_parse_cached",
+                side_effect=AssertionError("request path must not parse")):
+            first = self._create("3.87 复制 https://v.douyin.com/Abc_123-/ 打开抖音")
+        self.assertEqual(first.status_code, 202)
+        payload = json.loads(first.body)["data"]
+        self.assertEqual(payload["status"], "pending")
+        self.assertFalse(payload["ready"])
+        self.assertTrue(payload["share_url"].endswith("/s/" + payload["sid"]))
+        self.assertEqual(first.headers["location"], "/s/" + payload["sid"])
+        self.assertTrue(payload["manage_token"].startswith("sm1_"))
+
+        row = dict(server.db_exec(
+            "SELECT * FROM shares WHERE id=?", (payload["sid"],), "one"))
+        self.assertEqual(row["parse_status"], "pending")
+        self.assertEqual(row["source_url"], "https://v.douyin.com/Abc_123-/")
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations WHERE id=?",
+            (row["quota_reservation_id"],), "one")
+        self.assertEqual(reservation["status"], "pending")
+
+        replay = self._create("https://v.douyin.com/Abc_123-/")
+        replay_body = json.loads(replay.body)
+        self.assertTrue(replay_body["replayed"])
+        self.assertEqual(replay_body["data"]["sid"], payload["sid"])
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM shares", (), "one")[0], 1)
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM quota_reservations", (), "one")[0], 1)
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM share_submissions", (), "one")[0], 1)
+
+        with self.assertRaises(server.ApiError) as conflict:
+            self._create("https://v.douyin.com/Different9/")
+        self.assertEqual(conflict.exception.status, 409)
+
+    def test_concurrent_idempotent_replays_create_one_share_and_reservation(self):
+        def submit(_):
+            request = make_request(
+                "/api/shares", client_ip="203.0.113.92",
+                headers={"Idempotency-Key": "same-concurrent-request"})
+            return server.api_share_create_async(
+                server.AsyncShareBody(
+                    text="https://v.douyin.com/Concurrent9/"), request)
+
+        with mock.patch.object(server, "_wake_share_parse_workers"), \
+                ThreadPoolExecutor(max_workers=8) as pool:
+            responses = list(pool.map(submit, range(12)))
+        sids = {json.loads(response.body)["data"]["sid"] for response in responses}
+        self.assertEqual(len(sids), 1)
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM shares", (), "one")[0], 1)
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM quota_reservations", (), "one")[0], 1)
+
+    def test_strict_link_validation_is_local_and_rejects_ambiguous_input(self):
+        valid = server._normalize_share_short_link(
+            "分享文案 https://v.douyin.com/a-B_9/ 复制打开抖音")
+        self.assertEqual(valid, "https://v.douyin.com/a-B_9/")
+        for value in (
+                "http://v.douyin.com/a-B_9/",
+                "https://v.douyin.com/a-B_9/?x=1",
+                "https://user@v.douyin.com/a-B_9/",
+                "https://v.douyin.com/a-B_9/ https://v.douyin.com/Other9/",
+                "https://example.com/a-B_9/",
+                "x" * 4097):
+            with self.assertRaises(server.ApiError, msg=value[:80]):
+                server._normalize_share_short_link(value)
+
+    def test_worker_success_atomically_publishes_share_and_settles_quota(self):
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse("test-worker:1")
+        self.assertEqual(item["id"], created["sid"])
+        parsed = {
+            "kind": "video", "item_id": "7654321098765432100",
+            "title": "异步视频", "author": "测试作者",
+            "avatar": "", "cover": "https://p3.douyinpic.com/cover.jpeg",
+            "video": {
+                "url": "https://www.iesdouyin.com/aweme/v1/play/?video_id=vid_async_1",
+                "filename": "async.mp4", "width": 1920, "height": 1080,
+            },
+        }
+        with mock.patch.object(server, "_parse_cached", return_value=parsed), \
+                mock.patch.object(server, "_atc_enqueue"):
+            server._run_claimed_share_parse(item)
+
+        row = dict(server.db_exec(
+            "SELECT * FROM shares WHERE id=?", (created["sid"],), "one"))
+        self.assertEqual(row["parse_status"], "ready")
+        self.assertEqual(row["item_id"], parsed["item_id"])
+        self.assertEqual(row["vid"], "vid_async_1")
+        self.assertIsNone(row["source_url"])
+        reservation = server.db_exec(
+            "SELECT status,committed_units FROM quota_reservations WHERE id=?",
+            (row["quota_reservation_id"],), "one")
+        self.assertEqual((reservation["status"], reservation["committed_units"]),
+                         ("settled", 1))
+        status = server.api_share_status(created["sid"], self.request)["data"]
+        self.assertEqual(status["status"], "ready")
+        self.assertTrue(status["shareable"])
+        self.assertNotIn("video", status)
+
+    def test_expired_lease_is_taken_over_and_old_worker_cannot_publish(self):
+        created = json.loads(self._create().body)["data"]
+        old = server._claim_share_parse("old-worker")
+        server.db_exec(
+            "UPDATE shares SET lease_until=? WHERE id=?",
+            (int(time.time()) - 1, created["sid"]))
+        new = server._claim_share_parse("new-worker")
+        self.assertEqual(new["id"], created["sid"])
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000001",
+            "title": "lease", "author": "tester", "avatar": "", "cover": "",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=lease_vid"},
+        }
+        self.assertFalse(server._finish_share_parse_success(old, parsed))
+        self.assertTrue(server._finish_share_parse_success(new, parsed))
+        row = server.db_exec(
+            "SELECT parse_status,vid FROM shares WHERE id=?",
+            (created["sid"],), "one")
+        self.assertEqual((row["parse_status"], row["vid"]),
+                         ("ready", "lease_vid"))
+        reservation = server.db_exec(
+            "SELECT status,committed_units FROM quota_reservations", (), "one")
+        self.assertEqual((reservation["status"], reservation["committed_units"]),
+                         ("settled", 1))
+
+    def test_permanent_failure_is_publicly_redacted_and_refunded(self):
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse("test-worker:2")
+        with mock.patch.object(
+                server, "_parse_cached",
+                side_effect=server.ApiError(404, "secret proxy user:pass@host")):
+            server._run_claimed_share_parse(item)
+        row = dict(server.db_exec(
+            "SELECT * FROM shares WHERE id=?", (created["sid"],), "one"))
+        self.assertEqual(row["parse_status"], "failed")
+        self.assertEqual(row["parse_error_code"], "content_unavailable")
+        self.assertIsNone(row["source_url"])
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations WHERE id=?",
+            (row["quota_reservation_id"],), "one")
+        self.assertEqual(reservation["status"], "refunded")
+        public = server.api_share_status(created["sid"], self.request)["data"]
+        self.assertEqual(public["status"], "failed")
+        self.assertNotIn("secret", json.dumps(public))
+        self.assertNotIn("user:pass", json.dumps(public))
+
+    def test_pending_share_page_does_not_synchronously_refresh(self):
+        created = json.loads(self._create().body)["data"]
+        with mock.patch.object(
+                server, "_refresh_share",
+                side_effect=AssertionError("pending page must not parse")):
+            response = server.share_page(
+                created["sid"], make_request(f"/s/{created['sid']}"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("视频正在准备中", response.body.decode())
+        self.assertIn("pollShareStatus", response.body.decode())
+
+    def test_anonymous_manage_token_deletes_without_leaking_from_status(self):
+        response = self._create()
+        created = json.loads(response.body)["data"]
+        public = server.api_share_status(created["sid"], self.request)["data"]
+        self.assertNotIn("manage_token", public)
+        with self.assertRaises(server.ApiError) as denied:
+            server.api_share_delete(created["sid"], make_request(
+                f"/api/shares/{created['sid']}"))
+        self.assertEqual(denied.exception.status, 403)
+
+        delete_request = make_request(
+            f"/api/shares/{created['sid']}",
+            headers={"X-Share-Manage-Token": created["manage_token"]})
+        self.assertTrue(server.api_share_delete(
+            created["sid"], delete_request)["ok"])
+        self.assertIsNone(server.db_exec(
+            "SELECT 1 FROM shares WHERE id=?", (created["sid"],), "one"))
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations", (), "one")
+        self.assertEqual(reservation["status"], "refunded")
+        # 限频事实不因用户删除而消失。
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM share_submissions", (), "one")[0], 1)
+
+    def test_deleting_claimed_job_charges_once_and_old_worker_loses_cas(self):
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse("delete-race-worker")
+        delete_request = make_request(
+            f"/api/shares/{created['sid']}",
+            headers={"X-Share-Manage-Token": created["manage_token"]})
+        server.api_share_delete(created["sid"], delete_request)
+        reservation = server.db_exec(
+            "SELECT status,committed_units FROM quota_reservations", (), "one")
+        self.assertEqual((reservation["status"], reservation["committed_units"]),
+                         ("settled", 1))
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000901",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=deleted_vid"},
+        }
+        self.assertFalse(server._finish_share_parse_success(item, parsed))
+
+    def test_submission_limit_survives_delete_and_ignores_spoofed_fp(self):
+        old_limit = server.SHARE_MAX_PER_HOUR
+        server.SHARE_MAX_PER_HOUR = 2
+        try:
+            for i in range(2):
+                req = make_request(
+                    "/api/shares", client_ip="203.0.113.95",
+                    headers={"Idempotency-Key": f"rate-{i}", "X-FP": f"fake-{i}"})
+                with mock.patch.object(server, "_wake_share_parse_workers"):
+                    response = server.api_share_create_async(
+                        server.AsyncShareBody(
+                            text=f"https://v.douyin.com/Rate{i}Ab/"), req)
+                data = json.loads(response.body)["data"]
+                server.api_share_delete(data["sid"], make_request(
+                    f"/api/shares/{data['sid']}", client_ip="203.0.113.95",
+                    headers={"X-Share-Manage-Token": data["manage_token"]}))
+            req = make_request(
+                "/api/shares", client_ip="203.0.113.95",
+                headers={"Idempotency-Key": "rate-2", "X-FP": "rotated-again"})
+            with self.assertRaises(server.ApiError) as limited, \
+                    mock.patch.object(server, "_wake_share_parse_workers"):
+                server.api_share_create_async(
+                    server.AsyncShareBody(
+                        text="https://v.douyin.com/Rate2Ab/"), req)
+            self.assertEqual(limited.exception.status, 429)
+        finally:
+            server.SHARE_MAX_PER_HOUR = old_limit
+
+    def test_watchdog_expires_processing_job_even_with_live_lease(self):
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse(server._share_parse_instance + ":blocked")
+        server.db_exec(
+            "UPDATE shares SET created=?,lease_until=? WHERE id=?",
+            (int(time.time()) - server.SHARE_PARSE_DEADLINE_SECONDS - 5,
+             int(time.time()) + 3600, created["sid"]))
+        server._share_parse_heartbeat_once()
+        row = server.db_exec(
+            "SELECT parse_status,source_url FROM shares WHERE id=?",
+            (created["sid"],), "one")
+        self.assertEqual(row["parse_status"], "failed")
+        self.assertIsNone(row["source_url"])
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations", (), "one")
+        self.assertEqual(reservation["status"], "refunded")
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000902",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=late_vid"},
+        }
+        self.assertFalse(server._finish_share_parse_success(item, parsed))
+
+    def test_blocked_item_never_publishes_and_source_is_learned(self):
+        now = int(time.time())
+        server.db_exec(
+            "INSERT INTO blocked_share_items(kind,item_id,created) VALUES(?,?,?)",
+            ("video", "7000000000000000903", now))
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse("blocked-item-worker")
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000903",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=blocked_vid"},
+        }
+        self.assertFalse(server._finish_share_parse_success(item, parsed))
+        row = server.db_exec(
+            "SELECT status,parse_status,source_hash FROM shares WHERE id=?",
+            (created["sid"],), "one")
+        self.assertEqual((row["status"], row["parse_status"]),
+                         ("takedown", "failed"))
+        self.assertTrue(server.db_exec(
+            "SELECT 1 FROM blocked_share_sources WHERE source_hash=?",
+            (row["source_hash"],), "one"))
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations", (), "one")
+        self.assertEqual(reservation["status"], "refunded")
+
+        retry_request = make_request(
+            "/api/shares", headers={"Idempotency-Key": "blocked-source-retry"})
+        with self.assertRaises(server.ApiError) as blocked:
+            server.api_share_create_async(server.AsyncShareBody(
+                text="https://v.douyin.com/Abc_123-/"), retry_request)
+        self.assertEqual(blocked.exception.status, 451)
+
+    def test_takedown_during_refresh_cannot_revive_and_refunds_settled_quota(self):
+        created = json.loads(self._create().body)["data"]
+        item = server._claim_share_parse("refresh-race-worker")
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000904",
+            "title": "before takedown", "author": "tester",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=refresh_vid"},
+        }
+        self.assertTrue(server._finish_share_parse_success(item, parsed))
+        stale = dict(server.db_exec(
+            "SELECT * FROM shares WHERE id=?", (created["sid"],), "one"))
+
+        def takedown_then_return(*_args):
+            with mock.patch.object(server, "_require_admin"):
+                server.admin_takedown(created["sid"], make_request("/api/admin"))
+            return {**parsed, "title": "must not revive"}
+
+        with mock.patch.object(server, "_parse_item",
+                               side_effect=takedown_then_return):
+            latest = server._refresh_share(stale)
+        self.assertEqual(latest["status"], "takedown")
+        persisted = server.db_exec(
+            "SELECT status,title FROM shares WHERE id=?", (created["sid"],), "one")
+        self.assertEqual(persisted["status"], "takedown")
+        self.assertEqual(persisted["title"], "before takedown")
+        reservation = server.db_exec(
+            "SELECT status,committed_units FROM quota_reservations", (), "one")
+        self.assertEqual((reservation["status"], reservation["committed_units"]),
+                         ("refunded", 0))
+        self.assertEqual(server.db_exec(
+            "SELECT COALESCE(MAX(count),0) FROM usage_daily", (), "one")[0], 0)
+
+    def test_sync_share_atomic_block_check_refunds_racing_reservation(self):
+        parsed = {
+            "kind": "video", "item_id": "7000000000000000905",
+            "title": "racing sync share", "author": "tester",
+            "video": {"url": "https://www.iesdouyin.com/aweme/v1/play/"
+                              "?video_id=sync_block_vid"},
+        }
+
+        def block_after_early_check(_data):
+            server.db_exec(
+                "INSERT INTO blocked_share_items(kind,item_id,created) VALUES(?,?,?)",
+                ("video", parsed["item_id"], int(time.time())))
+
+        with mock.patch.object(server, "_parse_cached", return_value=parsed), \
+                mock.patch.object(server, "_require_share_item_allowed",
+                                  side_effect=block_after_early_check):
+            with self.assertRaises(server.ApiError) as blocked:
+                server.api_share_create(
+                    server.ShareBody(text="https://v.douyin.com/SyncRace9/"),
+                    make_request("/api/share", client_ip="203.0.113.97"))
+        self.assertEqual(blocked.exception.status, 451)
+        self.assertEqual(server.db_exec(
+            "SELECT COUNT(*) FROM shares", (), "one")[0], 0)
+        reservation = server.db_exec(
+            "SELECT status FROM quota_reservations", (), "one")
+        self.assertEqual(reservation["status"], "refunded")
+
+    def test_body_limit_handles_declared_and_chunked_payloads_before_app(self):
+        async def exercise(chunks, declared=None, limit=8):
+            downstream_called = False
+            receive_calls = 0
+            sent = []
+
+            async def downstream(_scope, receive, send):
+                nonlocal downstream_called
+                downstream_called = True
+                while True:
+                    message = await receive()
+                    if not message.get("more_body", False):
+                        break
+                await send({"type": "http.response.start", "status": 204,
+                            "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+
+            middleware = server._AsyncShareBodyLimitMiddleware(downstream, limit)
+            messages = [
+                {"type": "http.request", "body": chunk,
+                 "more_body": i < len(chunks) - 1}
+                for i, chunk in enumerate(chunks)
+            ]
+
+            async def receive():
+                nonlocal receive_calls
+                receive_calls += 1
+                return messages.pop(0)
+
+            async def send(message):
+                sent.append(message)
+
+            headers = [] if declared is None else [
+                (b"content-length", str(declared).encode())]
+            await middleware({"type": "http", "method": "POST",
+                              "path": "/api/shares", "headers": headers},
+                             receive, send)
+            status = next(m["status"] for m in sent
+                          if m["type"] == "http.response.start")
+            return status, downstream_called, receive_calls
+
+        self.assertEqual(asyncio.run(exercise([b"123456789"], 9)),
+                         (413, False, 0))
+        status, called, calls = asyncio.run(exercise([b"12345", b"67890"], None))
+        self.assertEqual((status, called, calls), (413, False, 2))
+        status, called, _ = asyncio.run(exercise([b"1234", b"5678"], 1))
+        self.assertEqual((status, called), (204, True))
+
+    def test_origin_ignores_untrusted_host_and_forwarded_headers(self):
+        request = make_request(headers={
+            "Host": "evil.example", "X-Forwarded-Host": "attacker.example",
+            "X-Forwarded-Proto": "javascript:alert(1)//",
+        })
+        self.assertEqual(server._origin(request), "http://testserver")
+        for page in ("http://testserver.evil.example/s/x",
+                     "http://testserver@evil.example/s/x"):
+            with self.assertRaises(server.ApiError) as rejected:
+                server.wx_jssdk(request, url=page)
+            self.assertEqual(rejected.exception.status, 403)
+        with mock.patch.object(server, "_require_admin"):
+            with self.assertRaises(server.ApiError) as invalid:
+                server.admin_set_share_config(
+                    server.ShareConfigBody(
+                        primary_domain="https://user:pass@example.com/path"), request)
+        self.assertEqual(invalid.exception.status, 422)
 
 
 class MediaSecurityTests(unittest.TestCase):

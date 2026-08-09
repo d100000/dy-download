@@ -31,6 +31,7 @@ h1 .hl{background:linear-gradient(100deg,#FE2C55,#25F4EE);-webkit-background-cli
 .btn-ghost{background:var(--surface);border:1px solid var(--border);color:var(--text)}
 h2{font-size:21px;font-weight:800;margin:44px 0 6px;letter-spacing:-.01em}
 h2 .num{color:var(--accent);margin-right:8px}
+h3.sec{font-size:15px;font-weight:700;margin:20px 0 4px}
 .sub{color:var(--muted);font-size:14px;margin-bottom:16px}
 .steps3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}
 .step{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow)}
@@ -42,11 +43,11 @@ h2 .num{color:var(--accent);margin-right:8px}
 .method.get{background:var(--ok);color:#052b29}
 .path{font-family:ui-monospace,Menlo,monospace;font-size:14px;font-weight:600}
 .ep-desc{font-size:13.5px;color:var(--muted);margin:4px 0 10px}
-pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.65;color:#c7d0da;margin:8px 0}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:12.5px;line-height:1.65;color:#c7d0da;margin:8px 0;white-space:pre}
 :root[data-theme=light] pre{color:#d7dee6}
 table{border-collapse:collapse;width:100%;font-size:13.5px;margin:8px 0}
-th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border)}
-th{font-size:11.5px;letter-spacing:.04em;color:var(--muted);background:var(--surface-2)}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-size:11.5px;letter-spacing:.04em;color:var(--muted);background:var(--surface-2);white-space:nowrap}
 .tbl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:12px}
 .note{background:var(--accent-soft);border:1px solid var(--border);border-radius:12px;padding:14px 18px;font-size:13.5px;color:var(--text);margin:18px 0}
 kbd{font-family:ui-monospace,Menlo,monospace;background:var(--surface-2);border:1px solid var(--border);border-radius:5px;padding:1px 6px;font-size:.9em}
@@ -80,28 +81,68 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 <div class="steps3">
   <div class="step"><div class="n">1</div><h3 data-i18n="s1a_h">注册 / 登录</h3><p data-i18n="s1a_p">在首页右上角点「登录 / 注册」，完成滑块验证即可。</p></div>
   <div class="step"><div class="n">2</div><h3 data-i18n="s1b_h">生成 API Key</h3><p data-i18n="s1b_p">进入 API 控制台点「生成密钥」，新密钥自带试用余额。</p></div>
-  <div class="step"><div class="n">3</div><h3 data-i18n="s1c_h">发起调用</h3><p data-i18n-html="s1c_p">在请求头带 <code>X-API-Key</code> 调用下方接口即可。</p></div>
+  <div class="step"><div class="n">3</div><h3 data-i18n="s1c_h">发起调用</h3><p data-i18n-html="s1c_p">异步分享页可直接调用；付费开放 API 需在请求头带 <code>X-API-Key</code>。</p></div>
 </div>
 
 <h2><span class="num">2</span><span data-i18n="s2">鉴权</span></h2>
-<p class="sub" data-i18n-html="s2_p">所有接口只通过请求头 <code>X-API-Key: 你的密钥</code> 鉴权。不要把密钥放进 URL 查询参数，否则会进入浏览器历史与代理访问日志。密钥在 API 控制台生成与管理。</p>
+<p class="sub" data-i18n-html="s2_p">异步分享页接口使用网页免费配额，不需 API Key；<code>/api/v1/*</code> 开放 API 只通过请求头 <code>X-API-Key: 你的密钥</code> 鉴权。不要把密钥放进 URL 查询参数。</p>
 <pre>X-API-Key: dy_xxxxxxxxxxxxxxxxxxxx</pre>
 
 <h2 id="endpoints"><span class="num">3</span><span data-i18n="s3">接口</span></h2>
 
 <div class="endpoint">
+  <div class="ep-head"><span class="method">POST</span><span class="path">/api/shares</span><span class="sub" style="margin:0">无需 API Key</span></div>
+  <div class="ep-desc" data-i18n-html="ep_share">异步创建本地分享页。接收阶段只在本地校验并规范化唯一一个 <code>https://v.douyin.com/&lt;短码&gt;/</code>，不请求抖音；持久化占位页和后台任务后立即返回 <code>202 Accepted</code>。建议每次创建发送 <code>Idempotency-Key</code>，网络重试将返回同一 sid。</div>
+  <h3 class="sec" data-i18n="req">请求示例</h3>
+  <pre>curl -X POST 'https://你的域名/api/shares' \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000' \
+  -d '{ "text": "3.87 复制打开抖音 https://v.douyin.com/xxxx/", "title": "可选标题" }'</pre>
+  <h3 class="sec" data-i18n="resp">返回示例</h3>
+  <pre>HTTP/1.1 202 Accepted
+Location: /s/Ab3xYz7
+Retry-After: 2
+
+{ "ok": true, "replayed": false,
+  "data": { "sid": "Ab3xYz7", "status": "pending", "ready": false,
+    "shareable": false, "share_url": "https://你的域名/s/Ab3xYz7",
+    "status_url": "/api/shares/Ab3xYz7", "poll_after_ms": 1500,
+    "expires_at": 1780000000,
+    "manage_token": "sm1_...（仅匿名创建响应返回）" } }</pre>
+</div>
+
+<div class="endpoint">
+  <div class="ep-head"><span class="method get">GET</span><span class="path">/api/shares/{sid}</span></div>
+  <div class="ep-desc" data-i18n-html="ep_share_status">查询公开最小状态。<code>pending / processing</code> 时按 <code>poll_after_ms</code> 轮询；<code>ready</code> 时可复制 <code>share_url_versioned</code> 到微信；<code>failed</code> 只返回稳定错误码和用户文案，不暴露内部代理信息。分享页 <code>/s/{sid}</code> 会自动轮询并在完成后刷新，普通用户无需自行实现这段逻辑。</div>
+  <pre>curl 'https://你的域名/api/shares/Ab3xYz7'
+
+{ "ok": true, "data": {
+  "sid": "Ab3xYz7", "status": "ready", "ready": true, "shareable": true,
+  "kind": "video", "item_id": "7123456789", "title": "作品标题",
+  "author": "作者昵称", "share_url_versioned": "https://你的域名/s/Ab3xYz7?v=1780000008" } }</pre>
+</div>
+
+<div class="endpoint">
+  <div class="ep-head"><span class="method">DELETE</span><span class="path">/api/shares/{sid}</span></div>
+  <div class="ep-desc" data-i18n-html="ep_share_delete">删除或取消自己的分享页。登录用户使用会话身份；匿名创建者必须把创建响应中的 <code>manage_token</code> 放进 <code>X-Share-Manage-Token</code> 请求头。凭证不会出现在公开状态、分享 URL 或页面中。任务尚未被 worker 领取时会退款；已经开始解析则取消发布但计入一次额度。</div>
+  <pre>curl -X DELETE 'https://你的域名/api/shares/Ab3xYz7' \
+  -H 'X-Share-Manage-Token: sm1_...'</pre>
+</div>
+
+<div class="endpoint">
   <div class="ep-head"><span class="method">POST</span><span class="path">/api/v1/jobs</span></div>
-  <div class="ep-desc" data-i18n="ep1">提交持久化批量任务。服务会整批预授权费用；建议发送 Idempotency-Key，网络重试会返回同一 job_id 而不会重复冻结余额。</div>
-  <pre data-i18n-html="ep1_code"># 请求头
-X-API-Key: dy_xxx
-Idempotency-Key: 你的唯一请求号
+  <div class="ep-desc" data-i18n-html="ep1">提交持久化批量任务，整批预授权费用后异步处理。单个任务最多 <b>100</b> 条链接，链接必须是 <code>https://v.douyin.com/...</code> 短链（或给整段分享文案自动提取）。建议发送 <code>Idempotency-Key</code>：网络重试会返回同一 job_id 而不重复冻结余额；同一 Key 提交不同链接会返回 <code>409</code>。</div>
+  <h3 class="sec" data-i18n="req">请求示例</h3>
+  <pre>curl -X POST 'https://你的域名/api/v1/jobs' \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: dy_xxx' \
+  -H 'Idempotency-Key: req-20260807-001' \
+  -d '{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }'
 
-# 请求体（二选一）
-{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }
-{ "text":  "整段分享文案，自动提取其中所有链接" }
-
-# 返回
-{ "code": 0, "message": "accepted",
+<span data-i18n="ep1_alt"># 也可以直接给整段分享文案（自动提取其中全部链接）：</span>
+-d '{ "text": "3.89 复制打开抖音…… https://v.douyin.com/xxxx/ ……" }'</pre>
+  <h3 class="sec" data-i18n="resp">返回示例</h3>
+  <pre data-i18n-html="ep1_code">{ "code": 0, "message": "accepted",
   "data": { "job_id": "job_xxx", "total": 2, "status": "pending",
             "price_cents": 1, "estimated_cost_cents": 2,
             "query_url": "/api/v1/jobs/job_xxx" } }</pre>
@@ -109,35 +150,103 @@ Idempotency-Key: 你的唯一请求号
 
 <div class="endpoint">
   <div class="ep-head"><span class="method get">GET</span><span class="path">/api/v1/jobs/{job_id}</span></div>
-  <div class="ep-desc" data-i18n="ep2">查询任务状态与结果。status 为 done 时 results 为逐条解析结果。</div>
-  <pre data-i18n-html="ep2_code"># 返回
-{ "code": 0, "data": {
-    "status": "done", "total": 2, "done": 2, "ok": 1, "cost_cents": 1,
+  <div class="ep-desc" data-i18n-html="ep2">查询任务状态与结果（需带同一个 API Key）。<code>status</code> 为 <code>done</code> 时 <code>results</code> 为逐条解析结果；处理中建议每 2–5 秒轮询一次。失败条目不计费（自动精确退款）。</div>
+  <h3 class="sec" data-i18n="req">请求示例</h3>
+  <pre>curl 'https://你的域名/api/v1/jobs/job_xxx' \
+  -H 'X-API-Key: dy_xxx'</pre>
+  <h3 class="sec" data-i18n="resp">返回示例</h3>
+  <pre data-i18n-html="ep2_code">{ "code": 0, "message": "ok",
+  "data": {
+    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,
+    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,
     "results": [
-      { "link": "...", "ok": true,  "data": { "title": "...", "author": "...",
-          "video": { "url": "无水印视频直链", "width": 1080, "height": 1920 },
-          "stats": { "digg": 12000, "comment": 340 } } },
-      { "link": "...", "ok": false, "error": "链接已失效" }
+      { "link": "https://v.douyin.com/xxxx/", "ok": true,
+        "data": {
+          "kind": "video", "item_id": "7123456789", "title": "作品标题",
+          "author": "作者昵称", "cover": "封面图地址", "duration_ms": 15333,
+          "video": { "url": "无水印播放地址（长期有效）",
+                     "download_url": "同源签名下载地址（12 小时有效）",
+                     "width": 1080, "height": 1920, "filename": "作品标题.mp4" },
+          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },
+          "music": { "title": "背景音乐" }, "tags": ["话题1", "话题2"] } },
+      { "link": "https://v.douyin.com/yyyy/", "ok": false, "error": "链接已失效" }
     ] } }</pre>
 </div>
 
 <div class="endpoint">
   <div class="ep-head"><span class="method get">GET</span><span class="path">/api/v1/balance</span></div>
   <div class="ep-desc" data-i18n="ep3">查询当前密钥余额与用量。</div>
-  <pre>{ "code": 0, "data": { "balance_cents": 978, "reserved_cents": 2, "spent_cents": 20, "calls": 20, "price_cents": 1 } }</pre>
+  <pre>curl 'https://你的域名/api/v1/balance' \
+  -H 'X-API-Key: dy_xxx'
+
+{ "code": 0, "data": { "balance_cents": 978, "reserved_cents": 2,
+  "spent_cents": 20, "calls": 20, "price_cents": 1 } }</pre>
 </div>
 
-<h2><span class="num">4</span><span data-i18n="s4">计费</span></h2>
+<h2><span class="num">4</span><span data-i18n="s3b">任务状态与结果字段</span></h2>
+<h3 class="sec" data-i18n="st_h">任务状态（status）</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>status</th><th data-i18n="th_mean">含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>pending</code></td><td data-i18n="st1">已受理，排队等待处理</td></tr>
+    <tr><td><code>running</code></td><td data-i18n="st2">处理中（已有条目开始或完成）</td></tr>
+    <tr><td><code>done</code></td><td data-i18n="st3">全部条目已出结果（逐条看 ok 字段）</td></tr>
+  </tbody>
+</table></div>
+<h3 class="sec" data-i18n="f_h">成功条目 data 字段（kind = video）</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th data-i18n="th_field">字段</th><th data-i18n="th_mean">含义</th></tr></thead>
+  <tbody>
+    <tr><td><code>video.url</code></td><td data-i18n="f1">无水印播放地址，无签名长期有效，浏览器可直连</td></tr>
+    <tr><td><code>video.alt_url</code></td><td data-i18n="f2">备用播放域名，与 url 互为备份</td></tr>
+    <tr><td><code>video.download_url</code></td><td data-i18n="f3">本站同源签名下载地址，默认 12 小时过期，过期需重新解析</td></tr>
+    <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">本站同源播放流（兜底线路）</td></tr>
+    <tr><td><code>images[]</code></td><td data-i18n="f5">图集作品（kind = note）的原图列表，含 url / filename</td></tr>
+    <tr><td><code>stats</code></td><td data-i18n="f6">互动数据：digg 点赞 / comment 评论 / collect 收藏 / share 分享</td></tr>
+    <tr><td><code>warning</code></td><td data-i18n="f7">成功但带警告时出现（如部分数据缺失）</td></tr>
+  </tbody>
+</table></div>
+
+<h2><span class="num">5</span><span data-i18n="s4">计费</span></h2>
 <p class="sub" data-i18n="s4_p">提交时按任务全部链接和当时单价整批预授权；可用余额不足则整单拒绝。每条成功结果转为消费，失败结果自动精确退款。任务、租约与账本都持久化，重启后继续处理；建议用 Idempotency-Key 安全重试。</p>
 
-<h2><span class="num">5</span><span data-i18n="s5">错误码</span></h2>
+<h2><span class="num">6</span><span data-i18n="s6">调用示例（Python）</span></h2>
+<pre>import json, time, urllib.request
+
+KEY = "dy_xxx"
+BASE = "https://你的域名"
+
+def call(method, path, payload=None):
+    req = urllib.request.Request(BASE + path, method=method,
+        data=json.dumps(payload).encode() if payload else None,
+        headers={"X-API-Key": KEY, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())["data"]
+
+job = call("POST", "/api/v1/jobs",
+           {"links": ["https://v.douyin.com/xxxx/"]})
+for _ in range(60):                       # 每 2 秒轮询，最长 2 分钟
+    time.sleep(2)
+    d = call("GET", f"/api/v1/jobs/{job['job_id']}")
+    if d["status"] == "done":
+        for r in d["results"]:
+            print(r["ok"], r.get("data", {}).get("title"), r.get("error", ""))
+        break</pre>
+
+<h2><span class="num">7</span><span data-i18n="s5">错误码</span></h2>
 <div class="tbl-wrap"><table>
   <thead><tr><th data-i18n="th_http">HTTP</th><th data-i18n="th_mean">含义</th></tr></thead>
   <tbody>
-    <tr><td>400</td><td data-i18n="e400">请求体错误 / 无合法链接</td></tr>
+    <tr><td>400</td><td data-i18n="e400">请求体错误 / 无合法链接 / Idempotency-Key 超过 128 字符</td></tr>
     <tr><td>401</td><td data-i18n="e401">缺少或无效的 API Key</td></tr>
-    <tr><td>402</td><td data-i18n="e402">余额不足</td></tr>
+    <tr><td>402</td><td data-i18n="e402">余额不足（整单拒绝，不扣费）</td></tr>
     <tr><td>404</td><td data-i18n="e404">任务不存在或无权访问</td></tr>
+    <tr><td>409</td><td data-i18n="e409">同一 Idempotency-Key 提交了不同的链接列表</td></tr>
+    <tr><td>413</td><td data-i18n="e413">HTTP 请求体超过 8KB，或分享文案超过 4KB</td></tr>
+    <tr><td>451</td><td data-i18n="e451">作品已因投诉或审核下架</td></tr>
+    <tr><td>422</td><td data-i18n="e422">分享短链或 Idempotency-Key 格式不合法</td></tr>
+    <tr><td>429</td><td data-i18n="e429">免费配额用完、持久限频，或同一用户在途任务过多</td></tr>
+    <tr><td>503</td><td data-i18n-html="e503">异步分享队列已满，按 <code>Retry-After</code> 稍后重试</td></tr>
   </tbody>
 </table></div>
 
@@ -161,17 +270,33 @@ const I18N={en:{
   get_key:"Sign in to create a key", see_ep:"See endpoints",
   s1:"Quick start", s1a_h:"Sign up / in", s1a_p:"Click “Sign in” at the top-right of the home page and pass the slider check.",
   s1b_h:"Create an API key", s1b_p:"Open the API console and click “Create key”. New keys include trial balance.",
-  s1c_h:"Make a call", s1c_p:"Call the endpoints below with the <code>X-API-Key</code> header.",
-  s2:"Authentication", s2_p:"Every endpoint authenticates only through the <code>X-API-Key: your_key</code> header. Never put a key in a URL query parameter, where browser history and proxy access logs can expose it. Keys are managed in the API console.",
-  s3:"Endpoints",
-  ep1:"Submit a durable batch job. The full estimated cost is pre-authorized. Send an Idempotency-Key so network retries return the same job without reserving funds twice.",
-  ep1_code:'# Headers\nX-API-Key: dy_xxx\nIdempotency-Key: your-unique-request-id\n\n# Body (either)\n{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }\n{ "text":  "any share text — all links are extracted automatically" }\n\n# Response\n{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
-  ep2:"Poll job status and results. When status is done, results holds per-link outcomes.",
-  ep2_code:'# Response\n{ "code": 0, "data": {\n    "status": "done", "total": 2, "done": 2, "ok": 1, "cost_cents": 1,\n    "results": [\n      { "link": "...", "ok": true,  "data": { "title": "...", "author": "...",\n          "video": { "url": "no-watermark video URL", "width": 1080, "height": 1920 },\n          "stats": { "digg": 12000, "comment": 340 } } },\n      { "link": "...", "ok": false, "error": "link expired" }\n    ] } }',
+  s1c_h:"Make a call", s1c_p:"Async share pages can be created directly; paid Open API calls require the <code>X-API-Key</code> header.",
+  s2:"Authentication", s2_p:"The async share-page endpoints use the website's free quota and require no API key. Open API routes under <code>/api/v1/*</code> authenticate only through the <code>X-API-Key: your_key</code> request header. Never put a key in a URL query parameter.",
+  s3:"Endpoints", req:"Request", resp:"Response",
+  ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one <code>https://v.douyin.com/&lt;code&gt;/</code> URL locally; it performs no Douyin request. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
+  ep_share_status:"Read the minimal public state. Poll by <code>poll_after_ms</code> while pending/processing. When ready, copy <code>share_url_versioned</code> for WeChat. Failed responses contain only stable public error codes, never internal proxy details. The <code>/s/{sid}</code> page already polls and refreshes itself automatically.",
+  ep_share_delete:"Delete or cancel your share page. Signed-in owners use their session; anonymous creators send the creation response's <code>manage_token</code> in the <code>X-Share-Manage-Token</code> header. The token never appears in public status, URLs, or pages. An unclaimed task is refunded; once parsing has started, publication is cancelled but one quota unit remains charged.",
+  ep1:"Submit a durable batch job; the full estimated cost is pre-authorized and processing is async. Max <b>100</b> links per job, each a <code>https://v.douyin.com/...</code> short link (or pass full share text for automatic extraction). Send an <code>Idempotency-Key</code>: retries return the same job without reserving funds twice; reusing the key with different links returns <code>409</code>.",
+  ep1_alt:"# Or pass full share text — all links inside are extracted automatically:",
+  ep1_code:'{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
+  ep2:"Poll job status and results (with the same API key). When <code>status</code> is <code>done</code>, <code>results</code> holds per-link outcomes; poll every 2–5 seconds while running. Failed items are not billed (exact automatic refund).",
+  ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "no-watermark play URL (long-lived)",\n                     "download_url": "signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://v.douyin.com/yyyy/", "ok": false, "error": "link expired" }\n    ] } }',
   ep3:"Check the current key's balance and usage.",
+  s3b:"Job status & result fields", st_h:"Job status (status)", th_mean:"Meaning",
+  st1:"Accepted, waiting in queue", st2:"Running (some items started or finished)", st3:"All items settled (check per-item ok)",
+  f_h:"Fields of a succeeded item's data (kind = video)", th_field:"Field",
+  f1:"No-watermark play URL, unsigned and long-lived, playable directly by browsers",
+  f2:"Alternate play domain, a backup of url",
+  f3:"Same-origin signed download URL, expires in 12 hours by default — re-parse after expiry",
+  f4:"Same-origin playback stream (fallback route)",
+  f5:"Original image list for gallery posts (kind = note), with url / filename",
+  f6:"Engagement: digg likes / comment / collect favorites / share",
+  f7:"Present when the item succeeded with a warning (e.g. partial data missing)",
   s4:"Billing", s4_p:"The entire job is pre-authorized at submission using the snapshotted unit price. Insufficient available balance rejects the whole job. Successful items become charges and failed items are refunded exactly. Jobs, leases, and the ledger survive restarts; use Idempotency-Key for safe retries.",
-  s5:"Error codes", th_http:"HTTP", th_mean:"Meaning",
-  e400:"Bad body / no valid links", e401:"Missing or invalid API key", e402:"Insufficient balance", e404:"Job not found or not yours",
+  s6:"Example (Python)",
+  s5:"Error codes", th_http:"HTTP",
+  e400:"Bad body / no valid links / Idempotency-Key over 128 chars", e401:"Missing or invalid API key", e402:"Insufficient balance (whole job rejected, no charge)", e404:"Job not found or not yours", e409:"Same Idempotency-Key reused with a different link list",
+  e413:"HTTP body exceeds 8KB or share text exceeds 4KB", e451:"Content removed after a complaint or moderation review", e422:"Invalid share short link or Idempotency-Key format", e429:"Free quota exhausted, persistent rate limit reached, or too many in-flight tasks for this actor", e503:'Async share queue is full; retry later according to <code>Retry-After</code>',
   volume:'Need higher concurrency / lower unit price / self-hosting? <a href="https://github.com/d100000/dy-download">Contact the author</a> for an enterprise plan.',
   foot:"For personal, authorized backup use only · All content copyright belongs to its original creators",
 }};

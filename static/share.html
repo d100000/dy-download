@@ -47,8 +47,14 @@ img{max-width:100%; display:block}
 /* ---------- 卡片 ---------- */
 .card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
   overflow:hidden; box-shadow:var(--shadow)}
-.player{position:relative; background:#000; aspect-ratio:9/16; max-height:70vh; display:grid; place-items:center}
-.player.wide{aspect-ratio:16/9}
+/* 把 70vh 高度上限按视频比例换算成宽度，再居中；避免 aspect-ratio 回算后只在右侧留空。 */
+.player{position:relative; width:100%; max-width:39.375vh; margin-inline:auto; background:#000;
+  aspect-ratio:9/16; display:grid; place-items:center}
+.player.wide{max-width:124.444vh; aspect-ratio:16/9}
+@supports (height:100dvh){
+  .player{max-width:39.375dvh}
+  .player.wide{max-width:124.444dvh}
+}
 .player video{width:100%; height:100%; object-fit:contain; background:#000}
 .poster{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; filter:brightness(.82)}
 .playbtn{position:absolute; inset:0; display:grid; place-items:center; z-index:2}
@@ -146,8 +152,13 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
 /* ---------- 状态页 ---------- */
 .state{max-width:420px; margin:16vh auto 0; text-align:center; padding:0 22px}
 .state .ico{font-size:44px}
+.state .ico.wait{width:42px; height:42px; margin:0 auto; border-radius:50%;
+  border:3px solid var(--border); border-top-color:var(--accent); animation:spin .85s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.state .ico.wait{animation:none}}
 .state h2{font-size:19px; margin:14px 0 8px}
 .state p{color:var(--muted); font-size:14px}
+.state .wait-note{margin-top:12px; font-size:12.5px; color:var(--faint)}
 .state .home{display:inline-block; margin-top:20px; background:var(--accent); color:#fff;
   padding:11px 24px; border-radius:12px; font-size:14.5px; font-weight:600}
 
@@ -236,10 +247,18 @@ function showMask(title, desc, step, copy){
   document.getElementById('mask').classList.add('show');
 }
 function hideMask(){ document.getElementById('mask').classList.remove('show'); }
-function copyLink(){
+/* 抖音风格分享文案：标题 + 一句引导 + 链接（两行以内，标题过长截断） */
+function shareText(){
   const url = S.url || location.href;
-  navigator.clipboard?.writeText(url).then(()=>toast('链接已复制')).catch(()=>{
-    const i = document.createElement('input'); i.value = url; document.body.appendChild(i);
+  const t = String(S.title || '抖音作品').replace(/\s+/g, ' ').trim();
+  const short = t.length > 40 ? t.slice(0, 40) + '…' : t;
+  const by = S.author ? `@${S.author} 的抖音作品` : '抖音作品';
+  return `【${short}】${by}\n点开直接看，无需安装 App 👉 ${url}`;
+}
+function copyLink(){
+  const text = shareText();
+  navigator.clipboard?.writeText(text).then(()=>toast('链接已复制')).catch(()=>{
+    const i = document.createElement('input'); i.value = text; document.body.appendChild(i);
     i.select(); try{ document.execCommand('copy'); toast('链接已复制'); }catch{} i.remove();
   });
 }
@@ -271,19 +290,99 @@ function shareToFriend(){
 /* ---------------- 状态页 ---------------- */
 const STATES = {
   notfound: ['🔍','分享页不存在','链接可能有误，或已被创建者删除。'],
+  pending:  ['','视频正在准备中','链接已创建，系统正在后台获取抖音内容。'],
+  processing:['','正在获取视频内容','通常只需几秒，完成后本页会自动更新。'],
+  failed:   ['⚠️','内容获取失败','抖音内容暂时无法获取，请稍后重新生成。'],
   expired:  ['⏳','分享链接已过期','为保护创作者权益，分享页有有效期。可以让分享者重新生成一个。'],
   dead:     ['🗑','内容已不可用','该作品可能已被原作者删除，或设置为私密/仅粉丝可见。'],
   takedown: ['🛡','内容已下架','该分享页因权利人投诉或违规已被下架处理。'],
 };
 function renderState(state){
-  const [ico, h, p] = STATES[state] || STATES.notfound;
+  const [ico, h, fallback] = STATES[state] || STATES.notfound;
+  const waiting = state === 'pending' || state === 'processing';
+  const p = (state === 'failed' && S.error && S.error.message)
+    ? S.error.message : (waiting && _statusNotice ? _statusNotice : fallback);
   document.body.style.paddingBottom = '0';
-  app.innerHTML = `<div class="state">
-    <div class="ico">${ico}</div><h2>${h}</h2><p>${p}</p>
+  app.innerHTML = `<div class="state" role="status" aria-live="polite">
+    <div class="ico${waiting ? ' wait' : ''}" aria-hidden="true">${ico}</div><h2>${h}</h2><p>${esc(p)}</p>
+    ${waiting ? '<p class="wait-note">页面可以继续打开；准备完成前请先不要转发到微信，避免卡片缓存为“准备中”。</p>' : ''}
     ${S.author ? `<p style="margin-top:10px;font-size:12.5px;color:var(--faint)">原作者：@${esc(S.author)}</p>` : ''}
-    <a class="home" href="/">去生成我自己的分享页 →</a>
+    ${waiting ? '' : '<a class="home" href="/">去重新生成分享页 →</a>'}
   </div>`;
 }
+
+let _statusTimer = null;
+let _statusFailures = 0;
+let _statusPollRound = 0;
+let _statusNotice = '';
+const STATUS_POLL_STEPS = [1200, 2000, 3000, 5000, 8000, 10000];
+function nextStatusPollDelay(serverMs, failureCount){
+  const extra = Math.max(0, Number(failureCount) || 0);
+  const idx = Math.min(STATUS_POLL_STEPS.length - 1, _statusPollRound + extra);
+  const localMs = STATUS_POLL_STEPS[idx];
+  const advisedMs = Number(serverMs);
+  const combined = Number.isFinite(advisedMs) && advisedMs > 0
+    ? Math.max(localMs, advisedMs) : localMs;
+  return Math.max(800, Math.min(10000, combined));
+}
+function scheduleStatusPoll(ms){
+  clearTimeout(_statusTimer);
+  _statusTimer = null;
+  if (document.hidden) return;
+  _statusTimer = setTimeout(() => {
+    _statusTimer = null;
+    pollShareStatus();
+  }, Math.max(800, Math.min(10000, ms || 1500)));
+}
+async function pollShareStatus(){
+  if (!S.sid) return;
+  if (document.hidden) return;
+  try {
+    const resp = await fetch('/api/shares/' + encodeURIComponent(S.sid), {
+      credentials:'same-origin', cache:'no-store', headers:{'Accept':'application/json'},
+    });
+    if (resp.status === 404 || resp.status === 410){
+      clearTimeout(_statusTimer); _statusTimer = null;
+      S.state = resp.status === 410 ? 'expired' : 'notfound';
+      S.error = null; _statusNotice = '';
+      renderState(S.state);
+      return;
+    }
+    if (!resp.ok) throw new Error('status_' + resp.status);
+    const result = await resp.json();
+    const d = result && result.data;
+    if (!d || !d.status) throw new Error('invalid_status');
+    const hadNotice = !!_statusNotice;
+    _statusFailures = 0;
+    _statusNotice = '';
+    if (d.status === 'ready'){
+      clearTimeout(_statusTimer); _statusTimer = null;
+      location.reload();
+      return;
+    }
+    if (!['pending','processing'].includes(d.status)){
+      clearTimeout(_statusTimer); _statusTimer = null;
+      S.state = d.status;
+      S.error = d.error || null;
+      renderState(S.state);
+      return;
+    }
+    if (S.state !== d.status || hadNotice){ S.state = d.status; renderState(S.state); }
+    _statusPollRound += 1;
+    scheduleStatusPoll(nextStatusPollDelay(d.poll_after_ms, 0));
+  } catch {
+    _statusFailures += 1;
+    if (_statusFailures >= 3 && !_statusNotice){
+      _statusNotice = '网络暂时不稳定，后台仍在继续处理。恢复连接后本页会自动更新。';
+      renderState(S.state);
+    }
+    scheduleStatusPoll(nextStatusPollDelay(0, _statusFailures));
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden){ clearTimeout(_statusTimer); _statusTimer = null; return; }
+  if (S.state === 'pending' || S.state === 'processing') scheduleStatusPoll(100);
+});
 
 /* ---------------- 正常页 ---------------- */
 function authorBlock(d){
@@ -887,8 +986,11 @@ function report(){
 }
 
 /* ---------------- 入口 ---------------- */
-if (!S || !S.state || S.state !== 'ok') renderState(S && S.state);
-else { render(); setupWxShare(); }
+if (!S || !S.state || S.state !== 'ok') {
+  renderState(S && S.state);
+  if (S && (S.state === 'pending' || S.state === 'processing'))
+    scheduleStatusPoll(nextStatusPollDelay(S.poll_after_ms, 0));
+} else { render(); setupWxShare(); }
 </script>
 </body>
 </html>

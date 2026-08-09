@@ -29,6 +29,7 @@ import secrets
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,7 +47,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.13.1"
+APP_VERSION = "1.14.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -135,6 +136,8 @@ DATA_RETENTION_DAYS = max(
 )
 API_JOB_WORKERS = max(1, min(8, int(os.environ.get("API_JOB_WORKERS", "2"))))
 QUOTA_RESERVATION_TTL = max(300, int(os.environ.get("QUOTA_RESERVATION_TTL", "3600")))
+ASYNC_SHARE_BODY_MAX = _clamped_env_int(
+    "ASYNC_SHARE_BODY_MAX", 8192, 1024, 65536)
 
 # ---------------------------------------------------------------- SQLite 数据层
 
@@ -212,10 +215,32 @@ CREATE TABLE IF NOT EXISTS shares(
   status TEXT DEFAULT 'ok',
   views INTEGER DEFAULT 0, plays INTEGER DEFAULT 0,
   downloads INTEGER DEFAULT 0, cta_clicks INTEGER DEFAULT 0,
-  created INTEGER
+  created INTEGER,
+  parse_status TEXT DEFAULT 'ready', source_url TEXT,
+  parse_error_code TEXT, attempts INTEGER DEFAULT 0,
+  next_attempt_at INTEGER DEFAULT 0, lease_owner TEXT, lease_until INTEGER,
+  quota_reservation_id TEXT, owner_scope TEXT, idem_key_hash TEXT,
+  request_hash TEXT, source_hash TEXT, assigned_origin TEXT,
+  updated INTEGER, ready_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_item ON shares(item_id);
+CREATE TABLE IF NOT EXISTS share_submissions(
+  sid TEXT PRIMARY KEY, ts INTEGER, owner_scope TEXT, ip_scope TEXT,
+  user_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_share_submit_owner
+  ON share_submissions(owner_scope, ts);
+CREATE INDEX IF NOT EXISTS idx_share_submit_ip
+  ON share_submissions(ip_scope, ts);
+CREATE INDEX IF NOT EXISTS idx_share_submit_ts ON share_submissions(ts);
+CREATE TABLE IF NOT EXISTS blocked_share_items(
+  kind TEXT, item_id TEXT, created INTEGER,
+  PRIMARY KEY(kind, item_id)
+);
+CREATE TABLE IF NOT EXISTS blocked_share_sources(
+  source_hash TEXT PRIMARY KEY, created INTEGER
+);
 CREATE TABLE IF NOT EXISTS share_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT, kind TEXT,
   ip TEXT, ua TEXT, referer TEXT, wechat INTEGER, fp TEXT,
@@ -380,6 +405,15 @@ with _db_lock:
         ("attempts", "INTEGER DEFAULT 0"), ("lease_owner", "TEXT"),
         ("lease_until", "INTEGER"), ("started", "INTEGER"), ("finished", "INTEGER")))
     _ensure_columns("api_logs", (("item_idx", "INTEGER"),))
+    _ensure_columns("shares", (
+        ("parse_status", "TEXT DEFAULT 'ready'"), ("source_url", "TEXT"),
+        ("parse_error_code", "TEXT"), ("attempts", "INTEGER DEFAULT 0"),
+        ("next_attempt_at", "INTEGER DEFAULT 0"), ("lease_owner", "TEXT"),
+        ("lease_until", "INTEGER"), ("quota_reservation_id", "TEXT"),
+        ("owner_scope", "TEXT"), ("idem_key_hash", "TEXT"),
+        ("request_hash", "TEXT"), ("source_hash", "TEXT"),
+        ("assigned_origin", "TEXT"), ("updated", "INTEGER"),
+        ("ready_at", "INTEGER")))
     _c.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idem ON jobs(key,request_id) "
         "WHERE request_id IS NOT NULL")
@@ -395,6 +429,18 @@ with _db_lock:
     _c.execute(
         "CREATE INDEX IF NOT EXISTS idx_job_items_claim "
         "ON job_items(status,lease_until,job_id,idx)")
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_shares_idempotency "
+        "ON shares(owner_scope,idem_key_hash) WHERE idem_key_hash IS NOT NULL")
+    _c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shares_parse_claim "
+        "ON shares(parse_status,next_attempt_at,lease_until,created)")
+    _c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shares_owner_created "
+        "ON shares(owner_scope,created)")
+    _c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shares_owner_parse "
+        "ON shares(owner_scope,parse_status)")
     _migrate_privacy_data(_c)
     _privacy_vacuum_needed = not _c.execute(
         "SELECT 1 FROM app_settings WHERE k='privacy_v2_vacuumed'"
@@ -522,49 +568,104 @@ def quota_status(request: Request):
     return limit, used, max(0, limit - used)
 
 
+def _reserve_quota_in_conn(conn, day: int, subjects: list[str], limit: int,
+                           n: int = 1, partial: bool = False,
+                           endpoint: str = "web") -> dict:
+    """在调用者已经开启的写事务里预占额度。异步任务用它把占位页和额度原子落库。"""
+    marks = ",".join("?" for _ in subjects)
+    rows = conn.execute(
+        f"SELECT count FROM usage_daily WHERE day=? AND subject IN ({marks})",
+        (day, *subjects)).fetchall()
+    used = max((int(r[0]) for r in rows), default=0)
+    available = max(0, limit - used)
+    take = min(n, available) if partial else (n if n <= available else 0)
+    reservation_id = ""
+    if take:
+        for subject in subjects:
+            conn.execute(
+                "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
+                "ON CONFLICT(day,subject) DO UPDATE SET count=count+excluded.count",
+                (day, subject, take))
+        reservation_id = "qr_" + secrets.token_urlsafe(12)
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO quota_reservations("
+            "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
+            ") VALUES(?,?,?,?,0,'pending',?,?,?)",
+            (reservation_id, day, json.dumps(subjects, ensure_ascii=False),
+             take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL))
+    return {"ok": take == n, "reserved": take, "limit": limit,
+            "used_before": used, "used_after": used + take,
+            "remaining": max(0, limit - used - take),
+            "day": day, "subjects": subjects, "id": reservation_id}
+
+
 def reserve_quota(request: Request, n: int = 1, partial: bool = False,
                   endpoint: str = "web") -> dict:
     """在 BEGIN IMMEDIATE 事务中原子预占；失败调用可用 release_quota 精确退回。"""
     n = max(0, int(n))
     day = _today()
     subs, limit = _quota_subjects(request)
-    marks = ",".join("?" for _ in subs)
     with _db_lock:
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                f"SELECT count FROM usage_daily WHERE day=? AND subject IN ({marks})",
-                (day, *subs)).fetchall()
-            used = max((int(r[0]) for r in rows), default=0)
-            available = max(0, limit - used)
-            take = min(n, available) if partial else (n if n <= available else 0)
-            if take:
-                for subject in subs:
-                    conn.execute(
-                        "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
-                        "ON CONFLICT(day,subject) DO UPDATE SET count=count+excluded.count",
-                        (day, subject, take))
-                reservation_id = "qr_" + secrets.token_urlsafe(12)
-                now = int(time.time())
-                conn.execute(
-                    "INSERT INTO quota_reservations("
-                    "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
-                    ") VALUES(?,?,?,?,0,'pending',?,?,?)",
-                    (reservation_id, day, json.dumps(subs, ensure_ascii=False),
-                     take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL))
-            else:
-                reservation_id = ""
+            reservation = _reserve_quota_in_conn(
+                conn, day, subs, limit, n, partial, endpoint)
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
-    return {"ok": take == n, "reserved": take, "limit": limit,
-            "used_before": used, "used_after": used + take,
-            "remaining": max(0, limit - used - take),
-            "day": day, "subjects": subs, "id": reservation_id}
+    return reservation
+
+
+def _settle_quota_in_conn(conn, reservation_id: str,
+                          committed_units: int) -> Optional[int]:
+    """在调用者事务里幂等结算预占；返回实际提交数，已结算则返回 None。"""
+    if not reservation_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM quota_reservations WHERE id=? AND status='pending'",
+        (reservation_id,)).fetchone()
+    if not row:
+        return None
+    units = int(row["units"])
+    committed = min(units, max(0, int(committed_units)))
+    refund = units - committed
+    for subject in json.loads(row["subjects"] or "[]"):
+        conn.execute(
+            "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
+            (refund, int(row["day"]), subject))
+    status = "settled" if committed else "refunded"
+    conn.execute(
+        "UPDATE quota_reservations SET committed_units=?,status=?,settled=? "
+        "WHERE id=? AND status='pending'",
+        (committed, status, int(time.time()), reservation_id))
+    return committed
+
+
+def _admin_refund_quota_in_conn(conn, reservation_id: str) -> Optional[int]:
+    """平台下架/删除专用：pending 直接退款，也可原子撤销已经结算的用量。"""
+    settled = _settle_quota_in_conn(conn, reservation_id, 0)
+    if settled is not None or not reservation_id:
+        return settled
+    row = conn.execute(
+        "SELECT * FROM quota_reservations WHERE id=? AND status='settled' "
+        "AND COALESCE(committed_units,0)>0", (reservation_id,)).fetchone()
+    if not row:
+        return None
+    committed = int(row["committed_units"] or 0)
+    for subject in json.loads(row["subjects"] or "[]"):
+        conn.execute(
+            "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
+            (committed, int(row["day"]), subject))
+    changed = conn.execute(
+        "UPDATE quota_reservations SET committed_units=0,status='refunded',settled=? "
+        "WHERE id=? AND status='settled' AND COALESCE(committed_units,0)>0",
+        (int(time.time()), reservation_id)).rowcount
+    return 0 if changed == 1 else None
 
 
 def settle_quota(reservation: Optional[dict], committed_units: int) -> None:
@@ -579,25 +680,11 @@ def settle_quota(reservation: Optional[dict], committed_units: int) -> None:
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT * FROM quota_reservations WHERE id=? AND status='pending'",
-                (reservation_id,)).fetchone()
-            if not row:
+            committed = _settle_quota_in_conn(
+                conn, reservation_id, committed_units)
+            if committed is None:
                 conn.rollback()
                 return
-            units = int(row["units"])
-            committed = min(units, committed_units)
-            refund = units - committed
-            subjects = json.loads(row["subjects"] or "[]")
-            for subject in subjects:
-                conn.execute(
-                    "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
-                    (refund, int(row["day"]), subject))
-            status = "settled" if committed else "refunded"
-            conn.execute(
-                "UPDATE quota_reservations SET committed_units=?,status=?,settled=? "
-                "WHERE id=? AND status='pending'",
-                (committed, status, int(time.time()), reservation_id))
             conn.commit()
             reservation["reserved"] = committed
         except Exception:
@@ -621,7 +708,11 @@ def _refund_stale_quota_reservations() -> int:
             conn.execute("BEGIN IMMEDIATE")
             rows = conn.execute(
                 "SELECT * FROM quota_reservations "
-                "WHERE status='pending' AND lease_until<?", (now,)).fetchall()
+                "WHERE status='pending' AND lease_until<? "
+                "AND NOT EXISTS(SELECT 1 FROM shares s "
+                "WHERE s.quota_reservation_id=quota_reservations.id "
+                "AND s.parse_status IN ('pending','processing'))",
+                (now,)).fetchall()
             for row in rows:
                 for subject in json.loads(row["subjects"] or "[]"):
                     conn.execute(
@@ -995,6 +1086,15 @@ def _cleanup_retained_data(force: bool = False) -> None:
             conn.execute("DELETE FROM jobs WHERE finished IS NOT NULL AND finished<?",
                          (cutoff,))
             conn.execute("DELETE FROM api_ledger WHERE ts<?", (cutoff,))
+            # 异步分享提交记录是不可退款的限频事实源，不随分享页删除；保留两天足够
+            # 覆盖小时窗口和跨日边界，同时避免审计摘要无限增长。
+            conn.execute("DELETE FROM share_submissions WHERE ts<?",
+                         (int(now) - 2 * 86400,))
+            expired_shares = conn.execute(
+                "SELECT quota_reservation_id FROM shares "
+                "WHERE expires_at>0 AND expires_at<?", (int(now),)).fetchall()
+            for share in expired_shares:
+                _settle_quota_in_conn(conn, share["quota_reservation_id"], 0)
             conn.execute(
                 "DELETE FROM shares WHERE expires_at>0 AND expires_at<?",
                 (int(now),))
@@ -1950,6 +2050,69 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
 app = FastAPI(title="抖音无水印下载器", version=APP_VERSION)
 
 
+class _AsyncShareBodyLimitMiddleware:
+    """在 JSON/Pydantic 解析前限制异步创建接口，覆盖 Content-Length 与 chunked。"""
+    def __init__(self, app_, max_bytes: int):
+        self.app = app_
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http" or scope.get("method") != "POST"
+                or scope.get("path") != "/api/shares"):
+            await self.app(scope, receive, send)
+            return
+        headers = {k.lower(): v for k, v in scope.get("headers", [])}
+        try:
+            declared = int(headers.get(b"content-length", b"0") or 0)
+        except ValueError:
+            declared = 0
+        if declared > self.max_bytes:
+            response = JSONResponse(
+                status_code=413,
+                content={"error": "payload_too_large: 请求体超过上限"},
+                headers={"Cache-Control": "private, no-store", "Pragma": "no-cache",
+                         "Connection": "close"})
+            await response(scope, receive, send)
+            return
+
+        # Starlette 会把 receive() 抛出的普通异常改写成 400，因此必须在进入
+        # FastAPI 前最多预读 max_bytes；未超限时再把原消息重放给请求解析器。
+        buffered = []
+        received = 0
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message.get("type") != "http.request":
+                break
+            received += len(message.get("body") or b"")
+            if received > self.max_bytes:
+                response = JSONResponse(
+                    status_code=413,
+                    content={"error": "payload_too_large: 请求体超过上限"},
+                    headers={"Cache-Control": "private, no-store",
+                             "Pragma": "no-cache", "Connection": "close"})
+                await response(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        index = 0
+
+        async def replay_receive():
+            nonlocal index
+            if index < len(buffered):
+                message = buffered[index]
+                index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+app.add_middleware(_AsyncShareBodyLimitMiddleware,
+                   max_bytes=ASYNC_SHARE_BODY_MAX)
+
+
 @app.middleware("http")
 async def _private_api_responses(request: Request, call_next):
     """API 响应可能含签名地址、账号或密钥，禁止浏览器与共享代理持久化。"""
@@ -2692,14 +2855,81 @@ SHARE_TTL_ANON = int(os.environ.get("SHARE_TTL_ANON_DAYS", "7")) * 86400
 SHARE_TTL_USER = int(os.environ.get("SHARE_TTL_USER_DAYS", "30")) * 86400
 SHARE_REFRESH_TTL = 12 * 3600          # 图集直链超过这个时长就在下次访问时刷新
 SHARE_MAX_PER_HOUR = 30                # 匿名创建限频（每 IP）
+SHARE_PARSE_WORKERS = _clamped_env_int("SHARE_PARSE_WORKERS", 2, 1, 4)
+SHARE_PARSE_LEASE_SECONDS = _clamped_env_int(
+    "SHARE_PARSE_LEASE_SECONDS", 180, 60, 900)
+SHARE_PARSE_HEARTBEAT_SECONDS = _clamped_env_int(
+    "SHARE_PARSE_HEARTBEAT_SECONDS", 30, 10,
+    max(10, SHARE_PARSE_LEASE_SECONDS // 2))
+SHARE_PARSE_MAX_ATTEMPTS = _clamped_env_int(
+    "SHARE_PARSE_MAX_ATTEMPTS", 4, 1, 8)
+SHARE_PARSE_DEADLINE_SECONDS = _clamped_env_int(
+    "SHARE_PARSE_DEADLINE_SECONDS", 900, 120, 3600)
+SHARE_PARSE_QUEUE_MAX = _clamped_env_int(
+    "SHARE_PARSE_QUEUE_MAX", 200, 10, 5000)
+SHARE_PARSE_GLOBAL_PER_MINUTE = _clamped_env_int(
+    "SHARE_PARSE_GLOBAL_PER_MINUTE", 120, 10, 10000)
+SHARE_PARSE_GLOBAL_PER_HOUR = _clamped_env_int(
+    "SHARE_PARSE_GLOBAL_PER_HOUR", 3000, 100, 100000)
+SHARE_PARSE_IP_PER_HOUR = _clamped_env_int(
+    "SHARE_PARSE_IP_PER_HOUR", 60, 10, 1000)
+SHARE_FAILED_TTL = _clamped_env_int(
+    "SHARE_FAILED_TTL", 86400, 3600, 7 * 86400)
+SHARE_PARSE_ANON_INFLIGHT = _clamped_env_int(
+    "SHARE_PARSE_ANON_INFLIGHT", 2, 1, 20)
+SHARE_PARSE_USER_INFLIGHT = _clamped_env_int(
+    "SHARE_PARSE_USER_INFLIGHT", 5, 1, 50)
+SHARE_PARSE_IP_INFLIGHT = _clamped_env_int(
+    "SHARE_PARSE_IP_INFLIGHT", 10, 2, 100)
 _share_hits: dict = {}
 
 # ---- 分享域名池 ----
 # 微信封"下载/侵权类"域名是常态而非意外，因此分享链接与主站域名物理隔离，并可轮换。
 # 短码与域名解耦：同一个 sid 在任意域名下都能打开，某域名被封时切换即可救活存量分享。
 # 配置：SHARE_DOMAINS="https://s1.example.com,https://s2.example.com"
-SHARE_DOMAINS = [d.strip().rstrip("/") for d in
-                 os.environ.get("SHARE_DOMAINS", "").split(",") if d.strip()]
+def _normalize_origin_value(value: str) -> str:
+    """规范化可信配置中的 origin；拒绝凭据、路径及非 HTTP(S) scheme。"""
+    value = str(value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    try:
+        parsed = urlparse.urlsplit(value)
+        if (parsed.scheme.lower() not in ("http", "https")
+                or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            return ""
+        port = parsed.port
+        hostname = parsed.hostname.lower().rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+    if (not hostname or any(c.isspace() or ord(c) < 32 for c in hostname)
+            or len(hostname) > 253):
+        return ""
+    if ":" in hostname:
+        if not re.fullmatch(r"[0-9a-f:.]+", hostname):
+            return ""
+    else:
+        if not re.fullmatch(r"[a-z0-9.-]+", hostname):
+            return ""
+        labels = hostname.split(".")
+        if any(not label or len(label) > 63 or label.startswith("-")
+               or label.endswith("-") for label in labels):
+            return ""
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 80 if parsed.scheme.lower() == "http" else 443
+    suffix = f":{port}" if port and port != default_port else ""
+    return f"{parsed.scheme.lower()}://{rendered_host}{suffix}"
+
+
+PUBLIC_ORIGIN = _normalize_origin_value(os.environ.get("PUBLIC_ORIGIN", ""))
+SHARE_DOMAINS = [origin for origin in (
+    _normalize_origin_value(d) for d in
+    os.environ.get("SHARE_DOMAINS", "").split(",")
+) if origin]
+if (TRUST_PROXY and not PUBLIC_ORIGIN and not SHARE_DOMAINS
+        and not _normalize_origin_value(app_setting("share_primary_domain", ""))):
+    print("⚠️  反代模式尚未配置 PUBLIC_ORIGIN 或分享域名；返回的绝对链接可能只在内网可用。",
+          file=sys.stderr)
 _share_dom_rr = 0
 
 
@@ -2717,12 +2947,12 @@ def _share_origin(request: Request) -> str:
     域名池（轮换）→ 当前请求来源。主域名让所有新链接固定落在同一个"微信可打开"的域名上，
     无需改环境变量、后台即时生效；被标记封禁后自动退回域名池/请求来源。"""
     global _share_dom_rr
-    primary = app_setting("share_primary_domain", "").strip().rstrip("/")
+    primary = _normalize_origin_value(app_setting("share_primary_domain", ""))
     if primary and primary not in _domains_off():
         return primary
     pool = [d for d in SHARE_DOMAINS if d not in _domains_off()]
     if not pool:
-        return _origin(request)
+        return PUBLIC_ORIGIN or _origin(request)
     _share_dom_rr = (_share_dom_rr + 1) % len(pool)
     return pool[_share_dom_rr]
 
@@ -2747,11 +2977,14 @@ def _share_ttl(request: Request) -> int:
 
 
 def _share_state(row: dict) -> str:
-    """ok | expired | dead | takedown —— 决定页面展示哪种状态。"""
+    """分享页公开状态；审核/过期优先于首次异步解析状态。"""
     if row["status"] in ("dead", "takedown"):
         return row["status"]
     if row["expires_at"] and row["expires_at"] < time.time():
         return "expired"
+    parse_status = (row.get("parse_status") or "ready").lower()
+    if parse_status in ("pending", "processing", "failed"):
+        return parse_status
     return "ok"
 
 
@@ -2760,32 +2993,80 @@ def _refresh_share(row: dict) -> dict:
     try:
         data = _parse_item(row["kind"], row["item_id"])
     except Exception:
-        db_exec("UPDATE shares SET status='dead', refreshed_at=? WHERE id=?",
-                (int(time.time()), row["id"]))
-        row["status"] = "dead"
-        return row
+        now = int(time.time())
+        with _db_lock:
+            conn = _db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "UPDATE shares SET status='dead',refreshed_at=? "
+                    "WHERE id=? AND status='ok' "
+                    "AND COALESCE(parse_status,'ready')='ready'",
+                    (now, row["id"]))
+                latest = conn.execute(
+                    "SELECT * FROM shares WHERE id=?", (row["id"],)).fetchone()
+                conn.commit()
+                return dict(latest) if latest else row
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
     vid = row.get("vid") or ""
     if row["kind"] != "note":
         play_url = ((data.get("video") or {}).get("url") or "")
         match = re.search(r"[?&]video_id=([\w-]+)", play_url)
         if match:
             vid = match.group(1)
-    db_exec("UPDATE shares SET payload=?, cover=?, vid=?, refreshed_at=?, status='ok' "
-            "WHERE id=?",
-            (json.dumps(data, ensure_ascii=False), data.get("cover", ""), vid,
-             int(time.time()), row["id"]))
-    row["payload"] = json.dumps(data, ensure_ascii=False)
-    row["cover"] = data.get("cover", "")
-    row["vid"] = vid
-    row["status"] = "ok"
-    return row
+    now = int(time.time())
+    kind, item_id = _share_item_key(data)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM shares WHERE id=?", (row["id"],)).fetchone()
+            if not current:
+                conn.rollback()
+                return row
+            if (current["status"] != "ok"
+                    or (current["parse_status"] or "ready") != "ready"):
+                conn.rollback()
+                return dict(current)
+            if item_id and conn.execute(
+                    "SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?",
+                    (kind, item_id)).fetchone():
+                conn.execute(
+                    "UPDATE shares SET status='takedown',updated=? "
+                    "WHERE id=? AND status='ok' "
+                    "AND COALESCE(parse_status,'ready')='ready'",
+                    (now, row["id"]))
+            else:
+                conn.execute(
+                    "UPDATE shares SET payload=?,cover=?,vid=?,refreshed_at=?,updated=? "
+                    "WHERE id=? AND status='ok' "
+                    "AND COALESCE(parse_status,'ready')='ready'",
+                    (json.dumps(data, ensure_ascii=False), data.get("cover", ""),
+                     vid, now, now, row["id"]))
+            latest = conn.execute(
+                "SELECT * FROM shares WHERE id=?", (row["id"],)).fetchone()
+            conn.commit()
+            return dict(latest) if latest else row
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _share_view(row: dict, origin: str = "") -> dict:
     """把 shares 行转成分享页要用的数据结构（含重拼后的播放地址）。"""
     data = json.loads(row["payload"] or "{}")
-    cfg = _atc_cfg()                                   # 一次读取，避免重复查库
-    if row["kind"] != "note" and row["vid"]:
+    state = _share_state(row)
+    cfg = _atc_cfg() if state == "ok" else {
+        "enabled": False, "play_enhance": False,
+        "url_ttl": 0, "play_priority": ["dy1", "dy2", "proxy"]}
+    if state == "ok" and row["kind"] != "note" and row["vid"]:
         data.setdefault("video", {})
         data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
         data["video"]["alt_url"] = _play_api_alt(row["vid"])   # 备用抖音域名
@@ -2802,12 +3083,14 @@ def _share_view(row: dict, origin: str = "") -> dict:
             elif cached:
                 _atc_enqueue(row["item_id"], purpose="play")
     # 播放线路优先级（后台可拖拽排序；atc 无地址时前端自动跳过）
-    data["play_priority"] = cfg["play_priority"]
-    return {
+    if state == "ok":
+        data["play_priority"] = cfg["play_priority"]
+    view = {
         "sid": row["id"],
         "kind": row["kind"],
         "item_id": row["item_id"],
-        "title": row["custom_title"] or row["title"] or "（无标题）",
+        "title": row["custom_title"] or row["title"] or (
+            "视频正在准备中" if state in ("pending", "processing") else "（无标题）"),
         "author": row["author"] or "",
         "avatar": row["avatar"] or "",
         "cover": row["cover"] or "",
@@ -2815,32 +3098,71 @@ def _share_view(row: dict, origin: str = "") -> dict:
         "card_cover": _card_cover(row["cover"] or ""),
         "created": row["created"],
         "expires_at": row["expires_at"],
-        "state": _share_state(row),
+        "state": state,
+        "ready": state == "ok",
+        "shareable": state == "ok",
         "url": f"{origin}/s/{row['id']}" if origin else f"/s/{row['id']}",
         "views": row["views"], "plays": row["plays"], "downloads": row["downloads"],
         "data": data,
     }
+    if state in ("pending", "processing"):
+        view["poll_after_ms"] = _share_poll_after_ms(row, state)
+    elif state == "failed":
+        code = row.get("parse_error_code") or "parse_failed"
+        messages = {
+            "unsupported_link": "该链接指向的内容类型暂不支持。",
+            "content_unavailable": "作品不存在、已删除，或已设为私密。",
+            "parse_timeout": "内容获取超时，请稍后重新生成。",
+            "upstream_unavailable": "抖音内容暂时无法获取，请稍后重试。",
+        }
+        view["error"] = {"code": code,
+                         "message": messages.get(code, "内容获取失败，请稍后重试。")}
+    return view
 
 
-def _share_create(request: Request, data: dict, custom_title: str = "") -> dict:
+def _share_create(request: Request, data: dict, custom_title: str = "",
+                  reservation: Optional[dict] = None) -> dict:
     u = current_user(request)
     sid = _new_sid()
     now = int(time.time())
+    item_id = str(data.get("item_id") or "")
+    kind = str(data.get("kind") or "video")
+    reservation_id = (reservation or {}).get("id") or None
     vid = ""
     if data.get("video", {}).get("url"):
         vm = re.search(r"video_id=([\w-]+)", data["video"]["url"])
         vid = vm.group(1) if vm else ""
-    db_exec(
-        "INSERT INTO shares(id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
-        "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
-        "refreshed_at,status,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (sid, data.get("item_id", ""), data.get("kind", "video"), vid,
-         u["id"] if u else None, "", "",
-         (data.get("title") or "")[:300], (data.get("author") or "")[:100],
-         data.get("avatar", ""), data.get("cover", ""),
-         json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
-         "link", now + _share_ttl(request), now, "ok", now))
-    row = dict(db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one"))
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if item_id and conn.execute(
+                    "SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?",
+                    (kind, item_id)).fetchone():
+                raise ApiError(451, "content_blocked: 该作品已被下架")
+            conn.execute(
+                "INSERT INTO shares(id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
+                "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
+                "refreshed_at,status,created,quota_reservation_id) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, item_id, kind, vid, u["id"] if u else None, "", "",
+                 (data.get("title") or "")[:300], (data.get("author") or "")[:100],
+                 data.get("avatar", ""), data.get("cover", ""),
+                 json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
+                 "link", now + _share_ttl(request), now, "ok", now,
+                 reservation_id))
+            if reservation_id:
+                committed = _settle_quota_in_conn(conn, reservation_id, 1)
+                if committed != 1:
+                    raise RuntimeError("share quota reservation is not pending")
+            row = dict(conn.execute(
+                "SELECT * FROM shares WHERE id=?", (sid,)).fetchone())
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     # ATC 播放地址增强：后台异步入队（分钟级），不阻塞分享页返回
     if data.get("kind") != "note" and data.get("item_id"):
         try:
@@ -2871,10 +3193,296 @@ def _share_event(request: Request, sid: str, kind: str, source: str = "",
         pass
 
 
+_SHARE_SHORT_PATH = re.compile(r"/[A-Za-z0-9_-]{3,64}/?")
+_SHARE_IDEMPOTENCY_KEY = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+
+
+def _normalize_share_short_link(text: str) -> str:
+    """只做本地语法校验；不跟随短链、不产生任何出站请求。"""
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        raise ApiError(422, "invalid_douyin_link: 请提供抖音分享链接")
+    if len(raw_text.encode("utf-8")) > 4096:
+        raise ApiError(413, "payload_too_large: 分享文案最多 4KB")
+    urls = re.findall(r"https?://[^\s<>'\"]+", raw_text, re.I)
+    valid = []
+    saw_douyin = False
+    for raw in urls:
+        # 只去掉普通文案会紧跟在 URL 后的句末符号；不去 ?/#，避免接受 query/fragment。
+        candidate = raw.rstrip("。，、；！）】》]}!,;")
+        try:
+            parsed = urlparse.urlsplit(candidate)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host == "v.douyin.com":
+                saw_douyin = True
+            if (parsed.scheme != "https" or host != "v.douyin.com"
+                    or parsed.username or parsed.password or parsed.port is not None
+                    or parsed.query or parsed.fragment
+                    or not _SHARE_SHORT_PATH.fullmatch(parsed.path or "")):
+                continue
+            token = parsed.path.strip("/")
+            valid.append(f"https://v.douyin.com/{token}/")
+        except (TypeError, ValueError):
+            continue
+    if len(valid) > 1:
+        raise ApiError(422, "multiple_links: 每次只能提交一个抖音分享链接")
+    if not valid:
+        detail = "链接必须是不带参数的 https://v.douyin.com/<短码>/"
+        if not saw_douyin:
+            detail = "未找到 v.douyin.com 抖音短链"
+        raise ApiError(422, f"invalid_douyin_link: {detail}")
+    return valid[0]
+
+
+def _share_owner_scope(request: Request, user: Optional[dict] = None) -> str:
+    user = user if user is not None else current_user(request)
+    if user:
+        return f"user:{user['id']}"
+    # 安全限频必须至少固定到来源 IP；若把可伪造的 X-FP 混入主键，攻击者只需轮换
+    # 指纹就能不断获得新的在途桶并塞满队列。数据库中只落用途隔离 HMAC。
+    return _privacy_hash("async-share-owner", _client_ip(request))
+
+
+def _share_request_hash(source_url: str, title: str) -> str:
+    return _privacy_hash("async-share-request", f"{source_url}\n{title}")
+
+
+def _share_source_hash(source_url: str) -> str:
+    return _privacy_hash("async-share-source", source_url)
+
+
+def _share_item_key(data: dict) -> tuple[str, str]:
+    return (str(data.get("kind") or "video"), str(data.get("item_id") or ""))
+
+
+def _require_share_item_allowed(data: dict) -> None:
+    kind, item_id = _share_item_key(data)
+    if not item_id:
+        return
+    row = db_exec(
+        "SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?",
+        (kind, item_id), "one")
+    if row:
+        raise ApiError(451, "content_blocked: 该作品已被下架")
+
+
+def _share_manage_token(sid: str, owner_scope: str) -> str:
+    payload = f"share-manage:v1:{sid}:{owner_scope}".encode()
+    return "sm1_" + hmac.new(APP_SECRET, payload, hashlib.sha256).hexdigest()
+
+
+def _valid_share_manage_token(row: dict, token: str) -> bool:
+    if row.get("owner_user_id") is not None or not token:
+        return False
+    expected = _share_manage_token(row["id"], row.get("owner_scope") or "")
+    return hmac.compare_digest(expected, str(token).strip())
+
+
+def _share_poll_after_ms(row: dict, state: str) -> int:
+    if state not in ("pending", "processing"):
+        return 0
+    base = 1500 if state == "pending" else 2000
+    retry_at = int(row.get("next_attempt_at") or 0)
+    if state == "pending" and retry_at > int(time.time()):
+        base = max(base, (retry_at - int(time.time())) * 1000)
+    return max(800, min(10000, base))
+
+
+def _share_async_payload(row: dict, origin: str) -> dict:
+    state = _share_state(row)
+    public_status = "ready" if state == "ok" else state
+    assigned_origin = _normalize_origin_value(row.get("assigned_origin") or "") or origin
+    share_url = f"{assigned_origin}/s/{row['id']}"
+    data = {
+        "sid": row["id"], "status": public_status,
+        "ready": state == "ok", "shareable": state == "ok",
+        "share_url": share_url,
+        "status_url": f"/api/shares/{row['id']}",
+        "expires_at": row["expires_at"],
+        "poll_after_ms": _share_poll_after_ms(row, state),
+    }
+    if state == "ok":
+        data.update({
+            "kind": row["kind"], "item_id": row["item_id"],
+            "title": row["custom_title"] or row["title"] or "（无标题）",
+            "author": row["author"] or "", "cover": row["cover"] or "",
+            # 微信若曾抓取过 pending OG，完成后复制带版本的 URL 可降低命中旧卡片的概率。
+            "share_url_versioned": f"{share_url}?v={int(row.get('ready_at') or 1)}",
+        })
+    elif state == "failed":
+        view = _share_view(row, origin)
+        data["error"] = view.get("error") or {
+            "code": "parse_failed", "message": "内容获取失败，请稍后重试。"}
+    return data
+
+
 class ShareBody(BaseModel):
     text: str = ""
     item_id: str = ""
     title: str = ""
+
+
+class AsyncShareBody(BaseModel):
+    text: str = ""
+    title: str = ""
+
+    class Config:
+        extra = "forbid"
+
+
+@app.post("/api/shares", status_code=202)
+def api_share_create_async(body: AsyncShareBody, request: Request):
+    """只校验并持久化任务，立即返回分享地址；抖音内容由后台 worker 获取。"""
+    source_url = _normalize_share_short_link(body.text)
+    custom_title = (body.title or "").strip()
+    if len(custom_title) > 300:
+        raise ApiError(422, "invalid_title: 自定义标题最多 300 个字符")
+    idem_key = (request.headers.get("Idempotency-Key") or "").strip()
+    if idem_key and not _SHARE_IDEMPOTENCY_KEY.fullmatch(idem_key):
+        raise ApiError(
+            422, "invalid_idempotency_key: 仅允许 1-128 位字母、数字、.-_:")
+
+    user = current_user(request)
+    owner_scope = _share_owner_scope(request, user)
+    ip_scope = _privacy_hash("async-share-rate-ip", _client_ip(request))
+    source_hash = _share_source_hash(source_url)
+    assigned_origin = _share_origin(request)
+    request_hash = _share_request_hash(source_url, custom_title)
+    idem_hash = (_privacy_hash(
+        "async-share-idempotency", f"{owner_scope}:{idem_key}") if idem_key else None)
+    subjects, limit = _quota_subjects(request)
+    sid = _new_sid()
+    now = int(time.time())
+    ttl = SHARE_TTL_USER if user else SHARE_TTL_ANON
+    replay = False
+
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = None
+            if idem_hash:
+                row = conn.execute(
+                    "SELECT * FROM shares WHERE owner_scope=? AND idem_key_hash=?",
+                    (owner_scope, idem_hash)).fetchone()
+                if row and row["request_hash"] != request_hash:
+                    raise ApiError(
+                        409, "idempotency_conflict: 同一 Idempotency-Key 不能提交不同链接或标题")
+                replay = bool(row)
+
+            if not row:
+                if conn.execute(
+                        "SELECT 1 FROM blocked_share_sources WHERE source_hash=?",
+                        (source_hash,)).fetchone():
+                    raise ApiError(451, "content_blocked: 该作品已被下架")
+                recent = conn.execute(
+                    "SELECT COUNT(*) n FROM share_submissions "
+                    "WHERE owner_scope=? AND ts>=?",
+                    (owner_scope, now - 3600)).fetchone()["n"]
+                if int(recent or 0) >= SHARE_MAX_PER_HOUR:
+                    raise ApiError(
+                        429, "rate_limited: 创建分享页过于频繁，请稍后再试",
+                        {"Retry-After": "60"})
+                ip_recent = conn.execute(
+                    "SELECT COUNT(*) n FROM share_submissions WHERE ip_scope=? AND ts>=?",
+                    (ip_scope, now - 3600)).fetchone()["n"]
+                if int(ip_recent or 0) >= SHARE_PARSE_IP_PER_HOUR:
+                    raise ApiError(
+                        429, "rate_limited: 当前网络创建过于频繁，请稍后再试",
+                        {"Retry-After": "60"})
+                global_minute = conn.execute(
+                    "SELECT COUNT(*) n FROM share_submissions WHERE ts>=?",
+                    (now - 60,)).fetchone()["n"]
+                global_hour = conn.execute(
+                    "SELECT COUNT(*) n FROM share_submissions WHERE ts>=?",
+                    (now - 3600,)).fetchone()["n"]
+                if (int(global_minute or 0) >= SHARE_PARSE_GLOBAL_PER_MINUTE
+                        or int(global_hour or 0) >= SHARE_PARSE_GLOBAL_PER_HOUR):
+                    raise ApiError(
+                        503, "queue_busy: 当前提交较多，请稍后再试",
+                        {"Retry-After": "10"})
+                backlog = conn.execute(
+                    "SELECT COUNT(*) n FROM shares "
+                    "WHERE parse_status IN ('pending','processing')").fetchone()["n"]
+                if int(backlog or 0) >= SHARE_PARSE_QUEUE_MAX:
+                    raise ApiError(
+                        503, "queue_full: 当前任务较多，请稍后再试",
+                        {"Retry-After": "10"})
+                in_flight = conn.execute(
+                    "SELECT COUNT(*) n FROM shares WHERE owner_scope=? "
+                    "AND parse_status IN ('pending','processing')",
+                    (owner_scope,)).fetchone()["n"]
+                actor_limit = (SHARE_PARSE_USER_INFLIGHT if user
+                               else SHARE_PARSE_ANON_INFLIGHT)
+                if int(in_flight or 0) >= actor_limit:
+                    raise ApiError(
+                        429, "too_many_inflight: 请等待当前分享页准备完成",
+                        {"Retry-After": "3"})
+                ip_in_flight = conn.execute(
+                    "SELECT COUNT(*) n FROM shares s JOIN share_submissions sub "
+                    "ON sub.sid=s.id WHERE sub.ip_scope=? "
+                    "AND s.parse_status IN ('pending','processing')",
+                    (ip_scope,)).fetchone()["n"]
+                if int(ip_in_flight or 0) >= SHARE_PARSE_IP_INFLIGHT:
+                    raise ApiError(
+                        429, "too_many_inflight: 当前网络待处理任务过多",
+                        {"Retry-After": "3"})
+
+                reservation = _reserve_quota_in_conn(
+                    conn, _today(), subjects, limit, 1, False,
+                    "share_parse_async")
+                if not reservation["ok"]:
+                    raise _quota_error(limit)
+                conn.execute(
+                    "INSERT INTO shares("
+                    "id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
+                    "title,author,avatar,cover,payload,custom_title,visibility,"
+                    "expires_at,refreshed_at,status,created,parse_status,source_url,"
+                    "parse_error_code,attempts,next_attempt_at,lease_owner,lease_until,"
+                    "quota_reservation_id,owner_scope,idem_key_hash,request_hash,"
+                    "source_hash,assigned_origin,updated,ready_at"
+                    ") VALUES("
+                    ":id,'','','',:owner_user_id,'','',"
+                    "'','','','','{}',:custom_title,'link',"
+                    ":expires_at,NULL,'ok',:created,'pending',:source_url,"
+                    "NULL,0,:next_attempt_at,NULL,NULL,"
+                    ":quota_reservation_id,:owner_scope,:idem_key_hash,:request_hash,"
+                    ":source_hash,:assigned_origin,:updated,NULL)",
+                    {"id": sid, "owner_user_id": user["id"] if user else None,
+                     "custom_title": custom_title, "expires_at": now + ttl,
+                     "created": now, "source_url": source_url,
+                     "next_attempt_at": now,
+                     "quota_reservation_id": reservation["id"],
+                     "owner_scope": owner_scope, "idem_key_hash": idem_hash,
+                     "request_hash": request_hash, "source_hash": source_hash,
+                     "assigned_origin": assigned_origin, "updated": now})
+                conn.execute(
+                    "INSERT INTO share_submissions(sid,ts,owner_scope,ip_scope,user_id) "
+                    "VALUES(?,?,?,?,?)",
+                    (sid, now, owner_scope, ip_scope,
+                     user["id"] if user else None))
+                row = conn.execute(
+                    "SELECT * FROM shares WHERE id=?", (sid,)).fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    _wake_share_parse_workers()
+    row_dict = dict(row)
+    data = _share_async_payload(row_dict, _origin(request))
+    if not user:
+        # 管理凭证只随创建/幂等重放返回，绝不进入公开状态接口、URL 或页面。
+        data["manage_token"] = _share_manage_token(
+            row_dict["id"], row_dict.get("owner_scope") or "")
+    response_status = 202 if data["status"] in ("pending", "processing") else 200
+    return JSONResponse(
+        status_code=response_status,
+        content={"ok": True, "replayed": replay, "data": data},
+        headers={"Location": f"/s/{row_dict['id']}",
+                 "Retry-After": "2" if response_status == 202 else "0"})
 
 
 @app.post("/api/share")
@@ -2884,6 +3492,7 @@ def api_share_create(body: ShareBody, request: Request):
         raise ApiError(429, "创建分享页过于频繁，请稍后再试")
 
     data = None
+    reservation = None
     if body.item_id:
         hit = _cache.get(body.item_id.strip())
         if hit and time.time() - hit[0] < CACHE_TTL:
@@ -2905,10 +3514,20 @@ def api_share_create(body: ShareBody, request: Request):
         except Exception:
             release_quota(reservation)
             raise
-        settle_quota(reservation, 1)
     if not data.get("item_id"):
+        release_quota(reservation)
         raise ApiError(400, "解析数据不完整，无法生成分享页")
-    return _share_create(request, data, body.title)
+    try:
+        _require_share_item_allowed(data)
+    except Exception:
+        release_quota(reservation)
+        raise
+    try:
+        return _share_create(request, data, body.title, reservation)
+    except Exception:
+        # 原子创建事务若因下架竞态或数据库故障回滚，预占仍在，需显式归还。
+        release_quota(reservation)
+        raise
 
 
 @app.get("/api/share/{sid}")
@@ -2917,6 +3536,417 @@ def api_share_get(sid: str, request: Request):
     if not row:
         raise ApiError(404, "分享页不存在或已被删除")
     return _share_view(dict(row), _origin(request))
+
+
+@app.get("/api/shares/{sid}")
+def api_share_status(sid: str, request: Request):
+    """异步分享页的公开最小状态；不返回内部错误、源短链或签名媒体地址。"""
+    row = db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one")
+    if not row:
+        raise ApiError(404, "分享页不存在或已被删除")
+    return {"ok": True, "data": _share_async_payload(
+        dict(row), _origin(request))}
+
+
+# ---- 首次分享解析队列（持久化 + 租约/CAS；与付费 API jobs 分离）----
+
+_share_parse_stop = threading.Event()
+_share_parse_wakeup = queue.Queue(maxsize=1)
+_share_parse_threads: list[threading.Thread] = []
+_share_parse_workers_guard = threading.Lock()
+_share_parse_instance = "sw_" + secrets.token_urlsafe(9)
+
+
+def _wake_share_parse_workers() -> None:
+    try:
+        _share_parse_wakeup.put_nowait(True)
+    except queue.Full:
+        pass
+
+
+def _expire_share_parse_jobs() -> int:
+    """终结超时、过期或已耗尽次数的任务，并在同一事务里退款。"""
+    now = int(time.time())
+    expired = 0
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id,quota_reservation_id FROM shares "
+                "WHERE parse_status IN ('pending','processing') AND ("
+                "created<=? OR (expires_at>0 AND expires_at<=?) OR "
+                "(COALESCE(attempts,0)>=? AND (parse_status='pending' "
+                "OR COALESCE(lease_until,0)<?)))",
+                (now - SHARE_PARSE_DEADLINE_SECONDS, now,
+                 SHARE_PARSE_MAX_ATTEMPTS, now)).fetchall()
+            for row in rows:
+                changed = conn.execute(
+                    "UPDATE shares SET parse_status='failed',source_url=NULL,"
+                    "parse_error_code='parse_timeout',lease_owner=NULL,lease_until=NULL,"
+                    "expires_at=CASE WHEN expires_at>0 THEN MIN(expires_at,?) ELSE ? END,"
+                    "updated=? WHERE id=? AND parse_status IN ('pending','processing')",
+                    (now + SHARE_FAILED_TTL, now + SHARE_FAILED_TTL,
+                     now, row["id"])).rowcount
+                if changed:
+                    _settle_quota_in_conn(conn, row["quota_reservation_id"], 0)
+                    expired += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return expired
+
+
+def _claim_share_parse(owner: str) -> Optional[dict]:
+    """领取一条到期任务；进程崩溃后由其他 worker 接管过期租约。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM shares WHERE status='ok' AND source_url IS NOT NULL "
+                "AND COALESCE(expires_at,0)>? AND COALESCE(attempts,0)<? "
+                "AND created>? AND ("
+                "(parse_status='pending' AND COALESCE(next_attempt_at,0)<=?) OR "
+                "(parse_status='processing' AND COALESCE(lease_until,0)<?)) "
+                "ORDER BY COALESCE(next_attempt_at,created),created,"
+                "COALESCE(attempts,0) LIMIT 1",
+                (now, SHARE_PARSE_MAX_ATTEMPTS,
+                 now - SHARE_PARSE_DEADLINE_SECONDS, now, now)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            changed = conn.execute(
+                "UPDATE shares SET parse_status='processing',lease_owner=?,lease_until=?,"
+                "attempts=COALESCE(attempts,0)+1,updated=? WHERE id=? AND status='ok' "
+                "AND source_url IS NOT NULL AND created>? AND ("
+                "(parse_status='pending' AND COALESCE(next_attempt_at,0)<=?) OR "
+                "(parse_status='processing' AND COALESCE(lease_until,0)<?))",
+                (owner, min(now + SHARE_PARSE_LEASE_SECONDS,
+                            int(row["created"] or now) + SHARE_PARSE_DEADLINE_SECONDS),
+                 now, row["id"], now - SHARE_PARSE_DEADLINE_SECONDS, now, now)
+            ).rowcount
+            if changed != 1:
+                conn.rollback()
+                return None
+            if row["quota_reservation_id"]:
+                conn.execute(
+                    "UPDATE quota_reservations SET lease_until=? "
+                    "WHERE id=? AND status='pending'",
+                    (now + max(QUOTA_RESERVATION_TTL,
+                               SHARE_PARSE_DEADLINE_SECONDS),
+                     row["quota_reservation_id"]))
+            conn.commit()
+            item = dict(row)
+            item["lease_owner"] = owner
+            item["attempts"] = int(row["attempts"] or 0) + 1
+            return item
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _finish_share_parse_success(item: dict, data: dict) -> bool:
+    item_id = str(data.get("item_id") or "")
+    if not item_id:
+        raise ApiError(502, "解析数据不完整")
+    kind = str(data.get("kind") or "video")
+    if kind not in ("video", "note"):
+        raise ApiError(400, "不支持的作品类型")
+    vid = ""
+    play_url = ((data.get("video") or {}).get("url") or "")
+    match = re.search(r"[?&]video_id=([\w-]+)", play_url)
+    if match:
+        vid = match.group(1)
+    if kind == "video" and not vid:
+        raise ApiError(502, "视频播放标识缺失")
+    if kind == "note" and not (data.get("images") or []):
+        raise ApiError(502, "图集内容缺失")
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM shares WHERE id=? AND parse_status='processing' "
+                "AND lease_owner=?", (item["id"], item["lease_owner"])).fetchone()
+            if not current or current["status"] != "ok":
+                conn.rollback()
+                return False
+            if conn.execute(
+                    "SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?",
+                    (kind, item_id)).fetchone():
+                if current["source_hash"]:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO blocked_share_sources(source_hash,created) "
+                        "VALUES(?,?)", (current["source_hash"], now))
+                conn.execute(
+                    "UPDATE shares SET status='takedown',parse_status='failed',"
+                    "source_url=NULL,parse_error_code='content_blocked',"
+                    "lease_owner=NULL,lease_until=NULL,updated=? "
+                    "WHERE id=? AND parse_status='processing' AND lease_owner=?",
+                    (now, item["id"], item["lease_owner"]))
+                _settle_quota_in_conn(
+                    conn, current["quota_reservation_id"], 0)
+                conn.commit()
+                return False
+            if int(current["created"] or now) <= (
+                    now - SHARE_PARSE_DEADLINE_SECONDS):
+                conn.execute(
+                    "UPDATE shares SET parse_status='failed',source_url=NULL,"
+                    "parse_error_code='parse_timeout',lease_owner=NULL,lease_until=NULL,"
+                    "expires_at=CASE WHEN expires_at>0 THEN MIN(expires_at,?) ELSE ? END,"
+                    "updated=? WHERE id=? AND parse_status='processing' AND lease_owner=?",
+                    (now + SHARE_FAILED_TTL, now + SHARE_FAILED_TTL, now,
+                     item["id"], item["lease_owner"]))
+                _settle_quota_in_conn(
+                    conn, current["quota_reservation_id"], 0)
+                conn.commit()
+                return False
+            ttl = SHARE_TTL_USER if current["owner_user_id"] else SHARE_TTL_ANON
+            changed = conn.execute(
+                "UPDATE shares SET item_id=?,kind=?,vid=?,title=?,author=?,avatar=?,"
+                "cover=?,payload=?,expires_at=?,refreshed_at=?,parse_status='ready',"
+                "source_url=NULL,parse_error_code=NULL,next_attempt_at=0,"
+                "lease_owner=NULL,lease_until=NULL,updated=?,ready_at=? "
+                "WHERE id=? AND status='ok' AND parse_status='processing' AND lease_owner=?",
+                (item_id, kind, vid, (data.get("title") or "")[:300],
+                 (data.get("author") or "")[:100], data.get("avatar", ""),
+                 data.get("cover", ""), json.dumps(data, ensure_ascii=False),
+                 now + ttl, now, now, now, item["id"], item["lease_owner"])
+            ).rowcount
+            if changed != 1:
+                conn.rollback()
+                return False
+            committed = _settle_quota_in_conn(
+                conn, current["quota_reservation_id"], 1)
+            if committed != 1:
+                raise RuntimeError("share quota reservation is not pending")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    if kind != "note":
+        try:
+            _atc_enqueue(item_id, purpose="play")
+        except Exception:
+            pass
+    return True
+
+
+def _share_parse_retry_delay(attempt: int) -> int:
+    base = (2, 5, 15, 45, 120, 300)[min(max(1, attempt), 6) - 1]
+    return base + secrets.randbelow(max(1, base // 2 + 1))
+
+
+def _finish_share_parse_failure(item: dict, code: str,
+                                retryable: bool) -> str:
+    """CAS 重试或终结任务；公开库只存稳定错误码，不存原始异常。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT * FROM shares WHERE id=? AND parse_status='processing' "
+                "AND lease_owner=?", (item["id"], item["lease_owner"])).fetchone()
+            if not current:
+                conn.rollback()
+                return "lost"
+            attempt = int(current["attempts"] or 0)
+            before_deadline = int(current["created"] or now) > (
+                now - SHARE_PARSE_DEADLINE_SECONDS)
+            can_retry = (retryable and current["status"] == "ok"
+                         and attempt < SHARE_PARSE_MAX_ATTEMPTS
+                         and before_deadline and current["source_url"])
+            if can_retry:
+                delay = _share_parse_retry_delay(attempt)
+                changed = conn.execute(
+                    "UPDATE shares SET parse_status='pending',parse_error_code=?,"
+                    "next_attempt_at=?,lease_owner=NULL,lease_until=NULL,updated=? "
+                    "WHERE id=? AND status='ok' AND parse_status='processing' "
+                    "AND lease_owner=?",
+                    (code, now + delay, now, item["id"], item["lease_owner"])
+                ).rowcount
+                if changed == 1 and current["quota_reservation_id"]:
+                    conn.execute(
+                        "UPDATE quota_reservations SET lease_until=? "
+                        "WHERE id=? AND status='pending'",
+                        (now + max(QUOTA_RESERVATION_TTL,
+                                   SHARE_PARSE_DEADLINE_SECONDS),
+                         current["quota_reservation_id"]))
+                outcome = "retry" if changed == 1 else "lost"
+            else:
+                final_code = ("parse_timeout" if retryable and
+                              (attempt >= SHARE_PARSE_MAX_ATTEMPTS
+                               or not before_deadline) else code)
+                changed = conn.execute(
+                    "UPDATE shares SET parse_status='failed',source_url=NULL,"
+                    "parse_error_code=?,next_attempt_at=0,lease_owner=NULL,lease_until=NULL,"
+                    "expires_at=CASE WHEN expires_at>0 THEN MIN(expires_at,?) ELSE ? END,"
+                    "updated=? WHERE id=? AND parse_status='processing' AND lease_owner=?",
+                    (final_code, now + SHARE_FAILED_TTL, now + SHARE_FAILED_TTL,
+                     now, item["id"], item["lease_owner"])
+                ).rowcount
+                if changed == 1:
+                    _settle_quota_in_conn(conn, current["quota_reservation_id"], 0)
+                outcome = "failed" if changed == 1 else "lost"
+            conn.commit()
+            return outcome
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _run_claimed_share_parse(item: dict) -> None:
+    try:
+        data = _parse_cached(item["source_url"])
+        _finish_share_parse_success(item, data)
+    except ApiError as exc:
+        if exc.status == 400:
+            code, retryable = "unsupported_link", False
+        elif exc.status == 404:
+            code, retryable = "content_unavailable", False
+        else:
+            code = "upstream_unavailable"
+            retryable = exc.status in (408, 425, 429, 500, 502, 503, 504)
+        _finish_share_parse_failure(item, code, retryable)
+    except Exception:
+        _finish_share_parse_failure(item, "upstream_unavailable", True)
+
+
+def _share_parse_worker_loop(worker_no: int) -> None:
+    owner = f"{_share_parse_instance}:{worker_no}"
+    while not _share_parse_stop.is_set():
+        try:
+            item = _claim_share_parse(owner)
+        except Exception:
+            _share_parse_stop.wait(1)
+            continue
+        if item is None:
+            try:
+                _share_parse_wakeup.get(timeout=1)
+            except queue.Empty:
+                pass
+            continue
+        try:
+            _run_claimed_share_parse(item)
+        except Exception:
+            # 数据库瞬时故障时保留租约，到期由本进程或其他实例接管。
+            _share_parse_stop.wait(0.5)
+
+
+def _share_parse_heartbeat_once() -> None:
+    prefix = _share_parse_instance + ":"
+    _expire_share_parse_jobs()
+    now = int(time.time())
+    cutoff = now - SHARE_PARSE_DEADLINE_SECONDS
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE shares SET lease_until=MIN(?,created+?) "
+                "WHERE parse_status='processing' AND created>? "
+                "AND substr(lease_owner,1,?)=?",
+                (now + SHARE_PARSE_LEASE_SECONDS, SHARE_PARSE_DEADLINE_SECONDS,
+                 cutoff, len(prefix), prefix))
+            conn.execute(
+                "UPDATE quota_reservations SET lease_until=? WHERE status='pending' "
+                "AND id IN (SELECT quota_reservation_id FROM shares "
+                "WHERE parse_status='processing' AND created>? "
+                "AND substr(lease_owner,1,?)=?)",
+                (now + max(QUOTA_RESERVATION_TTL,
+                           SHARE_PARSE_DEADLINE_SECONDS),
+                 cutoff, len(prefix), prefix))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _share_parse_heartbeat_loop() -> None:
+    while not _share_parse_stop.wait(SHARE_PARSE_HEARTBEAT_SECONDS):
+        try:
+            _share_parse_heartbeat_once()
+        except Exception:
+            pass
+
+
+def _prepare_share_parse_jobs() -> None:
+    """启动恢复：让过期租约重新排队，并保护仍有效任务的额度预占。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE shares SET parse_status='ready' WHERE parse_status IS NULL")
+            conn.execute(
+                "UPDATE shares SET parse_status='pending',lease_owner=NULL,lease_until=NULL,"
+                "next_attempt_at=MIN(COALESCE(next_attempt_at,?),?) "
+                "WHERE parse_status='processing' AND COALESCE(lease_until,0)<?",
+                (now, now, now))
+            conn.execute(
+                "UPDATE quota_reservations SET lease_until=? WHERE status='pending' "
+                "AND id IN (SELECT quota_reservation_id FROM shares "
+                "WHERE parse_status IN ('pending','processing'))",
+                (now + max(QUOTA_RESERVATION_TTL,
+                           SHARE_PARSE_DEADLINE_SECONDS),))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    _expire_share_parse_jobs()
+
+
+def _start_share_parse_workers(prepared: bool = False) -> None:
+    with _share_parse_workers_guard:
+        _share_parse_threads[:] = [t for t in _share_parse_threads if t.is_alive()]
+        if any(t.is_alive() for t in _share_parse_threads):
+            return
+        if not prepared:
+            _prepare_share_parse_jobs()
+        _share_parse_stop.clear()
+        while True:
+            try:
+                _share_parse_wakeup.get_nowait()
+            except queue.Empty:
+                break
+        _share_parse_threads.append(threading.Thread(
+            target=_share_parse_heartbeat_loop,
+            name="share-parse-heartbeat", daemon=False))
+        for i in range(SHARE_PARSE_WORKERS):
+            _share_parse_threads.append(threading.Thread(
+                target=_share_parse_worker_loop, args=(i,),
+                name=f"share-parse-worker-{i}", daemon=False))
+        for thread in _share_parse_threads:
+            thread.start()
+        _wake_share_parse_workers()
+
+
+def _stop_share_parse_workers() -> None:
+    with _share_parse_workers_guard:
+        _share_parse_stop.set()
+        _wake_share_parse_workers()
+        for thread in list(_share_parse_threads):
+            thread.join(timeout=min(SHARE_PARSE_LEASE_SECONDS + 5, 35))
+        _share_parse_threads[:] = [
+            t for t in _share_parse_threads if t.is_alive()]
 
 
 class ShareEventBody(BaseModel):
@@ -2947,8 +3977,11 @@ def _qr_bytes(sid: str, request: Request, kind: str, scale: int):
         import segno
     except ImportError:
         raise ApiError(501, "服务器未安装二维码依赖 segno")
+    row = db_exec("SELECT assigned_origin FROM shares WHERE id=?", (sid,), "one")
+    origin = (_normalize_origin_value(row["assigned_origin"] if row else "")
+              or PUBLIC_ORIGIN or _share_origin(request))
     buf = io.BytesIO()
-    segno.make(f"{_share_origin(request)}/s/{sid}", error="m").save(
+    segno.make(f"{origin}/s/{sid}", error="m").save(
         buf, kind=kind, scale=scale, border=2, dark="#111418", light="#ffffff")
     return buf.getvalue()
 
@@ -2980,11 +4013,32 @@ def api_my_shares(request: Request, limit: int = 50):
 @app.delete("/api/shares/{sid}")
 def api_share_delete(sid: str, request: Request):
     u = current_user(request)
-    if not u:
-        raise ApiError(401, "请先登录")
-    n = db_exec("DELETE FROM shares WHERE id=? AND owner_user_id=?", (sid, u["id"]), "rowcount")
-    if not n:
-        raise ApiError(404, "分享页不存在或不属于你")
+    manage_token = request.headers.get("X-Share-Manage-Token") or ""
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM shares WHERE id=?", (sid,)).fetchone()
+            if not row:
+                raise ApiError(404, "分享页不存在或已被删除")
+            row_dict = dict(row)
+            is_owner = bool(u and row["owner_user_id"] == u["id"])
+            has_capability = _valid_share_manage_token(row_dict, manage_token)
+            if not (is_owner or has_capability):
+                raise ApiError(403, "没有权限删除该分享页")
+            # claim 与删除都持有 BEGIN IMMEDIATE：attempts>0 说明后台已经实际占用过
+            # 一次解析资源，此时删除只取消后续发布但不退款；从未领取的 pending 才退款。
+            committed = 1 if int(row["attempts"] or 0) > 0 else 0
+            _settle_quota_in_conn(
+                conn, row["quota_reservation_id"], committed)
+            conn.execute("DELETE FROM shares WHERE id=?", (sid,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return {"ok": True}
 
 
@@ -3052,10 +4106,21 @@ def wx_jssdk(request: Request, url: str = ""):
     """给分享页签名。未配置公众号时返回 enabled=false，前端静默降级。"""
     # 先校验 URL 归属，再取 ticket：避免外站请求也能触发微信接口调用（有频次上限）
     # 含后台主分享域名：反代头缺失（如 Cloudflare flexible SSL）导致 _origin 取错时仍能签名
-    primary = app_setting("share_primary_domain", "").strip().rstrip("/")
-    allowed = list(SHARE_DOMAINS) + [_origin(request)] + ([primary] if primary else [])
+    primary = _normalize_origin_value(app_setting("share_primary_domain", ""))
+    allowed = set(SHARE_DOMAINS) | {_origin(request)}
+    if primary:
+        allowed.add(primary)
     page = (url or "").split("#")[0]
-    if not any(page.startswith(a) for a in allowed):
+    try:
+        parsed = urlparse.urlsplit(page)
+        if (len(page) > 4096 or parsed.username or parsed.password
+                or parsed.scheme not in ("http", "https") or not parsed.hostname):
+            raise ValueError("invalid page URL")
+        page_origin = _normalize_origin_value(
+            f"{parsed.scheme}://{parsed.netloc}")
+    except (TypeError, ValueError):
+        page_origin = ""
+    if not page_origin or page_origin not in allowed:
         raise ApiError(403, "该 URL 不属于本站，拒绝签名")
     try:
         appid, ticket = _wx_ticket()
@@ -4847,7 +5912,8 @@ def admin_shares(request: Request, limit: int = 100, q: str = ""):
     _require_admin(request)
     like = f"%{q}%"
     rows = db_exec(
-        "SELECT id,item_id,kind,title,author,status,views,plays,downloads,cta_clicks,"
+        "SELECT id,item_id,kind,title,author,status,parse_status,parse_error_code,"
+        "views,plays,downloads,cta_clicks,"
         "expires_at,created,owner_user_id,owner_ip FROM shares "
         "WHERE (?='' OR title LIKE ? OR author LIKE ? OR id=?) "
         "ORDER BY created DESC LIMIT ?",
@@ -4861,16 +5927,75 @@ def admin_shares(request: Request, limit: int = 100, q: str = ""):
 @app.post("/api/admin/shares/{sid}/takedown")
 def admin_takedown(sid: str, request: Request):
     _require_admin(request)
-    n = db_exec("UPDATE shares SET status='takedown' WHERE id=?", (sid,), "rowcount")
-    if not n:
-        raise ApiError(404, "分享页不存在")
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            target = conn.execute(
+                "SELECT * FROM shares WHERE id=?", (sid,)).fetchone()
+            if not target:
+                raise ApiError(404, "分享页不存在")
+            now = int(time.time())
+            if target["source_hash"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO blocked_share_sources(source_hash,created) "
+                    "VALUES(?,?)", (target["source_hash"], now))
+            if target["item_id"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO blocked_share_items(kind,item_id,created) "
+                    "VALUES(?,?,?)",
+                    (target["kind"] or "video", target["item_id"], now))
+
+            targets = {target["id"]: target}
+            if target["source_hash"]:
+                for row in conn.execute(
+                        "SELECT * FROM shares WHERE source_hash=?",
+                        (target["source_hash"],)).fetchall():
+                    targets[row["id"]] = row
+            if target["item_id"]:
+                for row in conn.execute(
+                        "SELECT * FROM shares WHERE kind=? AND item_id=?",
+                        (target["kind"] or "video", target["item_id"])).fetchall():
+                    targets[row["id"]] = row
+            for row in targets.values():
+                conn.execute(
+                    "UPDATE shares SET status='takedown',parse_status=CASE "
+                    "WHEN parse_status IN ('pending','processing') THEN 'failed' "
+                    "ELSE parse_status END,source_url=NULL,parse_error_code=CASE "
+                    "WHEN parse_status IN ('pending','processing') THEN 'content_blocked' "
+                    "ELSE parse_error_code END,lease_owner=NULL,lease_until=NULL,updated=? "
+                    "WHERE id=?", (now, row["id"]))
+                # 平台处置不向用户计费；旧 worker 的 lease CAS 会因此失效。
+                _admin_refund_quota_in_conn(
+                    conn, row["quota_reservation_id"])
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return {"ok": True}
 
 
 @app.delete("/api/admin/shares/{sid}")
 def admin_del_share(sid: str, request: Request):
     _require_admin(request)
-    db_exec("DELETE FROM shares WHERE id=?", (sid,))
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT quota_reservation_id FROM shares WHERE id=?", (sid,)).fetchone()
+            if row:
+                _admin_refund_quota_in_conn(
+                    conn, row["quota_reservation_id"])
+                conn.execute("DELETE FROM shares WHERE id=?", (sid,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return {"ok": True}
 
 
@@ -5049,6 +6174,10 @@ def admin_set_share_config(body: ShareConfigBody, request: Request):
         d = body.primary_domain.strip().rstrip("/")
         if d and not d.startswith(("http://", "https://")):
             d = "https://" + d                 # 容错：只填了域名就补 https
+        normalized = _normalize_origin_value(d)
+        if d and not normalized:
+            raise ApiError(422, "主分享域名必须是合法的 http(s) origin，不能含路径或账号信息")
+        d = normalized
         set_app_setting("share_primary_domain", d)
     if body.wx_appid is not None:
         set_app_setting("wx_appid", body.wx_appid.strip())
@@ -5139,10 +6268,12 @@ def _health_loop():
 def _start_health():
     # 崩溃遗留的网页配额先退款；API 作业先恢复/对账，再清理过期明细。
     # cleanup 放在 legacy recovery 后，避免提前删掉旧 api_logs 导致无法重建已结算项。
+    _prepare_share_parse_jobs()
     _refund_stale_quota_reservations()
     _prepare_api_jobs()
     _cleanup_retained_data(force=True)
     # 所有可能阻断 startup 的迁移/清理完成后才启动非 daemon worker，避免半启动悬挂。
+    _start_share_parse_workers(prepared=True)
     _start_api_job_workers(prepared=True)
     threading.Thread(target=_health_loop, daemon=True).start()
     threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
@@ -5151,6 +6282,7 @@ def _start_health():
 
 @app.on_event("shutdown")
 def _stop_mihomo():
+    _stop_share_parse_workers()
     _stop_api_job_workers()
     # 内存里的转发流量计数落库，重启不丢
     try:
@@ -5167,10 +6299,36 @@ def _stop_mihomo():
 # ---------------------------------------------------------------- 页面 + SEO
 
 def _origin(request: Request) -> str:
-    """反代下取真实站点 origin，用于 canonical / og:url / sitemap。"""
-    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
-    return f"{proto}://{host}"
+    """返回不可由任意 Host 头污染的站点 origin。生产环境应显式配置 PUBLIC_ORIGIN。"""
+    if PUBLIC_ORIGIN:
+        return PUBLIC_ORIGIN
+
+    configured = set(SHARE_DOMAINS)
+    primary = _normalize_origin_value(app_setting("share_primary_domain", ""))
+    if primary:
+        configured.add(primary)
+    if TRUST_PROXY:
+        proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+        forwarded = _normalize_origin_value(f"{proto}://{host}")
+        # 只有已配置的公开 origin 才能由可信反代头选中，避免反代原样透传 Host。
+        if forwarded and forwarded in configured:
+            return forwarded
+
+    server = request.scope.get("server") or ("127.0.0.1", 80)
+    hostname = str(server[0] or "127.0.0.1")
+    try:
+        port = int(server[1])
+    except (TypeError, ValueError, IndexError):
+        port = 80
+    scheme = str(request.scope.get("scheme") or "http").lower()
+    if scheme not in ("http", "https"):
+        scheme = "http"
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 443 if scheme == "https" else 80
+    return (_normalize_origin_value(
+        f"{scheme}://{rendered_host}{f':{port}' if port != default_port else ''}")
+        or "http://127.0.0.1")
 
 
 SUPPORTED_LANGS = {"zh": "zh-CN", "en": "en"}
@@ -5398,6 +6556,18 @@ def _share_head(view: Optional[dict], origin: str) -> str:
         return (str(s or "").replace("&", "&amp;").replace('"', "&quot;")
                 .replace("<", "&lt;").replace(">", "&gt;"))
 
+    if view and view["state"] in ("pending", "processing"):
+        url = esc(view.get("url") or f"{origin}/s/{view.get('sid', '')}")
+        return f'''<title>视频正在准备中 · 抖音分享</title>
+<meta name="description" content="链接已创建，内容正在后台获取，完成后页面会自动更新。">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#0E1013">
+<meta property="og:type" content="website">
+<meta property="og:title" content="视频正在准备中">
+<meta property="og:description" content="内容获取完成后，打开该链接即可播放。">
+<meta property="og:image" content="{esc(origin)}/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:url" content="{url}">'''
     if not view or view["state"] != "ok":
         return ('<title>内容不可用 · 抖音分享</title>\n'
                 '<meta name="robots" content="noindex,nofollow">\n'
@@ -5446,7 +6616,9 @@ def share_page(sid: str, request: Request):
                 and (should_refresh_note or should_repair_video)):
             row = _refresh_share(row)
         view = _share_view(row, origin)
-        _share_event(request, sid, "view")
+        # pending 页面完成后会自动 reload；只在终态记录一次，避免单次访问被算成 2 次。
+        if view["state"] not in ("pending", "processing"):
+            _share_event(request, sid, "view")
 
     html = Path("static/share.html").read_text("utf-8")
     # 注入 <script> 前把 < 转义成 <，防止标题里的 </script> 打断脚本

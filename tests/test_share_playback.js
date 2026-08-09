@@ -161,3 +161,16 @@ test('repeated start reuses one player and automatic failure never opens a mask'
   assert.equal(h.toasts.length, 1);
   assert.match(h.toasts[0], /画面已播放可继续观看/);
 });
+
+test('height-capped players keep their aspect ratio and stay centered', () => {
+  const portrait = html.match(/\.player\{([^}]*)\}/)?.[1] || '';
+  const landscape = html.match(/\.player\.wide\{([^}]*)\}/)?.[1] || '';
+
+  assert.match(portrait, /width:100%/);
+  assert.match(portrait, /max-width:39\.375vh/);   // 70vh × 9/16
+  assert.match(portrait, /margin-inline:auto/);
+  assert.doesNotMatch(portrait, /max-height/);
+  assert.match(landscape, /max-width:124\.444vh/); // 70vh × 16/9
+  assert.match(html, /\.player\{max-width:39\.375dvh\}/);
+  assert.match(html, /\.player\.wide\{max-width:124\.444dvh\}/);
+});

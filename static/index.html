@@ -1709,7 +1709,8 @@ function shareResultHTML(d){
     <h3>🔗 分享页已生成</h3>
     <div class="sub">把这个链接发到微信，对方点开就能直接看，不用装抖音 App。</div>
     <div class="share-link">
-      <input id="shareUrl" value="${esc(url)}" readonly onclick="this.select()">
+      <input id="shareUrl" value="${esc(url)}" readonly onclick="this.select()"
+             data-title="${esc(d.title || '')}" data-author="${esc(d.author || '')}">
       <button onclick="copyShareUrl(this)">复制</button>
     </div>
     <div class="share-qr">
@@ -1744,7 +1745,8 @@ $('#mySharesBtn').onclick = async () => {
   }
 };
 
-const STATE_LABEL = {ok:'生效中', expired:'已过期', dead:'源已删除', takedown:'已下架'};
+const STATE_LABEL = {ok:'生效中', pending:'排队中', processing:'准备中', failed:'获取失败',
+  expired:'已过期', dead:'源已删除', takedown:'已下架'};
 function renderMine(list){
   if (!list.length){
     $('#mineList').innerHTML = `<div class="mine-empty">还没有生成过分享页。<br>
@@ -1763,14 +1765,16 @@ function renderMine(list){
       </div>
       <div class="mo">
         <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a>
-        <button onclick="copyMine('${esc(s.url)}',this)">复制</button>
+        <button onclick="copyMine(this)" data-url="${esc(s.url)}"
+                data-title="${esc(s.title)}" data-author="${esc(s.author||'')}">复制</button>
         <button class="del" onclick="delMine('${esc(s.sid)}')">删除</button>
       </div>
     </div>`;
   }).join('');
 }
-function copyMine(url, btn){
-  navigator.clipboard?.writeText(url).then(()=>{
+function copyMine(btn){
+  const text = shareText(btn.dataset.title, btn.dataset.author, btn.dataset.url);
+  navigator.clipboard?.writeText(text).then(()=>{
     const o = btn.textContent; btn.textContent = '✓'; setTimeout(()=>btn.textContent=o, 1400);
   }).catch(()=>{});
 }
@@ -1784,11 +1788,22 @@ async function delMine(sid){
   } catch { alert('删除失败，请稍后重试'); }
 }
 
+/* 抖音风格分享文案：标题 + 一句引导 + 链接（两行以内，标题过长截断） */
+function shareText(title, author, url){
+  const t = String(title || '抖音作品').replace(/\s+/g, ' ').trim();
+  const short = t.length > 40 ? t.slice(0, 40) + '…' : t;
+  const by = author ? `@${author} 的抖音作品` : '抖音作品';
+  return `【${short}】${by}\n点开直接看，无需安装 App 👉 ${url}`;
+}
+
 function copyShareUrl(btn){
   const el = $('#shareUrl');
-  el.select();
   const done = () => { const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1600); };
-  navigator.clipboard?.writeText(el.value).then(done).catch(()=>{ try{ document.execCommand('copy'); done(); }catch{} });
+  const text = shareText(el.dataset.title, el.dataset.author, el.value);
+  navigator.clipboard?.writeText(text).then(done).catch(()=>{
+    el.value = text; el.select();
+    try{ document.execCommand('copy'); done(); }catch{}
+  });
 }
 
 /* ================= 登录 / 注册（表单 → 弹出滑块 → 通过后继续）================= */

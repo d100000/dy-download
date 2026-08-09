@@ -1,13 +1,13 @@
 # 抖音无水印下载器
 
-**当前版本：v1.13.1**（线上版本可通过 `GET /healthz` 的 `version` 字段确认）
+**当前版本：v1.14.0**（线上版本可通过 `GET /healthz` 的 `version` 字段确认）
 
 无需登录抖音账号、基础解析无需注册本站账号的抖音视频 / 图集下载工具。粘贴分享链接，在线预览并下载无水印原片。内置**代理 IP 池 + 管理后台 + 可选用户体系 + 按次计费开放 API**，所有出站请求轮换走代理，防止服务器 IP 被封。
 
 ## 功能
 
 - 🎬 **可靠视频下载**：自动去水印（优先 1080P / MP4）；1 字节 Range 预检后由浏览器从同源签名地址原生流式保存
-- 🔗 **分享页**：抖音链接发微信打不开？一键生成 `/s/{短码}` 分享页，**微信里点开就能看**，不用装 App；带二维码与分享海报、访问数据统计，默认 noindex 且强制署名回链原作者
+- 🔗 **分享页**：抖音链接发微信打不开？一键生成 `/s/{短码}` 分享页，**微信里点开就能看**，不用装 App；`POST /api/shares` 只校验链接就立即返回本地分享地址，抖音内容由可恢复的持久化 worker 异步获取
 - 🖼 **图集下载**：逐张原图浏览器直连下载
 - ⚡ **播放直连、下载同源**：所有环境（含微信内）播放都优先直连抖音 CDN，直连失败自动落到 `/api/video/{vid}` 同源流式兜底；所有视频下载走同源转发，服务器不落地保存媒体
 - 📋 **粘贴即用**：直接粘贴整段分享文案，自动提取短链；支持批量解析、结果导出 Excel
@@ -32,6 +32,17 @@
 | `/api-console` | 用户 API 控制台（Key 管理、余额、日志） |
 | `/admin_d` | 管理后台（隐藏入口，首页不暴露） |
 | `/healthz` | 存活探针（部署健康检查用） |
+
+### 异步创建分享页
+
+```bash
+curl -X POST http://127.0.0.1:3344/api/shares \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000' \
+  -d '{"text":"复制打开抖音 https://v.douyin.com/xxxx/"}'
+```
+
+接口只在本地校验一条规范的 `v.douyin.com` 短链，完成占位页、配额预占与任务持久化后立即返回 `202 Accepted` 和 `/s/{sid}`。用 `GET /api/shares/{sid}` 查询 `pending / processing / ready / failed`；直接打开分享页也会自动轮询并在完成后刷新。完整契约见 `/api-docs`。
 
 ## 快速开始（本地）
 
@@ -68,6 +79,7 @@ docker run -d --name douyin-dl \
   -p 127.0.0.1:3344:8000 \
   -e ADMIN_PASSWORD=换成强密码 \
   -e TRUST_PROXY=1 \
+  -e PUBLIC_ORIGIN=https://your-domain.com \
   -e APP_SECRET=$(openssl rand -hex 32) \
   -v /srv/douyin-dl/data:/data \
   douyin-dl
@@ -78,6 +90,7 @@ docker run -d --name douyin-dl \
 - `-v .../data:/data` **必须挂载**：SQLite 数据库（用户/计费/分享数据）与代理池配置都在这里，不挂载则容器重建后全部丢失。
 - `-p 127.0.0.1:3344:8000` 只绑本机回环，由 Nginx 对外反代（见下），不要把 8000 直接暴露公网。
 - `TRUST_PROXY=1` 表示部署在反代之后：此时才采信 `X-Forwarded-For` 拿真实客户端 IP（限频、防薅、日志都依赖它），并自动给会话 Cookie 加 `Secure`。**没有反代时千万别开**，否则客户端可伪造头绕过所有基于 IP 的风控。
+- `PUBLIC_ORIGIN` 必须填写最终公网 HTTPS origin；否则反代下 API 返回的 `share_url` 与二维码可能指向内网监听地址。
 
 ### 方式二：systemd + venv（裸机）
 
@@ -98,6 +111,7 @@ After=network.target
 WorkingDirectory=/srv/douyin-dl
 Environment=ADMIN_PASSWORD=换成强密码
 Environment=TRUST_PROXY=1
+Environment=PUBLIC_ORIGIN=https://your-domain.com
 Environment=APP_SECRET=换成至少32字节的随机长字符串
 ExecStart=/srv/douyin-dl/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 3344 --no-access-log
 Restart=always
@@ -182,9 +196,19 @@ server {
 | `MEDIA_RESUME_MAX_SECONDS` | `3600` | 首次断流后允许自动续传的总时长秒数（限制 30–7200） |
 | `MEDIA_RESUME_MAX_FAILURES` | `8` | 同一偏移连续续传失败上限（限制 2–16） |
 | `DATA_RETENTION_DAYS` | `30` | 访问/解析/播放事件及已完成 API 任务明细的保留天数；强制限制在 1–30 天 |
+| `PUBLIC_ORIGIN` | 空 | 生产环境固定公开 origin，如 `https://www.example.com`；用于防止 Host 头污染 canonical 与返回链接 |
 | `SHARE_DOMAINS` | 空 | 分享页专用域名池，逗号分隔，如 `https://s1.example.com,https://s2.example.com` |
 | `SHARE_TTL_ANON_DAYS` | `7` | 匿名用户分享链接有效期（天） |
 | `SHARE_TTL_USER_DAYS` | `30` | 登录用户分享链接有效期（天） |
+| `SHARE_PARSE_WORKERS` | `2` | 单进程异步分享解析 worker 数（1–4） |
+| `SHARE_PARSE_LEASE_SECONDS` | `180` | 分享解析任务的 SQLite 租约时长 |
+| `SHARE_PARSE_MAX_ATTEMPTS` | `4` | 上游瞬时失败时最多尝试次数（1–8） |
+| `SHARE_PARSE_DEADLINE_SECONDS` | `900` | 从创建起允许后台获取内容的总时长 |
+| `SHARE_PARSE_QUEUE_MAX` | `200` | 全局 pending/processing 分享任务上限 |
+| `SHARE_PARSE_GLOBAL_PER_MINUTE` | `120` | 所有用户合计每分钟最多接受的异步分享任务数 |
+| `SHARE_PARSE_GLOBAL_PER_HOUR` | `3000` | 所有用户合计每小时最多接受的异步分享任务数 |
+| `SHARE_PARSE_IP_PER_HOUR` | `60` | 单 IP 每小时异步分享提交上限（持久化且删除不重置） |
+| `ASYNC_SHARE_BODY_MAX` | `8192` | `POST /api/shares` 在 JSON 解析前允许的 HTTP 请求体字节数 |
 | `MIHOMO_VERSION` | `v1.18.10` | 内置机场加速用的 mihomo 内核版本 |
 | `MIHOMO_DL_BASE` | GitHub releases | 内核下载源；国内服务器连不上 GitHub 时换成镜像地址 |
 | `MIHOMO_OFF` | 关 | 设 `1` 彻底禁用内置机场功能（即使后台配了订阅也不启动） |
@@ -251,6 +275,8 @@ python3 tools/testproxy.py 8899          # 另开一个终端，会打印每条�
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.14.0 | 2026-08-09 | 新增异步分享页 API：`POST /api/shares` 只做本地短链校验，在同一 SQLite 事务中完成占位页、持久限频、幂等、配额预占与任务入队后立即返回 `202 + /s/{sid}`；后台通过非 daemon worker、SQLite 租约/CAS、心跳、崩溃接管与有界重试获取元数据，成功原子结算、失败原子退款。新增 `GET /api/shares/{sid}` 最小状态；分享页支持 pending/processing/failed，ready 后自动刷新，并提醒完成前不要转发到微信以避免占位 OG 卡片被缓存。只保存规范化短链至任务终态，不保存整段分享文案或媒体字节；公开错误仅含稳定错误码。复制分享链接改为抖音风格文案（【标题】@作者 的抖音作品 + 一句引导 + 链接，首页生成弹窗/我的分享/分享页内三处统一）；重写 `/api-docs`：完整可执行的 curl 请求示例、100 条上限与 Idempotency-Key 等真实约束、任务状态机与结果字段说明表、Python 调用示例、错误码补 409 |
+| v1.13.2 | 2026-08-08 | 修复分享页竖屏视频在移动端被 `70vh` 限高后向左收缩、右侧出现单边空栏的问题：将高度上限按视频宽高比换算为显式最大宽度并水平居中，同时分别约束横竖屏比例，优先使用动态视口单位 `dvh`、旧版 WebView 回退到 `vh` |
 | v1.13.1 | 2026-08-07 | 修复管理后台整页 JS 失效（点击登录无反应）：v1.13.0 新增的播放日志分页声明了 `const PL`，与代理列表原有的同名全局变量冲突，导致整个 `<script>` 解析失败、登录表单等所有绑定全部失效；播放日志状态变量改名为 `PLL` |
 | v1.13.0 | 2026-08-07 | 新增管理后台「播放日志」页签：逐条记录每次播放的浏览器环境（微信内/外 + 粗粒度 UA）、线路、尝试/成功/失败、耗时，以及**失败后链上下一条重试的线路**（`share_events` 新增 `next_src` 列，PRAGMA 就地补列；只记线路名不记带签名的媒体地址）；服务端分页（`GET /api/admin/play-logs?page=&size=&result=&wechat=&sid=`，总数/页数/上下页/每页 20-100 条），支持按结果、微信内外、分享页短码筛选，解决日志量大时一次拉取过慢的问题 |
 | v1.12.1 | 2026-08-07 | 页面缓存治理：`/api-docs`、`/transcript`、`/api-console`、`/admin_d` 四个此前无缓存头的页面统一加 `Cache-Control: no-cache`（每次回源校验，ETag/Last-Modified 未变返回 304），部署新版前端后用户无需强刷即生效；模板页 `<head>` 增加 `app-version` meta，view-source 可直接确认部署版本；`atc_url_ttl` 按实测校准为 3600 秒 |
