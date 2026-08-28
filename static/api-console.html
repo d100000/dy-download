@@ -116,7 +116,7 @@ code{font-family:ui-monospace,Menlo,monospace}
           <select id="testKey" style="background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:8px 12px; outline:none; min-width:200px"></select>
           <button class="btn btn-primary btn-sm" id="submitJobBtn">提交任务</button>
         </div>
-        <textarea id="testLinks" placeholder="每行一个 v.douyin.com 链接（最多 100 条）"></textarea>
+        <textarea id="testLinks" placeholder="每行一个受支持平台的公开作品链接（最多 100 条）"></textarea>
         <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap">
           <input id="resumeJobId" placeholder="已有任务 ID（job_…）"
                  style="flex:1;min-width:220px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:8px 12px;outline:none">
@@ -131,7 +131,7 @@ code{font-family:ui-monospace,Menlo,monospace}
       <div class="panel-body">
         <h3>1. 提交任务（异步）</h3>
         <p><code>POST /api/v1/jobs</code> · 请求头 <code>X-API-Key: 你的密钥</code>；建议同时发送唯一 <code>Idempotency-Key</code></p>
-        <pre id="docReq">请求体：{ "links": ["https://v.douyin.com/xxxx/", ...] }
+        <pre id="docReq">请求体：{ "links": ["https://v.douyin.com/xxxx/", "https://www.xiaohongshu.com/explore/xxxx", ...] }
 或    ：{ "text": "整段分享文案，自动提取链接" }</pre>
         <pre id="docResp">返回：{
   "code": 0, "message": "accepted",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""抖音无水印下载器 · Web 服务版（AnyToCopy 统一解析 + 管理后台）
+"""多平台无水印下载器 · Web 服务版（AnyToCopy 统一解析 + 管理后台）
 
-无需登录抖音账号或客户端签名。网页、开放 API 与分享页 worker 统一通过 AnyToCopy
+无需登录源平台账号或客户端签名。网页、开放 API 与抖音分享页 worker 统一通过 AnyToCopy
 提取作品元数据和无水印媒体地址；普通解析默认不请求语音文案。视频可浏览器直连，
 也可通过受签名保护且支持 Range 的同源流播放/下载，服务器不落地媒体文件。
 
@@ -18,6 +18,7 @@
 import gzip
 import hashlib
 import hmac
+import ipaddress
 import io
 import json
 import os
@@ -47,7 +48,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.18.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -2049,7 +2050,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
 
 # ---------------------------------------------------------------- 工具函数
 
-app = FastAPI(title="抖音无水印下载器", version=APP_VERSION)
+app = FastAPI(title="多平台无水印下载器", version=APP_VERSION)
 
 
 class _AsyncShareBodyLimitMiddleware:
@@ -2699,13 +2700,103 @@ def _card_cover(cover: str) -> str:
         return cover
 
 
+ATC_PLATFORM_HOSTS = {
+    "douyin": ("douyin.com", "iesdouyin.com"),
+    "xiaohongshu": ("xiaohongshu.com", "xhslink.com"),
+    "kuaishou": ("kuaishou.com", "kuaishou.cn", "gifshow.com"),
+    "bilibili": ("bilibili.com", "b23.tv"),
+    "pinduoduo": ("pinduoduo.com", "yangkeduo.com"),
+    "x": ("x.com", "twitter.com"),
+    "toutiao": ("toutiao.com",),
+    "shipinhao": ("channels.weixin.qq.com", "weixin.qq.com"),
+    "weibo": ("weibo.com", "weibo.cn", "t.cn"),
+    "tiktok": ("tiktok.com",),
+    "youtube": ("youtube.com", "youtu.be"),
+}
+
+
+def _atc_platform_for_url(value: str) -> str:
+    """识别 AnyToCopy 官方列出的常用平台；仅接受公开 HTTPS 作品链接。"""
+    try:
+        parsed = urlparse.urlsplit(str(value or "").strip())
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)):
+            return ""
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+    for platform_id, suffixes in ATC_PLATFORM_HOSTS.items():
+        if any(host == suffix or host.endswith("." + suffix)
+               for suffix in suffixes):
+            return platform_id
+    return ""
+
+
+_RESERVED_WORK_HOSTS = frozenset({
+    "localhost", "example.com", "example.net", "example.org",
+})
+_RESERVED_WORK_SUFFIXES = (
+    ".localhost", ".local", ".lan", ".internal", ".test", ".example",
+    ".invalid", ".onion",
+)
+
+
+def _atc_work_url_allowed(value: str) -> bool:
+    """Accept public HTTPS work URLs; AnyToCopy remains the support authority."""
+    try:
+        parsed = urlparse.urlsplit(str(value or "").strip())
+        if (parsed.scheme.lower() != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443)):
+            return False
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if (not host or "." not in host or host in _RESERVED_WORK_HOSTS
+                or host.endswith(_RESERVED_WORK_SUFFIXES)):
+            return False
+        # Content platforms use hostnames. Rejecting IP literals also prevents
+        # localhost/private-network URLs from being relayed to the extraction API.
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _extract_supported_work_urls(text: str, limit: int = 50) -> list[str]:
+    """从整段分享文案中安全提取受支持平台链接，保留平台必要查询参数。"""
+    raw_text = str(text or "")[:50000]
+    found, seen = [], set()
+    for raw in re.findall(
+            r"https://[^\s<>'\"。，、；！）】》\]}]+", raw_text, re.I):
+        candidate = raw.rstrip("。，、；！）】》]}>,.!;")
+        if len(candidate) > 4096:
+            continue
+        try:
+            parsed = urlparse.urlsplit(candidate)
+            if (parsed.scheme.lower() != "https" or parsed.username
+                    or parsed.password or parsed.port not in (None, 443)):
+                continue
+            host = (parsed.hostname or "").lower().rstrip(".")
+            normalized = urlparse.urlunsplit((
+                "https", host, parsed.path or "/", parsed.query, ""))
+        except (TypeError, ValueError):
+            continue
+        if not _atc_work_url_allowed(normalized) or normalized in seen:
+            continue
+        seen.add(normalized)
+        found.append(normalized)
+        if len(found) >= max(1, min(100, int(limit or 1))):
+            break
+    return found
+
+
 def _parse_share(text: str) -> dict:
-    """从分享文案取出短链，所有作品数据统一交给 AnyToCopy。"""
-    m = re.search(r"https://v\.douyin\.com/[\w-]+/?", text)
-    if not m:
-        raise ApiError(400, "未找到抖音分享链接，请确认文案里包含 v.douyin.com 短链")
-    short = m.group(0).rstrip("/") + "/"
-    return _atc_parse_work_url(short)
+    """从分享文案取出首条受支持链接，作品数据统一交给 AnyToCopy。"""
+    links = _extract_supported_work_urls(text, 1)
+    if not links:
+        raise ApiError(400, "未找到受支持的平台链接，请粘贴公开作品分享链接")
+    return _atc_parse_work_url(links[0])
 
 
 def _parse_item(kind: str, item_id: str) -> dict:
@@ -2716,7 +2807,7 @@ def _parse_item(kind: str, item_id: str) -> dict:
         path = "note" if kind == "note" else "video"
         work_url = f"https://www.douyin.com/{path}/{item_id}"
     if not work_url:
-        raise ApiError(404, "解析来源已过期，请重新粘贴抖音分享链接")
+        raise ApiError(404, "解析来源已过期，请重新粘贴原平台分享链接")
     return _atc_parse_work_url(work_url, item_id_hint=item_id, kind_hint=kind)
 
 
@@ -4246,6 +4337,7 @@ def _atc_item_id(work_url: str, data: dict) -> str:
 
 def _atc_result_to_parse(work_url: str, data: dict,
                          item_id_hint: str = "", kind_hint: str = "") -> dict:
+    platform_id = _atc_platform_for_url(work_url) or "other"
     work_type = str(data.get("workType") or kind_hint or "video").lower()
     image_urls = _atc_public_urls(data.get("imageUrlList"))
     video_urls = (_atc_public_urls(data.get("videoUrl"))
@@ -4254,7 +4346,17 @@ def _atc_result_to_parse(work_url: str, data: dict,
     kind = "note" if work_type in ("image", "images", "note", "slides") else "video"
     if image_urls and not video_url:
         kind = "note"
-    item_id = (item_id_hint or _atc_item_id(work_url, data))[:40]
+    raw_item_id = _atc_item_id(work_url, data)
+    if item_id_hint:
+        item_id = item_id_hint[:40]
+    elif platform_id == "douyin":
+        item_id = raw_item_id[:40]
+    else:
+        namespace = platform_id
+        if namespace == "other":
+            host = (urlparse.urlsplit(work_url).hostname or "site").lower()
+            namespace = "web" + hashlib.sha256(host.encode()).hexdigest()[:8]
+        item_id = f"{namespace}_{raw_item_id}"[:40]
     title = str(data.get("title") or data.get("content") or "（无标题）").strip()
     title = title[:1000] or "（无标题）"
     base = _safe_name(title, item_id)
@@ -4281,6 +4383,8 @@ def _atc_result_to_parse(work_url: str, data: dict,
     tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
     result = {
         "kind": kind, "item_id": item_id, "source": "atc", "title": title,
+        "platform": platform_id,
+        "share_supported": platform_id == "douyin",
         "author": author, "avatar": avatar, "author_url": author_url,
         "create_time": None, "stats": stats, "tags": tags,
         "music": None, "location": None, "base": base,
@@ -4370,7 +4474,7 @@ def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> boo
         return False
     db_exec("INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
             "VALUES(?,?,?,'pending',?,?)",
-            (item_id, saved_work_url[:300],
+            (item_id, saved_work_url[:1000],
              purpose, now, now))
     return True
 
@@ -4380,7 +4484,7 @@ def _atc_save_result(item_id: str, data: dict, work_url: str = "") -> None:
     now = int(time.time())
     old = _atc_cache_get(item_id) or {}
     saved_work_url = (work_url or data.get("workUrl")
-                      or old.get("work_url") or "")[:300]
+                      or old.get("work_url") or "")[:1000]
     video_urls = (_atc_public_urls(data.get("videoUrl"))
                   + _atc_public_urls(data.get("videoUrlList")))
     fresh_video_url = next(iter(dict.fromkeys(video_urls)), "")
@@ -4694,13 +4798,7 @@ def api_parse(body: ParseBody, request: Request):
 # ---------------------------------------------------------------- 开放 API v1（异步任务 + 计费）
 
 def _extract_links(text: str) -> list:
-    links = re.findall(r"https://v\.douyin\.com/[\w-]+/?", text or "")
-    seen, uniq = set(), []
-    for l in links:
-        if l not in seen:
-            seen.add(l)
-            uniq.append(l)
-    return uniq
+    return _extract_supported_work_urls(text, 100)
 
 
 API_JOB_LEASE_SECONDS = max(120, int(os.environ.get("API_JOB_LEASE_SECONDS", "600")))
@@ -5188,11 +5286,20 @@ def api_v1_create_job(body: JobBody, request: Request):
     rec, err = api_key_check(key)
     if err:
         raise ApiError(401, err)
-    links = list(body.links or []) or _extract_links(body.text)
-    links = [str(l) for l in links
-             if re.match(r"https://v\.douyin\.com/[\w-]+", str(l))][:100]
+    sources = list(body.links or []) or [body.text]
+    links, seen = [], set()
+    for source in sources:
+        for link in _extract_supported_work_urls(str(source), 100):
+            if link in seen:
+                continue
+            seen.add(link)
+            links.append(link)
+            if len(links) >= 100:
+                break
+        if len(links) >= 100:
+            break
     if not links:
-        raise ApiError(400, "links 为空或没有合法的 v.douyin.com 链接")
+        raise ApiError(400, "links 为空或没有受支持平台的公开作品链接")
     request_id = (request.headers.get("Idempotency-Key") or "").strip() or None
     if request_id and len(request_id) > 128:
         raise ApiError(400, "Idempotency-Key 最长 128 个字符")
@@ -5373,14 +5480,9 @@ class BatchBody(BaseModel):
 @app.post("/api/parse/batch")
 def api_parse_batch(body: BatchBody, request: Request):
     """批量解析：每条链接算一次配额，超出今日免费额度的部分不解析。"""
-    links = re.findall(r"https://v\.douyin\.com/[\w-]+/?", body.text)
-    seen, uniq = set(), []
-    for l in links:
-        if l not in seen:
-            seen.add(l)
-            uniq.append(l)
+    uniq = _extract_supported_work_urls(body.text, 50)
     if not uniq:
-        raise ApiError(400, "未找到任何 v.douyin.com 分享链接")
+        raise ApiError(400, "未找到任何受支持平台的公开作品链接")
 
     uniq = uniq[:50]
     reservation = reserve_quota(
@@ -6700,47 +6802,47 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
     canon = base if zh else f"{base}?lang=en"
     meta = {
         "zh": {
-            "title": "抖音无水印下载器 · 粘贴链接即下 · 一键分享给微信好友",
-            "desc": "免费的抖音无水印下载与分享工具：粘贴分享链接，即可在线预览、下载抖音视频与图集的无水印原片，或一键生成分享页发给微信好友——对方点开就能看，无需安装抖音 App。开源可审查、不保存媒体文件、站内账号可选、永不接广告。",
-            "kw": "抖音下载,抖音无水印下载,抖音视频下载,抖音去水印,douyin downloader,抖音图集下载,抖音解析,无水印下载器,抖音下载器在线,抖音API,抖音视频分享,抖音怎么分享到微信,抖音视频发微信,抖音分享链接生成,抖音视频免App观看,微信打开抖音视频",
-            "site": "抖音无水印下载器",
-            "ogt": "抖音无水印下载器 · 下载原片 + 一键分享给微信好友",
-            "ogd": "粘贴抖音分享链接，可靠下载无水印原片；还能一键生成分享页发到微信，好友点开即看、无需装 App。开源可审查、不保存媒体文件、账号可选、永不接广告。",
+            "title": "多平台无水印下载器 · 支持抖音、小红书、B站、TikTok 等 50+ 平台",
+            "desc": "免费的多平台视频与图集解析工具：支持抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等 50+ 平台。粘贴公开作品链接即可获取无水印原片、图集和作品信息；普通解析默认不获取语音文案。开源可审查、不保存媒体文件、无广告。",
+            "kw": "多平台视频下载,无水印下载器,抖音下载,小红书视频下载,快手视频下载,B站视频下载,微博视频下载,TikTok downloader,YouTube downloader,视频号下载,图集下载,AnyToCopy API",
+            "site": "多平台无水印下载器",
+            "ogt": "50+ 平台无水印下载 · 一个输入框统一解析",
+            "ogd": "支持抖音、小红书、快手、B站、微博、TikTok、YouTube 等 50+ 平台；粘贴链接即可预览视频、图集与无水印原片。开源、无广告、不保存媒体文件。",
             "locale": "zh_CN",
         },
         "en": {
-            "title": "Douyin Downloader & Share — No Watermark, Free & Open Source",
-            "desc": "Free Douyin (Chinese TikTok) no-watermark downloader and share tool. Paste a link to download original videos and galleries, or create a WeChat-friendly share page. Open source and auditable, no media-file storage, optional site account, and no ads.",
-            "kw": "douyin downloader,douyin video download,no watermark,tiktok downloader,save douyin video,douyin photo download,douyin api,open source downloader,share douyin video,send douyin video to wechat,douyin share link,watch douyin without app",
-            "site": "Douyin Downloader",
-            "ogt": "Douyin Downloader — Download No-Watermark Originals & Share to WeChat",
-            "ogd": "Download a no-watermark Douyin original or create a share page friends can watch on WeChat. Open source, no media-file storage, optional account, and no ads.",
+            "title": "Multi-platform Video Downloader — 50+ Platforms, No Watermark",
+            "desc": "Parse public posts from 50+ platforms including Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok and YouTube. Preview original videos and galleries with no media-file storage; transcript extraction is off by default.",
+            "kw": "multi platform video downloader,no watermark downloader,douyin downloader,xiaohongshu downloader,kuaishou downloader,bilibili downloader,weibo downloader,tiktok downloader,youtube downloader,photo gallery downloader,AnyToCopy API",
+            "site": "Multi-platform Video Downloader",
+            "ogt": "No-watermark downloads from 50+ content platforms",
+            "ogd": "Paste one public post link to parse videos, galleries and post details from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok, YouTube and more.",
             "locale": "en_US",
         },
     }[lang]
 
     ld = {
         "zh": {
-            "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。播放直连、视频签名流式下载，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
-            "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "播放直连且媒体不落地", "开发者 API"],
+            "app_desc": "支持 50+ 内容平台的视频与图集解析工具：粘贴抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等平台的公开作品链接，即可预览无水印原片、图集与作品信息。基础解析不要求登录源平台，普通解析默认不获取语音文案，站点不保存媒体文件。",
+            "features": ["50+ 内容平台统一解析", "抖音、小红书、快手、B站视频解析", "微博、视频号、Twitter/X 作品解析", "TikTok 与 YouTube 视频解析", "视频与图集预览", "批量解析与 Excel 导出", "抖音作品分享页", "可选语音文案提取", "媒体文件不落地", "开发者 API"],
             "faq": [
-                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。"),
+                ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
-                ("需要登录或安装软件吗？", "无需登录抖音账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
-                ("下载的抖音视频有水印吗？", "没有水印。下载的是无水印原片，也不会加入本站自己的二次水印。"),
+                ("需要登录或安装软件吗？", "无需登录源平台账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
+                ("解析得到的视频有水印吗？", "本站优先展示 AnyToCopy 返回的无水印原片，也不会加入本站自己的二次水印；实际可提取内容以源平台和作品类型为准。"),
                 ("支持图集（图片作品）下载吗？", "支持。图集作品会自动识别，可逐张下载原图，也可批量下载。"),
                 ("有没有 API 可以批量调用？", "有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。"),
                 ("怎么提取抖音视频的文案（语音转文字）？", "解析后打开结果卡上的「获取文案（语音转文字）」开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。"),
             ],
-            "howto": ("如何下载抖音无水印视频并分享给微信好友", [
-                ("复制分享链接", "在抖音 App 里点分享，复制作品链接或整段分享文案。"),
-                ("粘贴并解析", "把链接粘贴到本站输入框，点击解析。"),
-                ("下载或生成分享页", "一键下载无水印原片；或生成分享页发到微信。直接粘贴显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。")]),
+            "howto": ("如何解析多平台无水印视频与图集", [
+                ("复制公开作品链接", "在受支持的内容平台中打开分享功能，复制作品链接或整段分享文案。"),
+                ("粘贴并解析", "把链接粘贴到输入框；多条链接会自动拆分并批量处理。"),
+                ("预览或保存原片", "解析完成后预览视频或图集，并按当前平台可用的方式保存原片；抖音作品还可生成分享页。")]),
         },
         "en": {
-            "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. Playback is browser-direct while video downloads use a signed streaming route. It is open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
-            "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Direct playback with no media-file storage", "Developer API"],
+            "app_desc": "A video and gallery parser for 50+ content platforms. Paste a public post link from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, WeChat Channels, Twitter/X, TikTok, YouTube and more to preview the original media and post details. Basic parsing requires no source-platform login, transcript extraction is off by default, and the site stores no media files.",
+            "features": ["Unified parsing for 50+ platforms", "Douyin, Xiaohongshu, Kuaishou and Bilibili", "Weibo, WeChat Channels and Twitter/X", "TikTok and YouTube", "Video and gallery preview", "Batch parsing and Excel export", "Douyin share pages", "Optional speech transcript", "No media-file storage", "Developer API"],
             "faq": [
                 ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
@@ -6751,10 +6853,10 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
                 ("Is there an API for bulk use?", "Yes. After signing in you can create an API key in the console, submit links in bulk via the async API and poll for results, billed per request."),
                 ("How do I extract the transcript of a Douyin video?", "After parsing, switch on the transcript toggle on the result card — extraction usually takes 1–3 minutes and the full text can be copied. Sign-in is required, with a free daily quota; each video is extracted only once site-wide."),
             ],
-            "howto": ("How to download a Douyin video without watermark and share it on WeChat", [
-                ("Copy the share link", "In the Douyin app tap Share and copy the link or the whole share text."),
-                ("Paste and parse", "Paste the link into the input box and click Parse."),
-                ("Download or create a share page", "Download the original file, or create a share page for WeChat. A pasted URL remains a plain link; open the page in WeChat and forward it from the top-right menu to send a card.")]),
+            "howto": ("How to parse videos and galleries from supported platforms", [
+                ("Copy a public post link", "Use Share on a supported content platform and copy the post link or the complete share text."),
+                ("Paste and parse", "Paste into the input box. Multiple links are detected and processed as a batch automatically."),
+                ("Preview or save the original", "Preview the video or gallery and use the option available for that platform to save the original. Douyin posts can also become share pages.")]),
         },
     }[lang]
 
@@ -6823,6 +6925,27 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
 <meta name="twitter:image" content="{origin}/og.png">
 <script type="application/ld+json">{jsonld}</script>
 <script>window.__LANG={lang!r};window.__ORIGIN={origin!r};</script>'''
+
+
+_PLATFORM_LOGO_NAMES = frozenset({
+    "xiaohongshu", "kuaishou", "bilibili", "pinduoduo", "twitter",
+    "toutiao", "shipinhao", "weibo", "tiktok", "youtube",
+})
+
+
+@app.get("/platform-logos/{name}.svg", include_in_schema=False)
+def platform_logo(name: str):
+    """Serve the small, allow-listed platform marks used by the home page."""
+    if name not in _PLATFORM_LOGO_NAMES:
+        return Response(status_code=404)
+    return FileResponse(
+        Path("static/platform-logos") / f"{name}.svg",
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -7120,12 +7243,13 @@ def robots(request: Request):
 def llms_txt(request: Request):
     # 面向大模型/生成式引擎的站点说明（llmstxt.org 约定），帮助其准确引用本站
     o = _origin(request)
-    return f"""# 抖音无水印下载器（Douyin Downloader）
+    return f"""# 多平台无水印下载器（Multi-platform Video Downloader）
 
-> 免费、开源的抖音视频与图集**下载 + 分享**工具。粘贴抖音分享链接即可在线预览并下载无水印原片；也可生成分享页，好友无需安装抖音 App 即可观看。在微信聊天中直接粘贴会显示普通网址；在微信内打开页面后从右上角转发，才会显示带封面标题的卡片。普通浏览器播放与图片优先直连，视频下载和微信兼容播放使用带有效期授权的同源流式转发；本站不落地保存媒体文件。基础解析无需账号，站内账号与开发者 API 可选，永不接广告。
+> 免费、开源的多平台视频与图集解析工具。支持抖音、小红书、快手、B站、多多视频、Twitter/X、今日头条、视频号、微博、TikTok、YouTube 等 50+ 平台。粘贴公开作品链接即可预览无水印原片、图集和作品信息；普通解析默认不获取语音文案。抖音作品另可生成微信友好的分享页。本站不落地保存媒体文件，基础解析无需账号，站内账号与开发者 API 可选，无广告。
 
 ## 核心特性
-- 抖音视频无水印下载：解析分享链接，去除水印，下载原始清晰度视频。
+- **50+ 平台统一解析**：一个输入框识别抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等公开作品链接。
+- 视频无水印原片：AnyToCopy 返回对应平台可提取的原片地址，实际能力以源平台和作品类型为准。
 - 图集（图片作品）下载：自动识别多图作品，可逐张或批量下载原图。
 - **一键生成分享页**：把抖音作品变成一个网页，发给朋友点开即看。
 - **分享到微信显示为卡片**：在微信内打开分享页，点右上角 ··· 转发，好友收到带封面标题的卡片（直接粘贴网址则是纯链接，这是微信机制）。
@@ -7139,15 +7263,15 @@ def llms_txt(request: Request):
 - 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
 
 ## 使用方式
-1. 在抖音 App 点「分享 → 复制链接」，得到分享文案或短链。
+1. 在受支持的内容平台点「分享 → 复制链接」，得到分享文案或作品链接。
 2. 打开 {o}/ ，把链接粘贴进输入框并解析。
-3. 在线预览后一键下载无水印原片；**或点「生成分享页」，把链接发给微信好友，对方点开即可观看**。
+3. 在线预览视频或图集，按页面提供的当前平台方式保存原片；抖音作品还可点「生成分享页」发给微信好友。
 
 ## 常见问答
 - 会处理和保留哪些数据？——不保存视频或图片文件。每次解析会把规范化后的作品链接提交给 AnyToCopy 获取作品信息和媒体地址，普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
 - 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
 - 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，仅保存标题封面等元数据，不存储视频文件。
-- 需要登录或装软件吗？——无需登录抖音或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。
+- 需要登录或装软件吗？——无需登录源平台或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。
 - 下载的视频有水印吗？——没有，是无水印原片，也不加本站二次水印。
 - 支持图集吗？——支持，自动识别并可批量下载原图。
 - 有批量 API 吗？——有，登录后在 API 控制台生成密钥调用。

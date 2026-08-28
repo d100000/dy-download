@@ -46,7 +46,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=xxx -v 
 
 ### 解析链路（`_parse_share`）
 
-从整段分享文案中取 `v.douyin.com` 短链 → `_atc_extract()` 调 `POST /video/extract` → 每 4 秒调 `GET /video/query` → `_atc_result_to_parse()` 归一化为站内数据契约。**普通解析只传 `workUrl`，绝不传 `taskType`；只有用户主动提取文案时才传 `taskType=TEXT`。** 结果进 `_cache`（30 分钟）和 `atc_cache`（保存刷新/文案任务所需的 `work_url` 与媒体元数据）。
+从整段分享文案中取受支持平台的 HTTPS 公开作品链接（`ATC_PLATFORM_HOSTS`，安全后缀匹配）→ `_atc_extract()` 调 `POST /video/extract` → 每 4 秒调 `GET /video/query` → `_atc_result_to_parse()` 归一化为站内数据契约。**普通解析只传 `workUrl`，绝不传 `taskType`；只有用户主动提取文案时才传 `taskType=TEXT`。** 结果进 `_cache`（30 分钟）和 `atc_cache`（保存刷新/文案任务所需的 `work_url` 与媒体元数据）。抖音分享页创建仍只接受规范的 `v.douyin.com` 短链，不要与通用解析入口混用。
 
 `server.py` 主服务已统一到 ATC；`oss/server.py` 与 `douyin_dl.py` 是独立的精简/CLI 实现，不共享主服务运行时配置。本项目所说“后台全部使用 ATC”指 `server.py` 中的网页、开放 API 与分享 worker 三条入口。
 

@@ -155,6 +155,35 @@ h1 .hl{color:var(--accent)}
 .composer.is-loading .parse-progress{opacity:1}
 .composer.is-loading .parse-progress::after{animation:parseScan 1.05s var(--motion-ease) infinite}
 @keyframes parseScan{to{transform:translateX(340%)}}
+
+/* ---------- 支持平台：紧邻主输入，先回答“能不能解析” ---------- */
+.platform-support{
+  margin-top:22px; padding:18px; text-align:left; border:1px solid var(--border);
+  border-radius:18px; background:color-mix(in srgb,var(--surface) 88%,transparent);
+}
+.platform-support-head{display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin-bottom:14px}
+.platform-support-title{display:flex; align-items:center; gap:9px; font-size:15px; font-weight:750; color:var(--text)}
+.platform-count{padding:2px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:750}
+.platform-support-head p{max-width:430px; color:var(--faint); font-size:11.5px; line-height:1.55; text-align:right}
+.platform-grid{display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; list-style:none}
+.platform-item{
+  min-width:0; min-height:64px; padding:9px 10px; display:flex; align-items:center; gap:9px;
+  border:1px solid var(--border); border-radius:12px; background:var(--surface-2);
+  transition:transform var(--motion-fast) var(--motion-ease),border-color var(--motion-fast),background var(--motion-fast);
+}
+.platform-item:hover{transform:translateY(-2px); border-color:var(--border-strong); background:var(--surface)}
+.platform-logo{
+  width:34px; height:34px; flex:none; display:grid; place-items:center; overflow:hidden;
+  border:1px solid rgba(0,0,0,.07); border-radius:9px; background:#fff;
+}
+.platform-logo img{width:25px; height:25px; display:block; object-fit:contain}
+.platform-meta{min-width:0; line-height:1.25}
+.platform-meta b,.platform-meta small{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.platform-meta b{color:var(--text); font-size:12.5px; font-weight:680}
+.platform-meta small{margin-top:4px; color:var(--faint); font-size:10px}
+.platform-item.more .platform-logo{color:var(--accent); background:var(--accent-soft); border-color:transparent; font-size:18px; font-weight:500}
+.platform-foot{display:flex; align-items:center; gap:7px; margin:12px 2px 0; color:var(--faint); font-size:11px}
+.platform-foot::before{content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--ok)}
 .ghost-btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:10px;
   border:1px solid var(--border); color:var(--muted); font-size:13.5px; background:var(--surface-2);
@@ -295,7 +324,7 @@ a.ghost-btn{text-decoration:none}
 .bt-tag{font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:99px; background:var(--surface-2); color:var(--muted); white-space:nowrap}
 .bt-nums{color:var(--muted); white-space:nowrap}
 .bt-ops{white-space:nowrap}
-.mini-btn{font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:8px; background:var(--accent); color:var(--accent-ink); margin-right:6px; transition:opacity .15s}
+.mini-btn{display:inline-flex; align-items:center; font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:8px; background:var(--accent); color:var(--accent-ink); margin-right:6px; text-decoration:none; transition:opacity .15s}
 .mini-btn:hover{opacity:.88}
 .mini-btn.ghost{background:var(--surface-2); color:var(--text); border:1px solid var(--border)}
 
@@ -636,6 +665,10 @@ a.ghost-btn{text-decoration:none}
   .story-flow.f2{left:51%; top:57%; width:27%}
 }
 
+@media (max-width:900px) and (min-width:601px){
+  .platform-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
+}
+
 /* ---------- 手机端适配 ---------- */
 @media (max-width:600px){
   body{font-size:14.5px}
@@ -664,6 +697,16 @@ a.ghost-btn{text-decoration:none}
   .composer-actions .ghost-btn{min-height:44px}
   .composer-modes{width:100%}
   .composer-modes span{flex:1; text-align:center}
+  .platform-support{margin-top:16px; padding:14px 12px; border-radius:15px}
+  .platform-support-head{display:block; margin-bottom:11px}
+  .platform-support-head p{margin-top:5px; max-width:none; text-align:left}
+  .platform-grid{grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px}
+  .platform-item{min-height:76px; padding:9px 5px; flex-direction:column; justify-content:center; gap:6px; text-align:center}
+  .platform-logo{width:32px; height:32px; border-radius:8px}
+  .platform-logo img{width:23px; height:23px}
+  .platform-meta b{font-size:11.5px}
+  .platform-meta small{display:none}
+  .platform-foot{align-items:flex-start; line-height:1.5}
   .card-body{padding:16px; gap:18px}
   .player-wrap{width:100%}
   .meta-row{gap:16px; padding:12px 0}
@@ -717,7 +760,7 @@ footer{
         <path d="M20 47 h24" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
       </svg>
     </span>
-    <span class="brand-name">抖音下载器 <small>无水印 · 开源 · 无广告</small></span>
+    <span class="brand-name"><span data-i18n="brand_name">多平台下载器</span><small data-i18n="brand_tagline">50+ 平台 · 开源 · 无广告</small></span>
   </div>
   <div class="nav-right">
     <a class="nav-link" href="/api-docs" data-i18n="nav_api">API 接入</a>
@@ -799,26 +842,26 @@ footer{
 
 <main>
 <section class="hero">
-  <div class="hero-kicker" data-i18n="hero_kicker">视频 · 图集 · 批量解析</div>
-  <h1 data-i18n-html="hero_h1"><span class="hero-line"><span>粘贴抖音链接</span></span><span class="hero-line hl"><span>下载无水印原片</span></span></h1>
-  <p data-i18n="hero_sub">复制抖音分享文案，粘贴到下方即可在线预览和下载。</p>
-  <p class="hero-share" data-i18n-html="hero_share">无需登录抖音 · 不保存媒体文件 · <strong>可生成分享页</strong></p>
+  <div class="hero-kicker" data-i18n="hero_kicker">50+ 内容平台 · 视频 · 图集</div>
+  <h1 data-i18n-html="hero_h1"><span class="hero-line"><span>粘贴分享链接</span></span><span class="hero-line hl"><span>获取无水印原片</span></span></h1>
+  <p data-i18n="hero_sub">支持抖音、小红书、快手、B站、微博、TikTok、YouTube 等公开作品链接。</p>
+  <p class="hero-share" data-i18n-html="hero_share">无需登录源平台 · 不保存媒体文件 · <strong>抖音作品可生成分享页</strong></p>
 
   <div class="composer" aria-busy="false">
     <div class="composer-head">
       <div class="composer-label">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-        <span data-i18n="composer_label">抖音分享链接</span>
+        <span data-i18n="composer_label">平台分享链接</span>
       </div>
       <div class="composer-status" role="status" aria-live="polite" aria-atomic="true">
         <span class="status-default" data-i18n="composer_status">AnyToCopy API 解析</span>
-        <span class="status-ready" data-i18n="composer_ready">已识别抖音链接</span>
+        <span class="status-ready" data-i18n="composer_ready">已识别支持的平台链接</span>
         <span class="status-loading" data-i18n="composer_loading">正在获取作品信息</span>
       </div>
     </div>
     <div class="composer-input-row">
       <div class="input-shell">
-        <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴抖音分享文案或链接&#10;例如：https://v.douyin.com/xxxx/"></textarea>
+        <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴视频 / 图集分享文案或链接&#10;支持抖音、小红书、快手、B站、微博等 50+ 平台"></textarea>
         <button class="clear-x" id="clearBtn" aria-label="清空" title="清空" style="display:none">✕</button>
       </div>
       <button class="primary-btn" id="parseBtn">
@@ -843,7 +886,7 @@ footer{
         <span data-i18n="mode_video">视频</span><span data-i18n="mode_album">图集</span><span data-i18n="mode_batch">批量</span>
       </div>
     </div>
-    <div class="composer-hint" data-i18n="hint">支持一次粘贴多条链接，系统会自动拆分并批量解析，结果可导出 Excel。</div>
+    <div class="composer-hint" data-i18n="hint">支持一次粘贴多条受支持平台链接，系统会自动拆分并批量解析，结果可导出 Excel。</div>
     <div class="quota-hint" id="quotaHint"></div>
     <div class="parse-progress" aria-hidden="true"></div>
   </div>
@@ -855,6 +898,28 @@ footer{
     </svg>
     <span id="alertText"></span>
   </div>
+
+  <section class="platform-support" aria-labelledby="platformTitle">
+    <div class="platform-support-head">
+      <h2 class="platform-support-title" id="platformTitle"><span data-i18n="platform_title">支持的平台</span><span class="platform-count">50+</span></h2>
+      <p data-i18n="platform_intro">一个输入框统一解析视频、图集与公开作品链接；实际可提取内容以源平台和作品类型为准。</p>
+    </div>
+    <ul class="platform-grid" aria-label="支持的平台列表" data-i18n-aria="platform_list_label">
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_douyin">抖音</b><small data-i18n="platform_short">短视频 · 图集</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/xiaohongshu.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_xiaohongshu">小红书</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/kuaishou.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_kuaishou">快手</b><small data-i18n="platform_short">短视频 · 图集</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/bilibili.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_bilibili">B站</b><small data-i18n="platform_long">长视频 · 动态</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/pinduoduo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_pinduoduo">多多视频</b><small data-i18n="platform_ecommerce">电商视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/twitter.svg" alt="" decoding="async"></span><span class="platform-meta"><b>Twitter/X</b><small data-i18n="platform_social_video">社交视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/toutiao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_toutiao">今日头条</b><small data-i18n="platform_news">资讯视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/shipinhao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_shipinhao">视频号</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/weibo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_weibo">微博</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b>TikTok</b><small data-i18n="platform_short_video">短视频</small></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/youtube.svg" alt="" decoding="async"></span><span class="platform-meta"><b>YouTube</b><small data-i18n="platform_long_video">长视频</small></span></li>
+      <li class="platform-item more"><span class="platform-logo" aria-hidden="true">＋</span><span class="platform-meta"><b data-i18n="platform_more">更多平台</b><small data-i18n="platform_growing">持续增加中</small></span></li>
+    </ul>
+    <p class="platform-foot" data-i18n="platform_foot">依托 AnyToCopy API 统一解析，无需在不同平台工具之间来回切换。</p>
+  </section>
 </section>
 
 <section class="result" id="result"></section>
@@ -886,7 +951,7 @@ footer{
           <li class="story-copy" data-story-copy="2">
             <span class="story-index">03</span>
             <h3 data-i18n="story_h3">原片就绪，自由使用。</h3>
-            <p data-i18n="story_p3">在线预览、下载原片，或生成分享页发给好友。</p>
+            <p data-i18n="story_p3">在线预览原片；抖音作品还可生成分享页发给好友。</p>
           </li>
         </ol>
       </div>
@@ -895,7 +960,7 @@ footer{
         <div class="story-flow f1"></div><div class="story-flow f2"></div>
         <div class="story-link-card">
           <span class="story-link-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-          <span class="story-link-lines"><b>v.douyin.com/UhpfZuTcmpU/</b><span data-i18n="story_visual_link">分享文案 · 自动识别链接</span></span>
+          <span class="story-link-lines"><b>share.link/public-post</b><span data-i18n="story_visual_link">分享文案 · 自动识别平台链接</span></span>
         </div>
         <div class="story-parser">
           <span class="story-ring r1"></span><span class="story-ring r2"></span><span class="story-ring r3"></span>
@@ -937,7 +1002,7 @@ footer{
     <div class="trust-card reveal">
       <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></svg></div>
       <h3 data-i18n="tc4_h">分享更方便</h3>
-      <p data-i18n-html="tc4_p">一键生成分享页或海报，好友打开即可观看，无需安装抖音。</p>
+      <p data-i18n-html="tc4_p">抖音作品可一键生成分享页或海报，好友打开即可观看，无需安装 App。</p>
     </div>
   </div>
 </section>
@@ -948,7 +1013,7 @@ footer{
     <div class="api-band-text">
       <span class="api-tag" data-i18n="api_tag">开发者 API</span>
       <h2 data-i18n="api_h">需要批量 / 自动化？用开放 API</h2>
-      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交抖音链接、查询解析结果——标题、作者、无水印视频地址、图集图片、互动数据一次拿全。按次计费、稳定可靠，适合采集、备份与二次开发。</p>
+      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交受支持平台链接——标题、作者、视频地址、图集图片、互动数据一次拿全。按次计费、稳定可靠，适合研究、备份与二次开发。</p>
       <div class="api-feats">
         <span data-i18n="api_f1">✓ 异步批量：提交即返回任务号</span>
         <span data-i18n="api_f2">✓ 规范 JSON：结构化字段</span>
@@ -962,7 +1027,9 @@ footer{
     <pre class="api-code"><code>POST /api/v1/jobs
 X-API-Key: dy_xxx
 
-{ "links": ["https://v.douyin.com/xxx/"] }
+{ "links": [
+  "https://v.douyin.com/xxx/",
+  "https://www.xiaohongshu.com/explore/xxx" ] }
 → { "code":0, "data":{
      "job_id":"job_xxx", "status":"pending" } }
 
@@ -974,10 +1041,10 @@ GET /api/v1/jobs/job_xxx
 
 <section class="faq" aria-labelledby="faq-title">
   <h2 class="faq-title reveal" id="faq-title" data-i18n="faq_title">常见问题</h2>
-  <p class="faq-lead reveal" data-i18n="faq_lead">抖音无水印下载与分享：在抖音 App 复制作品分享链接，粘贴到本站点击解析，即可在线预览、下载无水印原片，或一键生成分享页发给微信好友——对方点开即可观看，无需安装抖音 App。无需登录抖音账号；基础解析不要求注册本站账号，也无需安装应用。</p>
+  <p class="faq-lead reveal" data-i18n="faq_lead">粘贴受支持平台的公开作品链接，即可在线预览视频或图集；抖音作品还可生成适合微信打开的分享页。无需登录源平台，基础解析也不要求注册本站账号或安装应用。</p>
   <div class="faq-list">
     <details class="faq-item reveal">
-      <summary data-i18n="faq_q1">这个抖音下载器会处理和保留哪些数据？</summary>
+      <summary data-i18n="faq_q1">这个下载器会处理和保留哪些数据？</summary>
       <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
     </details>
     <details class="faq-item reveal">
@@ -990,10 +1057,10 @@ GET /api/v1/jobs/job_xxx
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q2">需要登录或安装软件吗？</summary>
-      <p data-i18n="faq_a2">无需登录抖音账号，也无需安装任何 App 或浏览器插件。本站账号为可选；基础解析可直接使用，API 控制台等账号功能需要登录。</p>
+      <p data-i18n="faq_a2">无需登录源平台账号，也无需安装任何 App 或浏览器插件。本站账号为可选；基础解析可直接使用，API 控制台等账号功能需要登录。</p>
     </details>
     <details class="faq-item reveal">
-      <summary data-i18n="faq_q3">下载的抖音视频有水印吗？</summary>
+      <summary data-i18n="faq_q3">解析得到的视频有水印吗？</summary>
       <p data-i18n-html="faq_a3">没有水印。下载的是<strong>无水印原片</strong>，也不会加入本站自己的二次水印。</p>
     </details>
     <details class="faq-item reveal">
@@ -1005,7 +1072,7 @@ GET /api/v1/jobs/job_xxx
       <p data-i18n="faq_a5">有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。</p>
     </details>
     <details class="faq-item reveal">
-      <summary data-i18n="faq_q8">怎么提取抖音视频的文案（语音转文字）？</summary>
+      <summary data-i18n="faq_q8">怎么提取视频文案（语音转文字）？</summary>
       <p data-i18n-html="faq_a8">解析后打开结果卡上的<strong>「获取文案（语音转文字）」</strong>开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。详见<a href="/transcript">文案提取</a>。</p>
     </details>
   </div>
@@ -1031,23 +1098,33 @@ const IS_WECHAT_UA = /micromessenger/i.test(navigator.userAgent);
 const I18N = {
   en: {
     nav_api:"API", nav_login:"Sign in", nav_console:"API Console", nav_logout:"Log out",
-    hero_kicker:"Video · Gallery · Batch parsing",
-    hero_h1:'<span class="hero-line"><span>Paste a Douyin link.</span></span><span class="hero-line hl"><span>Get the watermark-free original.</span></span>',
-    hero_sub:"Copy the Douyin share text and paste it below to preview and download online.",
-    hero_share:"No Douyin sign-in · No media-file storage · <strong>Share pages included</strong>",
-    composer_label:"Douyin share link", composer_status:"Powered by AnyToCopy API",
-    composer_ready:"Douyin link detected", composer_loading:"Fetching post details",
-    ph_input:"Paste Douyin share text or a link\ne.g. https://v.douyin.com/xxxx/",
+    brand_name:"Multi-platform downloader", brand_tagline:"50+ platforms · Open source · No ads",
+    hero_kicker:"50+ content platforms · Video · Gallery",
+    hero_h1:'<span class="hero-line"><span>Paste a share link.</span></span><span class="hero-line hl"><span>Get the watermark-free original.</span></span>',
+    hero_sub:"Works with public posts from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok, YouTube and more.",
+    hero_share:"No source-platform sign-in · No media-file storage · <strong>Share pages for Douyin posts</strong>",
+    composer_label:"Platform share link", composer_status:"Powered by AnyToCopy API",
+    composer_ready:"Supported platform link detected", composer_loading:"Fetching post details",
+    ph_input:"Paste video / gallery share text or a link\nSupports Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo and 50+ platforms",
     btn_paste:"Paste", btn_upload:"Upload file", btn_parse:"Start parsing", btn_loading:"Parsing…",
     mode_video:"Video", mode_album:"Gallery", mode_batch:"Batch",
-    hint:"Paste multiple links at once — they will be split and parsed in batch, and results can be exported to Excel.",
+    hint:"Paste multiple supported-platform links at once — they will be split and parsed in batch, and results can be exported to Excel.",
+    platform_title:"Supported platforms", platform_intro:"One input for videos, galleries and public post links. Available content depends on the source platform and post type.",
+    platform_list_label:"Supported platform list", platform_douyin:"Douyin", platform_xiaohongshu:"Xiaohongshu",
+    platform_kuaishou:"Kuaishou", platform_bilibili:"Bilibili", platform_pinduoduo:"Pinduoduo Video",
+    platform_toutiao:"Toutiao", platform_shipinhao:"WeChat Channels", platform_weibo:"Weibo",
+    platform_short:"Short video · Gallery", platform_social:"Post · Video", platform_long:"Long video · Post",
+    platform_ecommerce:"Commerce video", platform_social_video:"Social video", platform_news:"News video",
+    platform_short_video:"Short video", platform_long_video:"Long video", platform_more:"More platforms",
+    platform_growing:"More being added", platform_foot:"Unified through the AnyToCopy API, so you do not need a different tool for every platform.",
+    err_link:"Paste a public post link from a supported platform.",
     story_label:"From share link to watermark-free original",
     story_title:'One paste.<strong>Three steps.</strong>', story_progress_label:"Parsing flow steps",
     story_goto1:"View paste-link step", story_goto2:"View API parsing step", story_goto3:"View download and sharing step",
     story_h1:"Paste it as-is.", story_p1:"Full share text works too, and multiple links are split automatically.",
     story_h2:"One request. Every detail.", story_p2:"The AnyToCopy API returns the title, creator, cover, video or gallery.",
-    story_h3:"Original ready. Use it your way.", story_p3:"Preview online, download the original, or create a share page for friends.",
-    story_visual_link:"Share text · Link detected automatically", story_visual_ready:"Watermark-free original ready",
+    story_h3:"Original ready. Use it your way.", story_p3:"Preview the original online; Douyin posts can also become share pages for friends.",
+    story_visual_link:"Share text · Platform link detected", story_visual_ready:"Watermark-free original ready",
     story_visual_meta:"Video · 00:27 · MP4", story_visual_download:"Download", story_visual_share:"Share",
     quota_login_cta:"Sign in for 10/day →",
     reg_tip:"Create an account: 10 free parses/day, 30-day share pages",
@@ -1061,16 +1138,16 @@ const I18N = {
     tc1_h:"Open and restrained", tc1_p:"The front end is auditable and we <strong>do not store video or image files</strong>; compatibility routes only stream bytes.",
     tc2_h:"More reliable parsing", tc2_p:"A unified parsing API plus playback and download fallbacks switch routes and retry when needed.",
     tc3_h:"Clean and ad-free", tc3_p:"No popups or pre-roll ads, and no second watermark added to your downloads.",
-    tc4_h:"Easy to share", tc4_p:"Create a share page or poster in one click so friends can watch without installing Douyin.",
+    tc4_h:"Easy to share", tc4_p:"Douyin posts can become a share page or poster so friends can watch without installing the app.",
     api_tag:"Developer API", api_h:"Need bulk / automation? Use the open API",
-    api_p:"Sign in, create an API key in the console, and submit Douyin links in bulk via the async API — title, author, no-watermark video URL, gallery images and stats in one call. Billed per request, reliable, built for scraping, backup and integration.",
+    api_p:"Sign in, create an API key in the console, and submit supported-platform links in bulk via the async API — title, author, video URL, gallery images and stats in one call. Billed per request, reliable, built for research, backup and integration.",
     api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance visible",
     api_cta1:"View API docs", api_cta2:"Open API console",
-    faq_title:"FAQ", faq_lead:"Douyin no-watermark download & sharing: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — or create a share page in one click and send it to friends on WeChat, who can watch it without installing Douyin. No Douyin login is required; basic parsing needs no site account or app installation.",
+    faq_title:"FAQ", faq_lead:"Paste a public post link from a supported platform to preview its video or gallery. Douyin posts can also become a WeChat-friendly share page. No source-platform sign-in is required; basic parsing needs no site account or app installation.",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
     faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
-    faq_q2:"Do I need to log in or install anything?", faq_a2:"No Douyin login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
+    faq_q2:"Do I need to log in or install anything?", faq_a2:"No source-platform login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
     faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
@@ -1081,9 +1158,44 @@ const I18N = {
     auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
     quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
   },
-  zh: { btn_parse:"开始解析", btn_loading:"解析中…", quota_tpl:(r,l,u)=>`今日免费剩余 ${r}/${l} 次 · 登录后每天 ${u} 次` }
+  zh: { btn_parse:"开始解析", btn_loading:"解析中…", err_link:"请粘贴受支持平台的公开作品链接",
+    quota_tpl:(r,l,u)=>`今日免费剩余 ${r}/${l} 次 · 登录后每天 ${u} 次` }
 };
 function t(key){ const d=I18N[LANG]; return d && d[key]!==undefined ? d[key] : null; }
+const PLATFORM_NAMES = {
+  zh:{douyin:'抖音',xiaohongshu:'小红书',kuaishou:'快手',bilibili:'B站',pinduoduo:'多多视频',x:'Twitter/X',toutiao:'今日头条',shipinhao:'视频号',weibo:'微博',tiktok:'TikTok',youtube:'YouTube',other:'其他平台'},
+  en:{douyin:'Douyin',xiaohongshu:'Xiaohongshu',kuaishou:'Kuaishou',bilibili:'Bilibili',pinduoduo:'Pinduoduo Video',x:'Twitter/X',toutiao:'Toutiao',shipinhao:'WeChat Channels',weibo:'Weibo',tiktok:'TikTok',youtube:'YouTube',other:'Other platform'}
+};
+const SUPPORTED_PLATFORM_HOSTS = [
+  'douyin.com','iesdouyin.com','xiaohongshu.com','xhslink.com','kuaishou.com','kuaishou.cn','gifshow.com',
+  'bilibili.com','b23.tv','pinduoduo.com','yangkeduo.com','x.com','twitter.com','toutiao.com',
+  'channels.weixin.qq.com','weixin.qq.com','weibo.com','weibo.cn','t.cn','tiktok.com','youtube.com','youtu.be'
+];
+const RESERVED_WORK_HOSTS = new Set(['localhost','example.com','example.net','example.org']);
+const RESERVED_WORK_SUFFIXES = ['.localhost','.local','.lan','.internal','.test','.example','.invalid','.onion'];
+function platformName(id){ return (PLATFORM_NAMES[LANG] || PLATFORM_NAMES.zh)[id] || (PLATFORM_NAMES[LANG] || PLATFORM_NAMES.zh).other; }
+function publicWorkHost(host){
+  if (!host || !host.includes('.') || host.includes(':') || RESERVED_WORK_HOSTS.has(host)) return false;
+  if (RESERVED_WORK_SUFFIXES.some(suffix => host.endsWith(suffix))) return false;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) return false;
+  return true;
+}
+function supportedWorkLinks(text){
+  const matches = String(text || '').match(/https:\/\/[^\s<>'"。，、；！）】》\]}]+/gi) || [];
+  const seen = new Set(), links = [];
+  for (const raw of matches){
+    try {
+      const url = new URL(raw.replace(/[,.!;>]+$/g,''));
+      const host = url.hostname.toLowerCase().replace(/\.$/,'');
+      if (url.protocol !== 'https:' || url.username || url.password || url.port) continue;
+      const listed = SUPPORTED_PLATFORM_HOSTS.some(suffix => host === suffix || host.endsWith('.' + suffix));
+      if (!listed && !publicWorkHost(host)) continue;
+      const normalized = url.toString().replace(/#.*$/,'');
+      if (!seen.has(normalized)){ seen.add(normalized); links.push(normalized); }
+    } catch {}
+  }
+  return links;
+}
 function applyI18n(root2){
   if(LANG==='zh') return;
   (root2||document).querySelectorAll('[data-i18n]').forEach(el=>{ const v=t(el.dataset.i18n); if(v!=null) el.textContent=v; });
@@ -1131,6 +1243,7 @@ function playHeroEntrance(){
     [$('.hero>p:not(.hero-share)'), [{opacity:0,transform:'translateY(12px)'},{opacity:1,transform:'none'}], 260, 520],
     [$('.hero-share'), [{opacity:0},{opacity:1}], 330, 460],
     [composer, [{opacity:0,transform:'translateY(24px) scale(.985)',filter:'blur(4px)'},{opacity:1,transform:'none',filter:'none'}], 360, 720],
+    [$('.platform-support'), [{opacity:0,transform:'translateY(18px)'},{opacity:1,transform:'none'}], 470, 650],
   ];
   items.forEach(([el,frames,delay,duration]) => el?.animate(frames,{duration,delay,easing:'cubic-bezier(.16,1,.3,1)',fill:'backwards'}));
 }
@@ -1297,7 +1410,7 @@ $('#fileInput').onchange = async (e) => {
     const txt = await f.text();
     input.value = (input.value ? input.value + '\n' : '') + txt;
     syncComposerState(true);
-    const n = (input.value.match(/https:\/\/v\.douyin\.com\/[\w-]+/g)||[]).length;
+    const n = supportedWorkLinks(input.value).length;
     showOk(`已读取文件，共识别 ${n} 个链接，点「解析」开始`);
   } catch { showError('读取文件失败，请确认是文本文件（.txt/.csv）'); }
   e.target.value = '';
@@ -1305,7 +1418,7 @@ $('#fileInput').onchange = async (e) => {
 let pasteConfirmTimer = 0;
 function syncComposerState(confirm=false){
   const hasContent = Boolean(input.value.trim());
-  const hasLink = /https:\/\/v\.douyin\.com\/[\w-]+/.test(input.value);
+  const hasLink = supportedWorkLinks(input.value).length > 0;
   $('#clearBtn').style.display = hasContent ? '' : 'none';
   composer.classList.toggle('has-content',hasContent);
   composer.classList.toggle('has-link',hasLink);
@@ -1344,9 +1457,10 @@ parseBtn.onclick = parse;
 async function parse(){
   const text = input.value.trim();
   hideError();
-  if (!text) { showError('请先粘贴抖音分享文案或链接'); return; }
-  const links = text.match(/https:\/\/v\.douyin\.com\/[\w-]+/g) || [];
-  const multi = new Set(links).size > 1;
+  if (!text) { showError(t('err_link') || '请粘贴受支持平台的公开作品链接'); return; }
+  const links = supportedWorkLinks(text);
+  if (!links.length) { showError(t('err_link') || '请粘贴受支持平台的公开作品链接'); return; }
+  const multi = links.length > 1;
   setLoading(true);
   result.classList.remove('show');
   try {
@@ -1425,17 +1539,21 @@ function renderBatch(count, fails){
     const isNote = d.kind === 'note';
     const cover = isNote ? (d.images?.[0]?.url || '') : (d.cover || '');
     const st = d.stats || {};
+    const canDownload = isNote || Boolean(d.video?.download_url || d.video?.proxy_url);
+    const canShare = sharePageSupported(d);
     return `<tr>
       <td class="bt-idx tnum">${i+1}</td>
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
-      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">@${esc(d.author||'未知')}</div></td>
+      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||'未知')}</div></td>
       <td><span class="bt-tag">${isNote?'图集':'视频'}</span></td>
       <td class="tnum">${isNote?('· '+(d.images?.length||0)+'图'):fmtDur(d.duration_ms)}</td>
       <td class="bt-nums tnum">❤${fmtNum(st.digg)} · 💬${fmtNum(st.comment)} · ★${fmtNum(st.collect)}</td>
       <td class="bt-ops">
         ${isNote?`<button class="mini-btn" onclick="downloadAll('${esc(d.item_id)}')">下载图集</button>`
-                :`<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>`}
-        <button class="mini-btn ghost" onclick="makeShare('${esc(d.item_id)}',this)">分享页</button>
+                :(canDownload
+                  ? `<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>`
+                  : `<a class="mini-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">打开原片</a>`)}
+        ${canShare ? `<button class="mini-btn ghost" onclick="makeShare('${esc(d.item_id)}',this)">分享页</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -1448,7 +1566,7 @@ function renderBatch(count, fails){
       <div class="batch-stat">共 <b>${count}</b> 条 · 成功 <b style="color:var(--ok)">${_batch.length}</b>${fails.length?` · 失败 <b style="color:var(--accent)">${fails.length}</b>`:''}</div>
       <div class="batch-actions">
         <span style="font-size:12px;color:var(--faint);align-self:center">导出 Excel 可保存全部标题 / 链接 / 数据</span>
-        <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note')?'':'style="display:none"'}>⬇ 下载全部视频</button>
+        <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note' && (d.video?.download_url || d.video?.proxy_url))?'':'style="display:none"'}>⬇ 下载全部视频</button>
         <button class="primary-btn" id="exportBtn" ${_batch.length?'':'disabled'}>📊 导出 Excel</button>
       </div>
     </div>
@@ -1469,7 +1587,7 @@ async function dlBatchOne(i, btn){
     d.video.download_url || d.video.proxy_url, true);
 }
 async function downloadAllVideos(){
-  const vids = _batch.filter(d => d.kind !== 'note');
+  const vids = _batch.filter(d => d.kind !== 'note' && (d.video?.download_url || d.video?.proxy_url));
   const btn = $('#dlAllBtn'); const old = btn.textContent;
   try {
     for (let i=0; i<vids.length; i++){
@@ -1492,7 +1610,7 @@ async function exportBatch(){
     if (!resp.ok) throw new Error('导出失败');
     const blob = await resp.blob();
     const a = document.createElement('a'); const u = URL.createObjectURL(blob);
-    a.href = u; a.download = '抖音批量解析.xlsx'; document.body.appendChild(a); a.click(); a.remove();
+    a.href = u; a.download = '多平台批量解析.xlsx'; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(u), 4000);
   } catch(e){ showError(e.message); }
   finally { btn.textContent=old; btn.disabled=false; }
@@ -1703,16 +1821,18 @@ function copyCard(btn){
 }
 
 function authorRow(d){
+  const platform = platformName(d.platform || 'douyin');
+  const canEnrich = (d.platform || 'douyin') === 'douyin';
   const av = d.avatar ? `<img src="${esc(d.avatar)}" alt="">` : '<div class="ph"></div>';
   const inner = d.author_url
     ? `<a class="avatar-link" href="${esc(d.author_url)}" target="_blank" rel="noopener"
-         data-item="${esc(d.item_id)}" title="点击访问 TA 的抖音主页">${av}</a>`
+         data-item="${esc(d.item_id)}" data-enrich="${canEnrich ? '1' : '0'}" title="点击访问 TA 的${esc(platform)}主页">${av}</a>`
     : av;
   return `<div class="author-row">
     ${inner}
     <div>
       <div class="name">${esc(d.author) || '未知作者'}</div>
-      <div class="sub">${d.author_url ? '点击头像访问主页 · 悬停查看资料' : ('作品 ID ' + esc(d.item_id))}</div>
+      <div class="sub">${d.author_url ? `点击头像访问${esc(platform)}主页${canEnrich ? ' · 悬停查看资料' : ''}` : ('作品 ID ' + esc(d.item_id))}</div>
     </div>
   </div>`;
 }
@@ -1773,7 +1893,7 @@ function showTip(a){
 function hideTip(){ if (_tipEl) _tipEl.classList.remove('show'); }
 
 function wireAvatar(root, itemId){
-  const link = root.querySelector('.avatar-link');
+  const link = root.querySelector('.avatar-link[data-enrich="1"]');
   if (!link) return;
   link.addEventListener('mouseenter', () => {
     clearTimeout(_hoverTimer);
@@ -1983,6 +2103,11 @@ function downloadVideoItem(btn){
     v.url, v.filename, btn, v.download_url || v.proxy_url, true);
 }
 
+function sharePageSupported(d){
+  if (d && typeof d.share_supported === 'boolean') return d.share_supported;
+  return !d?.platform || d.platform === 'douyin';
+}
+
 function videoPlaySrc(v){
   if (!v) return '';
   // 微信内同样直连优先（省服务器带宽），直连失败由 videoProxyFallback 自动落同源代理
@@ -2002,6 +2127,9 @@ function useProxyFallback(el){
 }
 
 function videoHTML(d){
+  const platform = platformName(d.platform || 'douyin');
+  const canDownload = Boolean(d.video.download_url || d.video.proxy_url);
+  const canShare = sharePageSupported(d);
   return `
   <div class="card">
     <div class="card-body">
@@ -2016,7 +2144,7 @@ function videoHTML(d){
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印 · ${d.video.source==='atc'?'AnyToCopy 解析':(IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放')}</span>
+        <span class="badge">${esc(platform)} · 视频 · 无水印 · ${d.video.source==='atc'?'AnyToCopy 解析':(IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放')}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
@@ -2028,8 +2156,10 @@ function videoHTML(d){
         ${statsRow(d.stats)}
         ${extrasBlock(d)}
         <div class="actions">
-          <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>
-          <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
+          ${canDownload
+            ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>`
+            : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}
+          ${canShare ? `<button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>` : ''}
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
         </div>
         <div class="ts-box" data-item="${esc(d.item_id)}">
@@ -2047,11 +2177,13 @@ function videoHTML(d){
 
 function albumHTML(d){
   const imgs = d.images || [];
+  const platform = platformName(d.platform || 'douyin');
+  const canShare = sharePageSupported(d);
   return `
   <div class="card">
     <div class="album-head">
       <div class="info" style="gap:10px">
-        <span class="badge">图集 · ${imgs.length} 张原图 · 浏览器直连</span>
+        <span class="badge">${esc(platform)} · 图集 · ${imgs.length} 张原图 · 浏览器直连</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
@@ -2060,7 +2192,7 @@ function albumHTML(d){
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
-        <button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>
+        ${canShare ? `<button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>` : ''}
         <button class="primary-btn" onclick="downloadAll('${esc(d.item_id)}')">⬇ 下载全部</button>
       </div>
     </div>

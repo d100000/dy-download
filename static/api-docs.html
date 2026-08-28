@@ -57,7 +57,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 <body>
 <div class="wrap">
 <nav>
-  <a class="brand" href="/" style="color:inherit"><span class="logo">♪</span> <span data-i18n="brand">抖音下载器 · API</span></a>
+  <a class="brand" href="/" style="color:inherit"><span class="logo">♪</span> <span data-i18n="brand">多平台下载器 · API</span></a>
   <div class="nav-right">
     <a class="nav-link" href="/" data-i18n="nav_home">首页</a>
     <a class="nav-link" id="consoleLink" href="/api-console" style="display:none" data-i18n="nav_console">控制台</a>
@@ -69,8 +69,8 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 </nav>
 
 <section class="hero">
-  <h1 data-i18n-html="h1">抖音解析 <span class="hl">开放 API</span></h1>
-  <p class="lead" data-i18n="lead">通过异步接口批量提交抖音链接，拿到无水印视频地址、图集图片、标题作者与互动数据。规范 JSON、按次计费、稳定可靠——适合数据采集、内容备份与二次开发。</p>
+  <h1 data-i18n-html="h1">多平台解析 <span class="hl">开放 API</span></h1>
+  <p class="lead" data-i18n="lead">通过异步接口批量提交 50+ 内容平台的公开作品链接，获取视频地址、图集图片、标题作者与互动数据。规范 JSON、按次计费、异步可追踪——适合研究、获得授权的备份与二次开发。</p>
   <div class="cta">
     <a class="btn btn-primary" id="startBtn" href="/api-console" data-i18n="get_key">登录后生成密钥</a>
     <a class="btn btn-ghost" href="#endpoints" data-i18n="see_ep">查看接口</a>
@@ -131,16 +131,16 @@ Retry-After: 2
 
 <div class="endpoint">
   <div class="ep-head"><span class="method">POST</span><span class="path">/api/v1/jobs</span></div>
-  <div class="ep-desc" data-i18n-html="ep1">提交持久化批量任务，整批预授权费用后异步处理。单个任务最多 <b>100</b> 条链接，链接必须是 <code>https://v.douyin.com/...</code> 短链（或给整段分享文案自动提取）。建议发送 <code>Idempotency-Key</code>：网络重试会返回同一 job_id 而不重复冻结余额；同一 Key 提交不同链接会返回 <code>409</code>。</div>
+  <div class="ep-desc" data-i18n-html="ep1">提交持久化批量任务，整批预授权费用后异步处理。单个任务最多 <b>100</b> 条公开 HTTPS 作品链接，支持抖音、小红书、快手、B站、微博、TikTok、YouTube 等 50+ 平台（或给整段分享文案自动提取）。建议发送 <code>Idempotency-Key</code>：网络重试会返回同一 job_id 而不重复冻结余额；同一 Key 提交不同链接会返回 <code>409</code>。</div>
   <h3 class="sec" data-i18n="req">请求示例</h3>
   <pre>curl -X POST 'https://你的域名/api/v1/jobs' \
   -H 'Content-Type: application/json' \
   -H 'X-API-Key: dy_xxx' \
   -H 'Idempotency-Key: req-20260807-001' \
-  -d '{ "links": ["https://v.douyin.com/xxxx/", "https://v.douyin.com/yyyy/"] }'
+  -d '{ "links": ["https://v.douyin.com/xxxx/", "https://www.xiaohongshu.com/explore/yyyy"] }'
 
 <span data-i18n="ep1_alt"># 也可以直接给整段分享文案（自动提取其中全部链接）：</span>
--d '{ "text": "3.89 复制打开抖音…… https://v.douyin.com/xxxx/ ……" }'</pre>
+-d '{ "text": "小红书 https://www.xiaohongshu.com/explore/yyyy 抖音 https://v.douyin.com/xxxx/" }'</pre>
   <h3 class="sec" data-i18n="resp">返回示例</h3>
   <pre data-i18n-html="ep1_code">{ "code": 0, "message": "accepted",
   "data": { "job_id": "job_xxx", "total": 2, "status": "pending",
@@ -162,14 +162,15 @@ Retry-After: 2
     "results": [
       { "link": "https://v.douyin.com/xxxx/", "ok": true,
         "data": {
-          "kind": "video", "item_id": "7123456789", "title": "作品标题",
+          "kind": "video", "platform": "douyin", "share_supported": true,
+          "item_id": "7123456789", "title": "作品标题",
           "author": "作者昵称", "cover": "封面图地址", "duration_ms": 15333,
           "video": { "url": "无水印播放地址（长期有效）",
                      "download_url": "同源签名下载地址（12 小时有效）",
                      "width": 1080, "height": 1920, "filename": "作品标题.mp4" },
           "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },
           "music": { "title": "背景音乐" }, "tags": ["话题1", "话题2"] } },
-      { "link": "https://v.douyin.com/yyyy/", "ok": false, "error": "链接已失效" }
+      { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "链接已失效" }
     ] } }</pre>
 </div>
 
@@ -188,6 +189,7 @@ Retry-After: 2
 <div class="tbl-wrap"><table>
   <thead><tr><th>status</th><th data-i18n="th_mean">含义</th></tr></thead>
   <tbody>
+    <tr><td><code>platform</code> / <code>share_supported</code></td><td data-i18n="f0">识别到的来源平台；是否支持生成本站分享页</td></tr>
     <tr><td><code>pending</code></td><td data-i18n="st1">已受理，排队等待处理</td></tr>
     <tr><td><code>running</code></td><td data-i18n="st2">处理中（已有条目开始或完成）</td></tr>
     <tr><td><code>done</code></td><td data-i18n="st3">全部条目已出结果（逐条看 ok 字段）</td></tr>
@@ -197,10 +199,10 @@ Retry-After: 2
 <div class="tbl-wrap"><table>
   <thead><tr><th data-i18n="th_field">字段</th><th data-i18n="th_mean">含义</th></tr></thead>
   <tbody>
-    <tr><td><code>video.url</code></td><td data-i18n="f1">无水印播放地址，无签名长期有效，浏览器可直连</td></tr>
+    <tr><td><code>video.url</code></td><td data-i18n="f1">AnyToCopy 返回的原片播放地址，有效期内浏览器可直连</td></tr>
     <tr><td><code>video.alt_url</code></td><td data-i18n="f2">备用播放域名，与 url 互为备份</td></tr>
-    <tr><td><code>video.download_url</code></td><td data-i18n="f3">本站同源签名下载地址，默认 12 小时过期，过期需重新解析</td></tr>
-    <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">本站同源播放流（兜底线路）</td></tr>
+    <tr><td><code>video.download_url</code></td><td data-i18n="f3">可选。已验证媒体域名的本站同源签名下载地址，默认 12 小时过期</td></tr>
+    <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">可选。已验证媒体域名的本站同源播放兜底线路</td></tr>
     <tr><td><code>images[]</code></td><td data-i18n="f5">图集作品（kind = note）的原图列表，含 url / filename</td></tr>
     <tr><td><code>stats</code></td><td data-i18n="f6">互动数据：digg 点赞 / comment 评论 / collect 收藏 / share 分享</td></tr>
     <tr><td><code>warning</code></td><td data-i18n="f7">成功但带警告时出现（如部分数据缺失）</td></tr>
@@ -224,7 +226,7 @@ def call(method, path, payload=None):
         return json.loads(r.read())["data"]
 
 job = call("POST", "/api/v1/jobs",
-           {"links": ["https://v.douyin.com/xxxx/"]})
+           {"links": ["https://www.xiaohongshu.com/explore/xxxx"]})
 for _ in range(60):                       # 每 2 秒轮询，最长 2 分钟
     time.sleep(2)
     d = call("GET", f"/api/v1/jobs/{job['job_id']}")
@@ -264,9 +266,9 @@ $('#langLabel').textContent=LANG==='zh'?'EN':'中';
 $('#langBtn').onclick=()=>{const to=LANG==='zh'?'en':'zh';document.cookie='lang='+to+';path=/;max-age=31536000';const u=new URL(location.href);u.searchParams.set('lang',to);location.href=u.toString()};
 
 const I18N={en:{
-  brand:"Douyin Downloader · API", nav_home:"Home", nav_console:"Console", nav_login:"Sign in",
-  h1:'Douyin parsing <span class="hl">Open API</span>',
-  lead:"Submit Douyin links in bulk via the async API and get no-watermark video URLs, gallery images, title/author and engagement stats. Clean JSON, pay-per-request, reliable — built for scraping, backup and integration.",
+  brand:"Multi-platform Downloader · API", nav_home:"Home", nav_console:"Console", nav_login:"Sign in",
+  h1:'Multi-platform parsing <span class="hl">Open API</span>',
+  lead:"Submit public post links from 50+ content platforms and receive video URLs, gallery images, title/author and engagement stats. Clean JSON, pay-per-request and async tracking — built for research, authorized backup and integration.",
   get_key:"Sign in to create a key", see_ep:"See endpoints",
   s1:"Quick start", s1a_h:"Sign up / in", s1a_p:"Click “Sign in” at the top-right of the home page and pass the slider check.",
   s1b_h:"Create an API key", s1b_p:"Open the API console and click “Create key”. New keys include trial balance.",
@@ -276,19 +278,20 @@ const I18N={en:{
   ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one <code>https://v.douyin.com/&lt;code&gt;/</code> URL locally; it performs no Douyin request. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
   ep_share_status:"Read the minimal public state. Poll by <code>poll_after_ms</code> while pending/processing. When ready, copy <code>share_url_versioned</code> for WeChat. Failed responses contain only stable public error codes, never internal proxy details. The <code>/s/{sid}</code> page already polls and refreshes itself automatically.",
   ep_share_delete:"Delete or cancel your share page. Signed-in owners use their session; anonymous creators send the creation response's <code>manage_token</code> in the <code>X-Share-Manage-Token</code> header. The token never appears in public status, URLs, or pages. An unclaimed task is refunded; once parsing has started, publication is cancelled but one quota unit remains charged.",
-  ep1:"Submit a durable batch job; the full estimated cost is pre-authorized and processing is async. Max <b>100</b> links per job, each a <code>https://v.douyin.com/...</code> short link (or pass full share text for automatic extraction). Send an <code>Idempotency-Key</code>: retries return the same job without reserving funds twice; reusing the key with different links returns <code>409</code>.",
+  ep1:"Submit a durable batch job; the full estimated cost is pre-authorized and processing is async. Max <b>100</b> public HTTPS post links per job, covering 50+ platforms including Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok and YouTube (or pass full share text for automatic extraction). Send an <code>Idempotency-Key</code>: retries return the same job without reserving funds twice; reusing the key with different links returns <code>409</code>.",
   ep1_alt:"# Or pass full share text — all links inside are extracted automatically:",
   ep1_code:'{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
   ep2:"Poll job status and results (with the same API key). When <code>status</code> is <code>done</code>, <code>results</code> holds per-link outcomes; poll every 2–5 seconds while running. Failed items are not billed (exact automatic refund).",
-  ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "no-watermark play URL (long-lived)",\n                     "download_url": "signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://v.douyin.com/yyyy/", "ok": false, "error": "link expired" }\n    ] } }',
+  ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "platform": "douyin", "share_supported": true,\n          "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "AnyToCopy original-media URL",\n                     "download_url": "optional signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "link expired" }\n    ] } }',
   ep3:"Check the current key's balance and usage.",
   s3b:"Job status & result fields", st_h:"Job status (status)", th_mean:"Meaning",
   st1:"Accepted, waiting in queue", st2:"Running (some items started or finished)", st3:"All items settled (check per-item ok)",
   f_h:"Fields of a succeeded item's data (kind = video)", th_field:"Field",
-  f1:"No-watermark play URL, unsigned and long-lived, playable directly by browsers",
+  f0:"Detected source platform and whether this site can create a share page for the item",
+  f1:"Original-media play URL returned by AnyToCopy, directly playable by browsers while valid",
   f2:"Alternate play domain, a backup of url",
-  f3:"Same-origin signed download URL, expires in 12 hours by default — re-parse after expiry",
-  f4:"Same-origin playback stream (fallback route)",
+  f3:"Optional same-origin signed download URL for verified media hosts; expires in 12 hours by default",
+  f4:"Optional same-origin playback fallback for verified media hosts",
   f5:"Original image list for gallery posts (kind = note), with url / filename",
   f6:"Engagement: digg likes / comment / collect favorites / share",
   f7:"Present when the item succeeded with a warning (e.g. partial data missing)",

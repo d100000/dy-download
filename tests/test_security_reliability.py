@@ -62,6 +62,17 @@ def clear_billing():
 
 
 class StaticRegressionTests(unittest.TestCase):
+    def test_homepage_platform_logos_are_local_and_allowlisted(self):
+        html = Path("static/index.html").read_text("utf-8")
+        for name in ("xiaohongshu", "kuaishou", "bilibili", "pinduoduo",
+                     "twitter", "toutiao", "shipinhao", "weibo", "tiktok",
+                     "youtube"):
+            self.assertIn(f'/platform-logos/{name}.svg', html)
+            response = server.platform_logo(name)
+            self.assertEqual(response.media_type, "image/svg+xml")
+            self.assertTrue(Path(response.path).is_file())
+        self.assertEqual(server.platform_logo("not-a-platform").status_code, 404)
+
     def test_homepage_has_api_tab_and_no_hardware_fingerprint(self):
         html = Path("static/index.html").read_text("utf-8")
         # 登录后用户菜单里必须有 API 控制台入口（现为用户邮箱下拉菜单内）
@@ -121,6 +132,68 @@ class StaticRegressionTests(unittest.TestCase):
         self.assertEqual(share.headers.get("cache-control"), "private, no-store")
         self.assertEqual(share.headers.get("pragma"), "no-cache")
         self.assertEqual(share.headers.get("vary"), "User-Agent")
+
+
+class MultiPlatformLinkTests(unittest.TestCase):
+    def test_extracts_supported_platform_links_and_preserves_required_query(self):
+        text = (
+            "小红书 https://www.xiaohongshu.com/explore/abc123?xsec_token=token。 "
+            "B站 https://b23.tv/AbCdEf；TikTok https://vm.tiktok.com/ZM123/ "
+            "YouTube https://youtu.be/video123?t=8 "
+            "重复 https://b23.tv/AbCdEf")
+        self.assertEqual(server._extract_supported_work_urls(text), [
+            "https://www.xiaohongshu.com/explore/abc123?xsec_token=token",
+            "https://b23.tv/AbCdEf",
+            "https://vm.tiktok.com/ZM123/",
+            "https://youtu.be/video123?t=8",
+        ])
+
+    def test_accepts_other_public_https_hosts_for_anytocopy_to_decide(self):
+        self.assertEqual(server._extract_supported_work_urls(
+            "https://media.creatorhub.co/public/video/1"), [
+                "https://media.creatorhub.co/public/video/1"])
+        self.assertEqual(server._atc_platform_for_url(
+            "https://media.creatorhub.co/public/video/1"), "")
+
+    def test_rejects_insecure_ambiguous_and_private_hosts(self):
+        text = " ".join((
+            "http://www.xiaohongshu.com/explore/abc",
+            "https://youtube.com.evil.example/watch?v=1",
+            "https://user@bilibili.com/video/BV1xx",
+            "https://x.com:8443/example/status/1",
+            "https://example.com/video/1",
+            "https://localhost/video/1",
+            "https://127.0.0.1/video/1",
+            "https://service.internal/video/1",
+        ))
+        self.assertEqual(server._extract_supported_work_urls(text), [])
+
+    def test_single_parse_forwards_first_supported_link_to_anytocopy(self):
+        with mock.patch.object(
+                server, "_atc_parse_work_url",
+                return_value={"item_id": "atc_test"}) as parse:
+            result = server._parse_share(
+                "复制链接 https://www.kuaishou.com/short-video/abc123")
+        self.assertEqual(result["item_id"], "atc_test")
+        parse.assert_called_once_with(
+            "https://www.kuaishou.com/short-video/abc123")
+
+    def test_result_contract_namespaces_non_douyin_ids_and_marks_sharing(self):
+        payload = {
+            "workId": "sameitem123", "title": "demo", "workType": "video",
+            "videoUrl": "https://cdn.examplecdn.com/demo.mp4",
+        }
+        xhs = server._atc_result_to_parse(
+            "https://www.xiaohongshu.com/explore/demo", payload)
+        bili = server._atc_result_to_parse(
+            "https://www.bilibili.com/video/BV1demo", payload)
+        douyin = server._atc_result_to_parse(
+            "https://www.douyin.com/video/1234567890123456789", payload)
+        self.assertEqual(xhs["platform"], "xiaohongshu")
+        self.assertFalse(xhs["share_supported"])
+        self.assertNotEqual(xhs["item_id"], bili["item_id"])
+        self.assertEqual(douyin["item_id"], "sameitem123")
+        self.assertTrue(douyin["share_supported"])
 
 
 class AsyncShareTests(unittest.TestCase):
