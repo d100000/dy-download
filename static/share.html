@@ -468,7 +468,7 @@ function render(){
     </div>
 
     <footer>
-      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；媒体直连抖音时，抖音会接收请求方网络与浏览器信息。<br>
+      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。作品链接会提交给 AnyToCopy 获取元数据和媒体地址，普通解析不请求语音文案；访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。媒体直连时，媒体源会接收请求方网络与浏览器信息。<br>
       请勿未经授权二次发布或商用。<a href="javascript:void(0)" onclick="report()">侵权投诉</a> ·
       <a href="/">关于本站</a>${S.expires_at ? ' · 本页 ' + fmtDate(S.expires_at) + ' 过期' : ''}
     </footer>
@@ -482,15 +482,14 @@ function render(){
   </div></div>`;
 }
 
-/* ---------------- 播放：dy1 → dy2 → proxy，全部失败后再引导 ----------------
-   所有环境（含微信）都优先抖音自己的两个播放域名——浏览器直连、不花服务器带宽，
-   同源代理只做兜底。微信 WebView 拦截直连域名时常不报 error 只挂起，
-   因此微信内把直连看门狗缩短，保证最坏 8 秒内落到同源代理线路。
+/* ---------------- 播放：ATC 直连 → 同源流，旧分享页保留 dy1/dy2 ----------------
+   新解析使用 AnyToCopy 返回的媒体地址，直连失败后转受签名保护的同源流。
+   微信 WebView 拦截直连域名时常不报 error 只挂起，因此仍用短看门狗及时切线。
    每条线路的 try/ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
 let _playSession = 0;
 function startPlay(){
   const d = S.data || {};
-  if (!d.video || !d.video.url) return;
+  if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)) return;
   const box = document.getElementById('playerBox');
   const btn = document.getElementById('playBtn');
   const ld = document.getElementById('loading');
@@ -504,21 +503,23 @@ function startPlay(){
   btn.style.display = 'none'; ld.style.display = 'block';
   track('play');
 
-  // 播放线路按后台配置的优先级动态构建（默认 dy1 → dy2 → atc → proxy）：
-  // 抖音直连优先省带宽，atc 增强地址无/过期自动跳过，同源代理兜底
+  // 播放线路按后台配置的优先级动态构建；旧 dy 线路对 ATC 新数据自动跳过。
   const directWait = IS_WECHAT_UA ? 4000 : 7000;
+  const fromAtc = d.video.source === 'atc';
   const ROUTES = {
-    dy1:   {src: d.video.url,       wait: directWait, tip: '加载中…'},
-    dy2:   {src: d.video.alt_url,   wait: directWait, tip: '切换线路中…'},
-    atc:   {src: d.video.atc_url,   wait: directWait, tip: '切换增强线路中…'},
+    atc:   {src: d.video.atc_url || (fromAtc ? d.video.url : ''), wait: directWait, tip: '加载中…'},
     proxy: {src: d.video.proxy_url, wait: 12000,      tip: '切换备用线路中…'},
+    dy1:   {src: fromAtc ? '' : d.video.url,     wait: directWait, tip: '切换旧直连中…'},
+    dy2:   {src: fromAtc ? '' : d.video.alt_url, wait: directWait, tip: '切换旧备线中…'},
   };
   const priority = (Array.isArray(d.play_priority) && d.play_priority.length)
-    ? d.play_priority : ['dy1','dy2','atc','proxy'];
+    ? d.play_priority : (fromAtc
+      ? ['atc','proxy','dy1','dy2'] : ['dy1','dy2','atc','proxy']);
+  const seen = new Set();
   const routes = priority
     .filter(k => ROUTES[k])
     .map(k => ({source: k, ...ROUTES[k]}))
-    .filter(r => r.src);
+    .filter(r => r.src && !seen.has(r.src) && seen.add(r.src));
 
   const v = document.createElement('video');
   v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline','');
@@ -616,7 +617,7 @@ function startPlay(){
 /* ---------------- 下载 ---------------- */
 function download(btn){
   const d = S.data || {};
-  if (!d.video || !d.video.url) return;
+  if (!d.video || !(d.video.url || d.video.atc_url)) return;
   track('download');
   if (IS_WECHAT_UA){ showMask(); return; }
   browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
@@ -653,7 +654,7 @@ function downloadTarget(onError){
   frame.onload = () => {
     try {
       const href = frame.contentWindow?.location?.href || '';
-      if (!href.includes('/api/video/')) return;
+      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/')) return;
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
@@ -674,7 +675,8 @@ function downloadFallbackURL(url, filename){
   if (!url) return '';
   try {
     const u = new URL(url, location.href);
-    if (u.origin !== location.origin || !u.pathname.startsWith('/api/video/')) return '';
+    if (u.origin !== location.origin || !(
+      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/'))) return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;

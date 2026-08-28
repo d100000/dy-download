@@ -153,11 +153,11 @@ async function parse(){
 function downloadTarget(onError){
   const id='nativeDownloadTarget';let frame=document.getElementById(id);
   if(!frame){frame=document.createElement('iframe');frame.id=id;frame.name=id;frame.hidden=true;frame.setAttribute('aria-hidden','true');document.body.appendChild(frame)}
-  frame.onload=()=>{try{const href=frame.contentWindow?.location?.href||'';if(!href.includes('/api/video/'))return;const text=(frame.contentDocument?.body?.textContent||'').trim();let message='';try{message=JSON.parse(text).error||''}catch{}onError?.(message||'下载未能启动，请稍后重试')}catch{}};
+  frame.onload=()=>{try{const href=frame.contentWindow?.location?.href||'';if(!href.includes('/api/video/')&&!href.includes('/api/atc/video/'))return;const text=(frame.contentDocument?.body?.textContent||'').trim();let message='';try{message=JSON.parse(text).error||''}catch{}onError?.(message||'下载未能启动，请稍后重试')}catch{}};
   return frame.name;
 }
 function clickDownload(url,name,isolated=false,onError=null){const a=document.createElement('a');a.href=url;if(isolated)a.target=downloadTarget(onError);else a.download=name||'download';a.style.display='none';document.body.appendChild(a);a.click();a.remove()}
-function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin||!u.pathname.startsWith('/api/video/'))return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
+function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin||!(u.pathname.startsWith('/api/video/')||u.pathname.startsWith('/api/atc/video/')))return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
 async function downloadResponseError(r){let m='';try{const d=await r.json();m=typeof d.error==='string'?d.error:''}catch{}if(m)return m;if(r.status===401||r.status===403)return'下载地址已过期，请重新解析后再试';if(r.status===429)return'下载请求过于频繁，请稍后再试';return'下载线路暂时不可用（HTTP '+r.status+'），请稍后重试'}
 async function responseBlobWithProgress(r,onProgress){const type=(r.headers.get('content-type')||'application/octet-stream').split(';',1)[0],total=Number(r.headers.get('content-length'))||0;if(!r.body||!r.body.getReader){const b=await r.blob();onProgress?.(b.size,total||b.size);return b}const reader=r.body.getReader(),chunks=[];let loaded=0;while(true){const{done,value}=await reader.read();if(done)break;chunks.push(value);loaded+=value.byteLength;onProgress?.(loaded,total)}return new Blob(chunks,{type})}
 function downloadProgress(loaded,total){return total?'下载中 '+Math.min(100,Math.round(loaded/total*100))+'%':'已下载 '+(loaded/1024/1024).toFixed(1)+' MB'}

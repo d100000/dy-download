@@ -728,7 +728,7 @@ GET /api/v1/jobs/job_xxx
   <div class="faq-list">
     <details class="faq-item reveal">
       <summary data-i18n="faq_q1">这个抖音下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。浏览器直连播放或图片时，抖音会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。仅当管理员开启「增强线路」且你主动使用文案提取时，对应的作品链接会提交给第三方服务（AnyToCopy）处理；未开启或不使用则不发送。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -807,7 +807,7 @@ const I18N = {
     faq_title:"FAQ", faq_lead:"Douyin no-watermark download & sharing: copy a post's share link in the Douyin app, paste it here and click Parse to preview and download the original — or create a share page in one click and send it to friends on WeChat, who can watch it without installing Douyin. No Douyin login is required; basic parsing needs no site account or app installation.",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
-    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy. Only when the operator enables the “enhancement route” and you actively use transcript extraction is the corresponding video link submitted to a third-party service (AnyToCopy); otherwise nothing is sent.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
     faq_q2:"Do I need to log in or install anything?", faq_a2:"No Douyin login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
@@ -1387,7 +1387,7 @@ function downloadTarget(onError){
   frame.onload = () => {
     try {
       const href = frame.contentWindow?.location?.href || '';
-      if (!href.includes('/api/video/')) return;
+      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/')) return;
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
@@ -1410,7 +1410,8 @@ function downloadFallbackURL(url, filename){
   if (!url) return '';
   try {
     const u = new URL(url, location.href);
-    if (u.origin !== location.origin || !u.pathname.startsWith('/api/video/')) return '';
+    if (u.origin !== location.origin || !(
+      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/'))) return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;
@@ -1578,7 +1579,7 @@ function videoPlaySrc(v){
 function videoProxyFallback(v){
   // 直连域名被拦截/防盗链拒绝时自动换同源代理；已起播后的晚到 error 不处理
   if (!v.dataset.proxy || v.currentTime > 0) return;
-  if ((v.src || '').indexOf('/api/video/') !== -1) return;
+  if ((v.src || '').includes('/api/video/') || (v.src || '').includes('/api/atc/video/')) return;
   v.src = v.dataset.proxy; v.load(); v.play?.();
 }
 
@@ -1602,7 +1603,7 @@ function videoHTML(d){
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">视频 · 无水印 · ${IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放'}</span>
+        <span class="badge">视频 · 无水印 · ${d.video.source==='atc'?'AnyToCopy 解析':(IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放')}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
@@ -1625,7 +1626,7 @@ function videoHTML(d){
           </div>
           <div class="ts-body" style="display:none"></div>
         </div>
-        <div class="tip">播放优先浏览器直连；下载使用本站同源流式转发，服务器不落地保存文件</div>
+        <div class="tip">作品信息与无水印地址由 AnyToCopy API 提取；普通解析不获取语音文案，同源线路只流式转发不落地文件</div>
       </div>
     </div>
   </div>`;

@@ -172,6 +172,24 @@ test('video download fetches only the signed same-origin endpoint', async () => 
   assert.equal(button.disabled, false);
 });
 
+test('AnyToCopy video download accepts only its signed same-origin endpoint', async () => {
+  const harness = createHarness(async () => response(206, 'x'));
+  const ok = await harness.browserDownload(
+    'https://v3.douyinvod.com/video.mp4',
+    '作品.mp4',
+    null,
+    '/api/atc/video/atc_1234567890abcdef?exp=123&sig=abc',
+    true);
+
+  assert.equal(ok, true, JSON.stringify(harness.errors));
+  assert.equal(harness.fetches.length, 1);
+  assert.match(harness.fetches[0].url, /^\/api\/atc\/video\/atc_1234567890abcdef\?/);
+  assert.equal(harness.fetches[0].options.mode, 'same-origin');
+  assert.equal(harness.clicks.length, 1);
+  assert.equal(harness.clicks[0].target, 'nativeDownloadTarget');
+  assert.equal(harness.objectUrls.length, 0);
+});
+
 test('502 stays in-page, retries once, and never clicks or navigates', async () => {
   const harness = createHarness(async () => response(
     502,

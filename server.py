@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""抖音无水印下载器 · Web 服务版（含代理池 + 管理后台）
+"""抖音无水印下载器 · Web 服务版（AnyToCopy 统一解析 + 管理后台）
 
-无需登录抖音账号或客户端签名。后端负责：短链解析 → 分享页元数据提取 → 无水印地址还原，
-并以流式代理（支持 Range）转发视频/图片，绕过抖音 CDN 的 UA / 防盗链限制，
-让浏览器可以直接在线播放与下载。
+无需登录抖音账号或客户端签名。网页、开放 API 与分享页 worker 统一通过 AnyToCopy
+提取作品元数据和无水印媒体地址；普通解析默认不请求语音文案。视频可浏览器直连，
+也可通过受签名保护且支持 Range 的同源流播放/下载，服务器不落地媒体文件。
 
 反封锁能力：
-  · 代理 IP 池（http/https/socks5），所有出站请求轮换走代理
+  · 代理 IP 池（http/https/socks5），抖音媒体与旧兼容线路按策略轮换代理
   · 失败自动转移到下一个代理 + 失败计数退避
   · 移动端 UA 池轮换 + Referer 伪装
   · 管理后台（密码鉴权）增删/启停/测试代理、查看出口 IP 与统计
@@ -47,7 +47,7 @@ from pydantic import BaseModel
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -257,9 +257,10 @@ CREATE TABLE IF NOT EXISTS media_traffic(
   requests INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0,
   PRIMARY KEY(day, scope)
 );
--- AnyToCopy 增强线路：结果缓存（按 item_id 全站共享，热门视频只调一次 API）
+-- AnyToCopy 统一解析：结果缓存（按 item_id 全站共享，热门视频只调一次 API）
 CREATE TABLE IF NOT EXISTS atc_cache(
   item_id TEXT PRIMARY KEY,
+  work_url TEXT,
   video_url TEXT, url_fetched_at INTEGER,
   content TEXT, text_content TEXT,
   audio_url TEXT, duration REAL,
@@ -414,6 +415,7 @@ with _db_lock:
         ("request_hash", "TEXT"), ("source_hash", "TEXT"),
         ("assigned_origin", "TEXT"), ("updated", "INTEGER"),
         ("ready_at", "INTEGER")))
+    _ensure_columns("atc_cache", (("work_url", "TEXT"),))
     _c.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idem ON jobs(key,request_id) "
         "WHERE request_id IS NOT NULL")
@@ -2192,6 +2194,22 @@ def _video_proxy_url(vid: str) -> str:
     return f"/api/video/{vid}?" + urlparse.urlencode({"exp": exp, "sig": sig})
 
 
+def _atc_video_proxy_url(item_id: str) -> str:
+    """ATC 解析结果的同源播放地址；URL 只能从服务端缓存取得。"""
+    exp, sig = _media_token("atc_video", item_id)
+    return f"/api/atc/video/{item_id}?" + urlparse.urlencode({
+        "exp": exp, "sig": sig})
+
+
+def _atc_video_download_url(item_id: str,
+                            filename: str = "video.mp4") -> str:
+    exp, sig = _media_token("atc_video", item_id)
+    return f"/api/atc/video/{item_id}?" + urlparse.urlencode({
+        "exp": exp, "sig": sig, "dl": "1",
+        "name": filename or "video.mp4",
+    })
+
+
 def _stream(resp, chunk=256 * 1024, on_close=None):
     try:
         while True:
@@ -2287,8 +2305,10 @@ class _ResumableVideoStream:
 
     def __init__(self, vid: str, initial, request_headers: dict,
                  start: int, end: Optional[int], total: Optional[int],
-                 expected: Optional[int], chunk: int = 256 * 1024):
+                 expected: Optional[int], chunk: int = 256 * 1024,
+                 opener=None):
         self.vid = vid
+        self.opener = opener
         self.request_headers = dict(request_headers)
         self.start = start
         self.end = end
@@ -2355,8 +2375,9 @@ class _ResumableVideoStream:
                 if expected > remaining:
                     raise ValueError("resumed video range is too long")
 
-        replacement = _open_video_upstream(
-            self.vid, headers, validator=validate)
+        replacement = (self.opener(headers, validate) if self.opener
+                       else _open_video_upstream(
+                           self.vid, headers, validator=validate))
         if (time.monotonic() - self._resume_started
                 >= self._MAX_RESUME_SECONDS):
             _close_upstream(replacement)
@@ -2538,8 +2559,8 @@ def _sweep_media_limits() -> None:
                 _media_hits.pop(key, None)
 
 
-# 媒体转发流量统计（后台「转发流量统计」）：只统计经 /api/video 同源转发的字节，
-# 浏览器直连抖音 CDN 的流量不经过本服务器、无法也不需要统计。
+# 媒体转发流量统计（后台「转发流量统计」）：统计经 /api/video 与
+# /api/atc/video 同源转发的字节；浏览器直连媒体的流量不经过本服务器。
 # 内存累加 + 定期落库（media_traffic 按天/用途聚合，无任何个人标识）——
 # 不能在流结束回调里直接写 SQLite：finalize 可能跑在事件循环线程。
 _traffic_lock = threading.Lock()
@@ -2679,152 +2700,24 @@ def _card_cover(cover: str) -> str:
 
 
 def _parse_share(text: str) -> dict:
+    """从分享文案取出短链，所有作品数据统一交给 AnyToCopy。"""
     m = re.search(r"https://v\.douyin\.com/[\w-]+/?", text)
     if not m:
         raise ApiError(400, "未找到抖音分享链接，请确认文案里包含 v.douyin.com 短链")
-    short = m.group(0)
-
-    try:
-        resp, _ = open_url(short, follow=False)
-    except ApiError:
-        raise
-    except Exception:
-        raise ApiError(502, "短链请求失败，请检查网络/代理后重试")
-    try:
-        location = resp.headers.get("Location", "") if hasattr(resp, "headers") else ""
-    finally:
-        try:
-            resp.close()
-        except Exception:
-            pass
-    km = re.search(r"/share/(video|note|slides)/(\d+)", location)
-    if not km:
-        if "/share/live" in location:
-            raise ApiError(400, "这是直播分享链接，暂不支持下载直播内容")
-        raise ApiError(404, "链接已失效或指向不支持的内容类型")
-    kind, item_id = km.group(1), km.group(2)
-    if kind == "slides":
-        kind = "note"
-    return _parse_item(kind, item_id)
+    short = m.group(0).rstrip("/") + "/"
+    return _atc_parse_work_url(short)
 
 
 def _parse_item(kind: str, item_id: str) -> dict:
-    """抓分享页并提取元数据。与短链解析分开，便于分享页按 item_id 刷新过期直链。"""
-    try:
-        page, used_proxy = open_url(f"https://www.iesdouyin.com/share/{kind}/{item_id}/")
-        try:
-            html = page.read().decode("utf-8", "ignore")
-        finally:
-            page.close()
-    except ApiError:
-        raise
-    except Exception:
-        raise ApiError(502, "分享页请求失败，请稍后重试")
-
-    dm = re.search(r"window\._ROUTER_DATA\s*=\s*(\{.*?\})\s*</script>", html, re.S)
-    if not dm:
-        # 分享页正常必有 _ROUTER_DATA；没有 = 被返回验证/风控页。
-        # 若是经代理请求，判定该代理 IP 被封禁：落库、禁用、上抛。
-        if used_proxy:
-            proxy_mgr.mark_banned(used_proxy, "分享页返回验证/无数据，IP 被风控封禁")
-            raise ApiError(502, "代理 IP 被抖音风控（返回验证页），已自动封禁并禁用该代理，请重试")
-        raise ApiError(502, "分享页无数据，可能被风控或页面结构变更，请稍后重试")
-    data = json.loads(dm.group(1))
-
-    items = next((i for i in _find_key(data, "item_list") if i), None)
-    if not items:
-        raise ApiError(404, "视频不存在、已被删除，或作者设为私密/仅粉丝可见")
-    item = items[0]
-
-    desc = item.get("desc", "") or ""
-    au = item.get("author") or {}
-    author = au.get("nickname") or next(_find_key(au, "nickname"), "") or ""
-    avatar_list = next(_find_key(au, "url_list"), None) or []
-    avatar = avatar_list[0] if avatar_list else ""
-    base = _safe_name(desc, item_id)
-
-    # 作者结构化详情：缓存到服务端，供前端悬停 2s 拉取做浮层
-    sec_uid = au.get("sec_uid") or ""
-    homepage = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else ""
-    author_detail = {
-        "nickname": author,
-        "avatar": avatar,
-        "sec_uid": sec_uid,
-        "douyin_id": au.get("unique_id") or au.get("short_id") or "",
-        "signature": (au.get("signature") or "").strip(),
-        "aweme_count": au.get("aweme_count"),
-        "following_count": au.get("following_count"),
-        "follower_count": au.get("mplatform_followers_count") or au.get("follower_count"),
-        "total_favorited": au.get("total_favorited"),      # 获赞总数（分享页多为空，浮层时富化）
-        "homepage": homepage,
-        "enriched": False,
-    }
-    _author_cache[item_id] = (time.time(), author_detail)
-
-    # 作品互动数据（点赞/评论/收藏/分享）—— 分享页直接给，无需额外请求
-    st = item.get("statistics") or {}
-    stats = {
-        "digg": st.get("digg_count"),        # 点赞
-        "comment": st.get("comment_count"),  # 评论
-        "collect": st.get("collect_count"),  # 收藏
-        "share": st.get("share_count"),      # 分享
-    }
-
-    # 更多可直接读取的元数据
-    tags = [t.get("hashtag_name") for t in (item.get("text_extra") or []) if t.get("hashtag_name")]
-    mu = item.get("music") or {}
-    music = {"title": mu.get("title"), "author": mu.get("author")} if mu.get("title") else None
-    poi = item.get("aweme_poi_info") or {}
-    location = poi.get("poi_name") or (item.get("anchor_info") or {}).get("name") or None
-
-    # 缩略图（封面/头像）直接给 CDN 直链，由浏览器直连加载
-    result = {
-        "kind": kind, "item_id": item_id, "title": desc or "（无标题）",
-        "author": author,
-        "avatar": avatar,
-        "author_url": homepage,
-        "create_time": item.get("create_time"),
-        "stats": stats,
-        "tags": tags,
-        "music": music,
-        "location": location,
-        "base": base,
-    }
-
-    if kind == "note":
-        images = item.get("images") or []
-        if not images:
-            raise ApiError(404, "图集中未找到图片")
-        urls = [img["url_list"][0] for img in images if img.get("url_list")]
-        # 直链交给浏览器直接查看 / 下载
-        result["images"] = [{"url": u, "filename": f"{base}_{i:02d}.jpeg"}
-                            for i, u in enumerate(urls, 1)]
-        return result
-
-    video = item.get("video") or {}
-    play = next(_find_key(video.get("play_addr") or {}, "url_list"), None) or []
-    if not play:
-        raise ApiError(404, "未找到播放地址")
-    vm = re.search(r"video_id=([\w-]+)", play[0])
-    if not vm:
-        raise ApiError(502, "播放地址格式已变更，无法提取 video_id")
-    vid = vm.group(1)
-    cover_list = next(_find_key(video.get("cover") or {}, "url_list"), None) or []
-
-    result.update({
-        "duration_ms": video.get("duration") or 0,
-        "cover": cover_list[0] if cover_list else "",
-        "video": {
-            "url": _play_api(vid),                    # 浏览器直连播放（自行跟随 302）
-            "alt_url": _play_api_alt(vid),            # 备用抖音域名（线路顺序由前端按运行环境决定）
-            "proxy_url": _video_proxy_url(vid),       # 同源签名流：微信优先，普通浏览器兜底
-            "filename": f"{base}.mp4",
-            "download_url": _video_download_url(vid, f"{base}.mp4"),
-            "width": video.get("width"),
-            "height": video.get("height"),
-        },
-    })
-    return result
+    """按 item_id 刷新 ATC 临时媒体地址；不再抓取抖音 H5 分享页。"""
+    cached = _atc_cache_get(item_id)
+    work_url = (cached or {}).get("work_url") or ""
+    if not work_url and re.fullmatch(r"\d{8,30}", item_id or ""):
+        path = "note" if kind == "note" else "video"
+        work_url = f"https://www.douyin.com/{path}/{item_id}"
+    if not work_url:
+        raise ApiError(404, "解析来源已过期，请重新粘贴抖音分享链接")
+    return _atc_parse_work_url(work_url, item_id_hint=item_id, kind_hint=kind)
 
 
 def _parse_cached(text: str) -> dict:
@@ -2989,10 +2882,13 @@ def _share_state(row: dict) -> str:
 
 
 def _refresh_share(row: dict) -> dict:
-    """图集直链过期时按 item_id 重新解析。失败则标记 dead（源多半已被删）。"""
+    """临时媒体地址过期时按 item_id 重新调用 ATC 解析。"""
     try:
         data = _parse_item(row["kind"], row["item_id"])
-    except Exception:
+    except ApiError as exc:
+        # 鉴权、网络或上游忙都是瞬时故障，不能把存量分享页误判为已删除。
+        if exc.status not in (400, 404):
+            return row
         now = int(time.time())
         with _db_lock:
             conn = _db()
@@ -3012,7 +2908,9 @@ def _refresh_share(row: dict) -> dict:
                 raise
             finally:
                 conn.close()
-    vid = row.get("vid") or ""
+    except Exception:
+        return row
+    vid = ""
     if row["kind"] != "note":
         play_url = ((data.get("video") or {}).get("url") or "")
         match = re.search(r"[?&]video_id=([\w-]+)", play_url)
@@ -3065,24 +2963,45 @@ def _share_view(row: dict, origin: str = "") -> dict:
     state = _share_state(row)
     cfg = _atc_cfg() if state == "ok" else {
         "enabled": False, "play_enhance": False,
-        "url_ttl": 0, "play_priority": ["dy1", "dy2", "proxy"]}
-    if state == "ok" and row["kind"] != "note" and row["vid"]:
+        "url_ttl": 0, "play_priority": ["atc", "proxy", "dy1", "dy2"]}
+    video = data.setdefault("video", {}) if row["kind"] != "note" else None
+    is_atc = bool(video and video.get("source") == "atc")
+    if state == "ok" and is_atc:
+        filename = video.get("filename") or (
+            _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
+        video["filename"] = filename
+        cached = _atc_cache_get(row["item_id"])
+        if _atc_url_fresh(cached, cfg["url_ttl"]):
+            direct = cached["video_url"]
+            video["url"] = direct
+            video["atc_url"] = direct
+            if _host_allowed(direct):
+                video["proxy_url"] = _atc_video_proxy_url(row["item_id"])
+                video["download_url"] = _atc_video_download_url(
+                    row["item_id"], filename)
+        elif cached:
+            # 签名直链过期后不继续下发死链，由队列惰性刷新。
+            for key in ("url", "atc_url", "proxy_url", "download_url"):
+                video.pop(key, None)
+            _atc_enqueue(row["item_id"], purpose="play")
+    elif state == "ok" and row["kind"] != "note" and row["vid"]:
         data.setdefault("video", {})
         data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
         data["video"]["alt_url"] = _play_api_alt(row["vid"])   # 备用抖音域名
         data["video"]["proxy_url"] = _video_proxy_url(row["vid"])
+        data["video"]["source"] = "douyin"
         filename = data["video"].get("filename") or (
             _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
         data["video"]["filename"] = filename
         data["video"]["download_url"] = _video_download_url(row["vid"], filename)
-        # ATC 增强线路：地址新鲜才注入；过期则后台惰性重新入队，本次走其他线路
+        # 旧分享页可附加 ATC 地址；过期则后台惰性重新入队，本次走旧线路。
         if cfg["enabled"] and cfg["play_enhance"]:
             cached = _atc_cache_get(row["item_id"])
             if _atc_url_fresh(cached, cfg["url_ttl"]):
                 data["video"]["atc_url"] = cached["video_url"]
             elif cached:
                 _atc_enqueue(row["item_id"], purpose="play")
-    # 播放线路优先级（后台可拖拽排序；atc 无地址时前端自动跳过）
+    # 播放线路优先级（ATC 新数据优先，旧分享页仍可用抖音备线）
     if state == "ok":
         data["play_priority"] = cfg["play_priority"]
     view = {
@@ -3163,7 +3082,7 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
             raise
         finally:
             conn.close()
-    # ATC 播放地址增强：后台异步入队（分钟级），不阻塞分享页返回
+    # 兼容旧调用方：若结果缓存缺失，后台补一次 ATC 媒体地址。
     if data.get("kind") != "note" and data.get("item_id"):
         try:
             _atc_enqueue(data["item_id"], purpose="play")
@@ -3664,8 +3583,8 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
     match = re.search(r"[?&]video_id=([\w-]+)", play_url)
     if match:
         vid = match.group(1)
-    if kind == "video" and not vid:
-        raise ApiError(502, "视频播放标识缺失")
+    if kind == "video" and not play_url:
+        raise ApiError(502, "视频播放地址缺失")
     if kind == "note" and not (data.get("images") or []):
         raise ApiError(502, "图集内容缺失")
     now = int(time.time())
@@ -3734,11 +3653,6 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
             raise
         finally:
             conn.close()
-    if kind != "note":
-        try:
-            _atc_enqueue(item_id, purpose="play")
-        except Exception:
-            pass
     return True
 
 
@@ -3951,7 +3865,7 @@ def _stop_share_parse_workers() -> None:
 
 class ShareEventBody(BaseModel):
     kind: str
-    source: str = ""            # 播放线路：dy1(aweme.snssdk) / dy2(iesdouyin) / atc(增强) / proxy(服务器兜底)
+    source: str = ""            # 播放线路：atc(新解析直连) / proxy(同源流) / dy1、dy2(旧数据兼容)
     stage: str = ""             # 该线路的结果：start / ok / error / timeout / giveup
     detail: str = ""            # 失败细节（media error code、readyState 等）
     ms: int = 0                 # 从该线路开始到出结果的耗时
@@ -4135,13 +4049,13 @@ def wx_jssdk(request: Request, url: str = ""):
             "signature": hashlib.sha1(raw.encode()).hexdigest()}
 
 
-# ---------------------------------------------------------------- AnyToCopy 增强线路（ATC）
+# ---------------------------------------------------------------- AnyToCopy 统一解析（ATC）
 #
-# 第三方增值服务（可选，默认关闭）：语音转文字文案提取 + 分享页增强播放地址。
+# 主解析服务：网页、批量 API 与分享页 worker 都通过 /video/extract 取数。
 # 硬约束：
-#   · 永不进入同步主解析（/api/parse 不感知本分区）；ATC 是异步任务（提交→轮询，分钟级）
-#   · 总开关 atc_enabled=0 时整条线路完全静默，任何主流程不受影响
-#   · ATC 并发上限 5 → 全部请求经 atc_jobs 表串行排队，用户请求绝不直连 ATC
+#   · 普通解析只传 workUrl，默认不传 taskType，不发起语音转文字
+#   · 只有用户主动使用文案提取时才传 taskType=TEXT，并走 atc_jobs 持久队列
+#   · 对方并发上限 5：主解析最多 3 个在途，后台队列最多 2 个在途
 #   · 只存 URL 与文案元数据，不落地媒体字节；缓存随 DATA_RETENTION_DAYS 清理
 #   · 出站刻意不走代理池（同微信 JS-SDK 先例：第三方 API 要求出口稳定，且非抖音无封 IP 风险）
 
@@ -4149,12 +4063,14 @@ ATC_DEFAULT_BASE = "https://api.anytocopy.com/vip/open-api/v1"
 ATC_POLL_INTERVAL = 4          # 官方建议 3-5 秒
 ATC_JOB_TIMEOUT = 300          # 单任务最长 5 分钟
 ATC_INFLIGHT_MAX = 2           # 同时在轮询的任务数（对方并发上限 5，留余量给其网页端）
+ATC_PRIMARY_INFLIGHT_MAX = 3   # 主解析占 3 席，与后台队列合计不超过 5
 ATC_WORK_URL = "https://www.douyin.com/video/{item_id}"   # 由 item_id 还原作品链接
-SHARE_PLAY_SOURCES = ("dy1", "dy2", "atc", "proxy")
+SHARE_PLAY_SOURCES = ("atc", "proxy", "dy1", "dy2")
+_atc_primary_slots = threading.BoundedSemaphore(ATC_PRIMARY_INFLIGHT_MAX)
 
 
 def _atc_cfg() -> dict:
-    """读取运行时配置（app_settings，后台改即时生效）。未启用/未配密钥 → enabled=False。"""
+    """读取运行时配置（app_settings，后台改即时生效）。"""
     key = app_setting("atc_api_key").strip()
     secret = app_setting("atc_api_secret").strip()
     try:
@@ -4174,11 +4090,12 @@ def _atc_cfg() -> dict:
     except (ValueError, TypeError):
         priority = list(SHARE_PLAY_SOURCES)
     return {
-        "enabled": app_setting("atc_enabled") == "1" and bool(key and secret),
+        "enabled": app_setting("atc_enabled", "1") == "1" and bool(key and secret),
         "key": key, "secret": secret,
-        "base": (app_setting("atc_base_url") or ATC_DEFAULT_BASE).rstrip("/"),
+        # 固定官方接口，避免后台误配或把 API 凭据发送到非预期主机。
+        "base": ATC_DEFAULT_BASE,
         "play_enhance": app_setting("atc_play_enhance", "1") == "1",
-        "transcript_enabled": app_setting("atc_transcript_enabled", "1") == "1",
+        "transcript_enabled": app_setting("atc_transcript_enabled", "0") == "1",
         "transcript_daily": daily,
         "url_ttl": ttl,
         "play_priority": priority,
@@ -4186,14 +4103,229 @@ def _atc_cfg() -> dict:
 
 
 def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
-    """调 ATC 开放 API。返回解析后的 JSON；网络/协议错误抛异常。"""
+    """调 ATC 开放 API；对外只抛不包含密钥/完整 URL 的稳定错误。"""
     url = cfg["base"] + path + "?" + urlparse.urlencode(params)
     req = urlreq.Request(url, method=method)
     req.add_header("X-API-Key", cfg["key"])
     req.add_header("X-API-Secret", cfg["secret"])
     req.add_header("User-Agent", pick_ua())
-    with urlreq.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    try:
+        with urlreq.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urlerr.HTTPError as exc:
+        try:
+            raw = exc.read().decode("utf-8", "replace")[:1000]
+        except Exception:
+            raw = ""
+        try:
+            detail = json.loads(raw).get("msg") or ""
+        except (ValueError, AttributeError):
+            detail = ""
+        if exc.code in (401, 403):
+            raise ApiError(503, "AnyToCopy API 鉴权失败，请在管理后台更新密钥")
+        if exc.code == 429:
+            raise ApiError(503, "AnyToCopy API 请求过于频繁，请稍后重试")
+        suffix = f"：{detail[:120]}" if detail else ""
+        raise ApiError(502, f"AnyToCopy API 返回 HTTP {exc.code}{suffix}")
+    except (urlerr.URLError, TimeoutError, OSError):
+        raise ApiError(502, "AnyToCopy API 连接失败，请稍后重试")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise ApiError(502, "AnyToCopy API 返回了无效响应")
+    if not isinstance(payload, dict):
+        raise ApiError(502, "AnyToCopy API 返回了无效响应")
+    return payload
+
+
+def _atc_rejected(resp: dict, action: str = "任务") -> ApiError:
+    msg = str(resp.get("msg") or resp.get("message") or "")[:160]
+    code = str(resp.get("code") or "")
+    lowered = msg.lower()
+    if code in ("401", "403") or any(
+            token in lowered for token in ("api key", "secret", "验证失败", "鉴权")):
+        return ApiError(503, "AnyToCopy API 鉴权失败，请在管理后台更新密钥")
+    if "并发" in msg or "上限" in msg:
+        return ApiError(503, "AnyToCopy API 当前任务较多，请稍后重试",
+                        {"Retry-After": "5"})
+    return ApiError(502, f"AnyToCopy {action}失败" + (f"：{msg}" if msg else ""))
+
+
+def _atc_extract(work_url: str, include_text: bool = False) -> dict:
+    """提交并轮询一个 ATC 任务。普通解析不传 taskType。"""
+    cfg = _atc_cfg()
+    if not (cfg["key"] and cfg["secret"]):
+        raise ApiError(503, "视频解析 API 尚未配置，请先在管理后台填写 AnyToCopy 密钥")
+    if not cfg["enabled"]:
+        raise ApiError(503, "视频解析服务已在管理后台停用")
+    if not _atc_primary_slots.acquire(timeout=10):
+        raise ApiError(503, "视频解析任务较多，请稍后重试",
+                       {"Retry-After": "5"})
+    try:
+        params = {"workUrl": work_url}
+        if include_text:
+            params["taskType"] = "TEXT"
+        submitted = _atc_request("POST", "/video/extract", params, cfg)
+        if submitted.get("code") != 200 or not submitted.get("data"):
+            raise _atc_rejected(submitted, "任务提交")
+        created = submitted["data"]
+        if isinstance(created, dict):
+            if created.get("status") == "SUCCESS" or (
+                    not include_text and _atc_basic_result_ready(created)):
+                return created
+            task_id = str(created.get("taskId") or "")
+        else:
+            task_id = str(created)
+        if not task_id:
+            raise ApiError(502, "AnyToCopy 任务响应缺少 taskId")
+
+        deadline = time.monotonic() + ATC_JOB_TIMEOUT
+        while time.monotonic() < deadline:
+            time.sleep(ATC_POLL_INTERVAL)
+            queried = _atc_request(
+                "GET", "/video/query", {"taskId": task_id}, cfg)
+            if queried.get("code") != 200:
+                raise _atc_rejected(queried, "任务查询")
+            data = queried.get("data") or {}
+            if not isinstance(data, dict):
+                raise ApiError(502, "AnyToCopy 任务结果格式无效")
+            status = str(data.get("status") or "").upper()
+            if status in ("FAILED", "FAILURE"):
+                message = str(data.get("errorMessage") or "任务执行失败")[:160]
+                raise ApiError(404 if any(x in message for x in (
+                    "不存在", "删除", "私密")) else 502,
+                    f"AnyToCopy 解析失败：{message}")
+            if status == "SUCCESS" or (
+                    not include_text and _atc_basic_result_ready(data)):
+                return data
+        raise ApiError(504, "AnyToCopy 解析超时，请稍后重试")
+    finally:
+        _atc_primary_slots.release()
+
+
+def _atc_basic_result_ready(data: dict) -> bool:
+    return bool(data.get("videoUrl") or data.get("videoUrlList")
+                or data.get("imageUrlList"))
+
+
+def _atc_public_url(value) -> str:
+    """返回可下发给浏览器的 HTTPS URL，拒绝凭据、自定义端口与异常长值。"""
+    value = str(value or "").strip()
+    if not value or len(value) > 4096:
+        return ""
+    try:
+        parsed = urlparse.urlsplit(value)
+        if (parsed.scheme != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443) or not parsed.hostname):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return value
+
+
+def _atc_public_urls(value) -> list[str]:
+    """兼容开放 API 把 URL 集合返回为数组或单个字符串。"""
+    values = value if isinstance(value, (list, tuple)) else [value]
+    urls = [_atc_public_url(item) for item in values]
+    return [item for item in urls if item]
+
+
+def _atc_item_id(work_url: str, data: dict) -> str:
+    for key in ("workId", "itemId", "awemeId", "aweme_id"):
+        candidate = str(data.get(key) or "").strip()
+        if re.fullmatch(r"[\w-]{8,40}", candidate):
+            return candidate
+    for value in (str(data.get("workUrl") or ""), work_url):
+        match = re.search(r"/(?:video|note|slides|share/(?:video|note|slides))/(\d{8,30})",
+                          value)
+        if match:
+            return match.group(1)
+    # 短码不含作品 ID，用不可逆稳定标识做缓存/分享页主键。
+    return "atc_" + hashlib.sha256(work_url.encode()).hexdigest()[:24]
+
+
+def _atc_result_to_parse(work_url: str, data: dict,
+                         item_id_hint: str = "", kind_hint: str = "") -> dict:
+    work_type = str(data.get("workType") or kind_hint or "video").lower()
+    image_urls = _atc_public_urls(data.get("imageUrlList"))
+    video_urls = (_atc_public_urls(data.get("videoUrl"))
+                  + _atc_public_urls(data.get("videoUrlList")))
+    video_url = next(iter(dict.fromkeys(video_urls)), "")
+    kind = "note" if work_type in ("image", "images", "note", "slides") else "video"
+    if image_urls and not video_url:
+        kind = "note"
+    item_id = (item_id_hint or _atc_item_id(work_url, data))[:40]
+    title = str(data.get("title") or data.get("content") or "（无标题）").strip()
+    title = title[:1000] or "（无标题）"
+    base = _safe_name(title, item_id)
+
+    author_data = data.get("author") or {}
+    if isinstance(author_data, dict):
+        author = str(author_data.get("nickname") or author_data.get("name") or "")
+        avatar = _atc_public_url(author_data.get("avatar") or author_data.get("avatarUrl"))
+        author_url = _atc_public_url(author_data.get("url") or author_data.get("homepage"))
+    else:
+        author, avatar, author_url = str(author_data or ""), "", ""
+    author = str(data.get("authorName") or data.get("nickname") or author)[:100]
+    avatar = _atc_public_url(data.get("avatar") or data.get("avatarUrl")) or avatar
+    author_url = _atc_public_url(data.get("authorUrl")) or author_url
+
+    raw_stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+    stats = {
+        "digg": raw_stats.get("digg") or data.get("diggCount"),
+        "comment": raw_stats.get("comment") or data.get("commentCount"),
+        "collect": raw_stats.get("collect") or data.get("collectCount"),
+        "share": raw_stats.get("share") or data.get("shareCount"),
+    }
+    content = str(data.get("content") or title)
+    tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
+    result = {
+        "kind": kind, "item_id": item_id, "source": "atc", "title": title,
+        "author": author, "avatar": avatar, "author_url": author_url,
+        "create_time": None, "stats": stats, "tags": tags,
+        "music": None, "location": None, "base": base,
+        "cover": _atc_public_url(data.get("cover")),
+    }
+
+    if kind == "note":
+        if not image_urls:
+            raise ApiError(404, "AnyToCopy 未返回图集地址")
+        result["images"] = [
+            {"url": url, "filename": f"{base}_{index:02d}.jpeg"}
+            for index, url in enumerate(image_urls, 1)]
+    else:
+        if not video_url:
+            raise ApiError(404, "AnyToCopy 未返回无水印视频地址")
+        try:
+            duration = float(data.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        result["duration_ms"] = int(duration if duration > 100000 else duration * 1000)
+        filename = f"{base}.mp4"
+        video = {
+            "source": "atc", "url": video_url, "atc_url": video_url,
+            "alt_url": "", "filename": filename,
+            "width": data.get("width") or data.get("videoWidth"),
+            "height": data.get("height") or data.get("videoHeight"),
+        }
+        # 同源流不接受客户端 URL；仅对缓存中的抖音白名单 CDN 开放。
+        if _host_allowed(video_url):
+            video["proxy_url"] = _atc_video_proxy_url(item_id)
+            video["download_url"] = _atc_video_download_url(item_id, filename)
+        result["video"] = video
+
+    # 即便上游在基础模式意外附带了转录字段，也不在普通解析路径保存。
+    cache_data = dict(data)
+    cache_data.pop("textContent", None)
+    cache_data.pop("audioUrl", None)
+    _atc_save_result(item_id, cache_data, work_url=work_url)
+    return result
+
+
+def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
+                        kind_hint: str = "") -> dict:
+    data = _atc_extract(work_url, include_text=False)
+    return _atc_result_to_parse(work_url, data, item_id_hint, kind_hint)
 
 
 def _atc_cache_get(item_id: str) -> Optional[dict]:
@@ -4212,8 +4344,6 @@ def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> boo
     cfg = _atc_cfg()
     if not cfg["enabled"] or not item_id:
         return False
-    if purpose == "play" and not cfg["play_enhance"]:
-        return False
     if purpose == "transcript" and not cfg["transcript_enabled"]:
         return False
     cached = _atc_cache_get(item_id)
@@ -4221,41 +4351,53 @@ def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> boo
         return False
     if purpose == "transcript" and cached and cached.get("text_content"):
         return False
-    if db_exec("SELECT id FROM atc_jobs WHERE item_id=? AND status IN ('pending','submitted')",
-               (item_id,), "one"):
+    if db_exec("SELECT id FROM atc_jobs WHERE item_id=? AND purpose=? "
+               "AND status IN ('pending','submitted')",
+               (item_id, purpose), "one"):
         return False
     # 防任务空转：近期已跑完一轮但仍没有新鲜地址（对方也取不到）→ 冷却期内不再入队
     cooldown = db_exec(
-        "SELECT updated FROM atc_jobs WHERE item_id=? AND status IN ('done','failed') "
-        "ORDER BY updated DESC LIMIT 1", (item_id,), "one")
+        "SELECT updated FROM atc_jobs WHERE item_id=? AND purpose=? "
+        "AND status IN ('done','failed') ORDER BY updated DESC LIMIT 1",
+        (item_id, purpose), "one")
     if cooldown and time.time() - cooldown[0] < cfg["url_ttl"]:
         return False
     now = int(time.time())
+    saved_work_url = (work_url or (cached or {}).get("work_url") or "")
+    if not saved_work_url and re.fullmatch(r"\d{1,30}", item_id):
+        saved_work_url = ATC_WORK_URL.format(item_id=item_id)
+    if not saved_work_url:
+        return False
     db_exec("INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
             "VALUES(?,?,?,'pending',?,?)",
-            (item_id, (work_url or ATC_WORK_URL.format(item_id=item_id))[:300],
+            (item_id, saved_work_url[:300],
              purpose, now, now))
     return True
 
 
-def _atc_save_result(item_id: str, data: dict) -> None:
+def _atc_save_result(item_id: str, data: dict, work_url: str = "") -> None:
     """任务成功：upsert 缓存。只覆盖返回里实际带值的字段（转录任务不该清掉旧播放地址）。"""
     now = int(time.time())
     old = _atc_cache_get(item_id) or {}
-    video_url = data.get("videoUrl") or old.get("video_url") or ""
-    fetched = now if data.get("videoUrl") else (old.get("url_fetched_at") or 0)
+    saved_work_url = (work_url or data.get("workUrl")
+                      or old.get("work_url") or "")[:300]
+    video_urls = (_atc_public_urls(data.get("videoUrl"))
+                  + _atc_public_urls(data.get("videoUrlList")))
+    fresh_video_url = next(iter(dict.fromkeys(video_urls)), "")
+    video_url = fresh_video_url or old.get("video_url") or ""
+    fetched = now if fresh_video_url else (old.get("url_fetched_at") or 0)
     db_exec(
-        "INSERT INTO atc_cache(item_id,video_url,url_fetched_at,content,text_content,"
-        "audio_url,duration,created,updated) VALUES(?,?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(item_id) DO UPDATE SET video_url=?,url_fetched_at=?,content=?,"
-        "text_content=?,audio_url=?,duration=?,updated=?",
-        (item_id, video_url, fetched,
+        "INSERT INTO atc_cache(item_id,work_url,video_url,url_fetched_at,content,"
+        "text_content,audio_url,duration,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(item_id) DO UPDATE SET work_url=?,video_url=?,url_fetched_at=?,"
+        "content=?,text_content=?,audio_url=?,duration=?,updated=?",
+        (item_id, saved_work_url, video_url, fetched,
          (data.get("content") or old.get("content") or "")[:2000],
          (data.get("textContent") or old.get("text_content") or ""),
          (data.get("audioUrl") or old.get("audio_url") or ""),
          data.get("duration") or old.get("duration"),
          old.get("created") or now, now,
-         video_url, fetched,
+         saved_work_url, video_url, fetched,
          (data.get("content") or old.get("content") or "")[:2000],
          (data.get("textContent") or old.get("text_content") or ""),
          (data.get("audioUrl") or old.get("audio_url") or ""),
@@ -4281,12 +4423,33 @@ def _atc_worker():
                 if job:
                     job = dict(job)
                     try:
-                        resp = _atc_request("POST", "/video/extract",
-                                            {"workUrl": job["work_url"],
-                                             "taskType": "TEXT"}, cfg)
+                        params = {"workUrl": job["work_url"]}
+                        if job["purpose"] == "transcript":
+                            params["taskType"] = "TEXT"
+                        resp = _atc_request(
+                            "POST", "/video/extract", params, cfg)
                         if resp.get("code") == 200 and resp.get("data"):
-                            db_exec("UPDATE atc_jobs SET status='submitted',task_id=?,"
-                                    "updated=? WHERE id=?", (str(resp["data"]), now, job["id"]))
+                            created = resp["data"]
+                            if isinstance(created, dict) and (
+                                    str(created.get("status") or "").upper() == "SUCCESS"
+                                    or (job["purpose"] != "transcript"
+                                        and _atc_basic_result_ready(created))):
+                                _atc_save_result(
+                                    job["item_id"], created,
+                                    work_url=job["work_url"])
+                                db_exec(
+                                    "UPDATE atc_jobs SET status='done',updated=? WHERE id=?",
+                                    (now, job["id"]))
+                            else:
+                                task_id = (str(created.get("taskId") or "")
+                                           if isinstance(created, dict)
+                                           else str(created))
+                                if not task_id:
+                                    raise RuntimeError("任务响应缺少 taskId")
+                                db_exec(
+                                    "UPDATE atc_jobs SET status='submitted',task_id=?,"
+                                    "updated=? WHERE id=?",
+                                    (task_id, now, job["id"]))
                         elif "并发" in str(resp.get("msg") or ""):
                             # 对方并发已满：保持 pending 等下一轮，不判死
                             db_exec("UPDATE atc_jobs SET updated=?,error=? WHERE id=?",
@@ -4312,10 +4475,17 @@ def _atc_worker():
                 continue
             try:
                 resp = _atc_request("GET", "/video/query", {"taskId": job["task_id"]}, cfg)
+                if resp.get("code") != 200:
+                    raise _atc_rejected(resp, "任务查询")
                 data = resp.get("data") or {}
-                status = data.get("status", "")
-                if status == "SUCCESS":
-                    _atc_save_result(job["item_id"], data)
+                if not isinstance(data, dict):
+                    raise RuntimeError("任务结果格式无效")
+                status = str(data.get("status") or "").upper()
+                basic_ready = (job["purpose"] != "transcript"
+                               and _atc_basic_result_ready(data))
+                if status == "SUCCESS" or basic_ready:
+                    _atc_save_result(
+                        job["item_id"], data, work_url=job["work_url"])
                     db_exec("UPDATE atc_jobs SET status='done',updated=? WHERE id=?",
                             (now, job["id"]))
                 elif status in ("FAILED", "FAILURE"):
@@ -4359,7 +4529,7 @@ def _atc_status() -> dict:
     return {
         "enabled": cfg["enabled"],
         "configured": bool(cfg["key"] and secret),
-        "master_on": app_setting("atc_enabled") == "1",
+        "master_on": app_setting("atc_enabled", "1") == "1",
         "api_key": cfg["key"],
         "api_secret_masked": (secret[:3] + "****" + secret[-2:]) if len(secret) > 5 else "",
         "base_url": cfg["base"],
@@ -5361,6 +5531,48 @@ def _open_video_upstream(vid: str, headers: dict, validator=None):
     raise ApiError(502, "视频下载线路暂时不可用，请稍后重试")
 
 
+def _open_atc_video_upstream(item_id: str, headers: dict, validator=None):
+    """只从 ATC 服务端缓存取 URL，且仍限定在抖音媒体白名单。"""
+    cached = _atc_cache_get(item_id)
+    if not _atc_url_fresh(cached, _atc_cfg()["url_ttl"]):
+        raise ApiError(403, "媒体地址已过期，请重新解析或刷新页面")
+    upstream = cached["video_url"]
+    if not _host_allowed(upstream):
+        raise ApiError(502, "AnyToCopy 返回的媒体域名不在安全白名单")
+    resp = None
+    accepted = False
+    try:
+        resp, _ = open_url(
+            upstream, headers=headers,
+            retry_http_statuses=(408, 425, 429, 500, 502, 503, 504),
+            ban_on_auth_error=False)
+        status = resp.status if hasattr(resp, "status") else resp.getcode()
+        if status not in (200, 206):
+            raise ValueError(f"unexpected video status {status}")
+        content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0]
+        content_type = content_type.strip().lower()
+        if not content_type or not (
+                content_type.startswith("video/") or content_type in {
+                    "application/mp4", "application/octet-stream",
+                    "binary/octet-stream"}):
+            raise ValueError(f"unexpected video content type {content_type}")
+        geturl = getattr(resp, "geturl", None)
+        final_url = geturl() if callable(geturl) else ""
+        if final_url and not _host_allowed(final_url):
+            raise ValueError("video redirect left the Douyin media allowlist")
+        if validator:
+            validator(resp)
+        accepted = True
+        return resp
+    except ApiError:
+        raise
+    except Exception:
+        raise ApiError(502, "AnyToCopy 视频线路暂时不可用，请稍后重试")
+    finally:
+        if resp is not None and not accepted:
+            _close_upstream(resp)
+
+
 @app.get("/api/video/{vid}")
 def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
               dl: str = "", name: str = "video.mp4"):
@@ -5413,6 +5625,58 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
     return _MediaStreamingResponse(
         stream,
         finalize=finalize, status_code=status,
+        media_type="video/mp4", headers=headers)
+
+
+@app.get("/api/atc/video/{item_id}")
+def api_atc_video(item_id: str, request: Request, exp: int = 0, sig: str = "",
+                  dl: str = "", name: str = "video.mp4"):
+    """ATC 解析地址的受控同源流；不接受 URL 参数，避免通用 SSRF。"""
+    if not re.fullmatch(r"[\w-]{8,40}", item_id):
+        raise ApiError(400, "非法的作品 ID")
+    _require_media_token("atc_video", item_id, exp, sig)
+    range_header = request.headers.get("range", "")
+    if not _valid_single_range(range_header):
+        raise ApiError(416, "仅支持单段 bytes Range 请求")
+    lease = _media_lease(request)
+    extra = dict(CDN_HEADERS)
+    if range_header:
+        extra["Range"] = range_header
+    opener = lambda outgoing, validator: _open_atc_video_upstream(
+        item_id, outgoing, validator=validator)
+    try:
+        resp = opener(
+            extra, lambda candidate: _video_response_shape(
+                candidate, range_header))
+        status, start, end, total, expected = _video_response_shape(
+            resp, range_header)
+    except ApiError:
+        _media_release(lease)
+        raise
+    except Exception:
+        _media_release(lease)
+        raise ApiError(502, "AnyToCopy 视频线路暂时不可用，请稍后重试")
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if expected is not None:
+        headers["Content-Length"] = str(expected)
+    if status == 206:
+        headers["Content-Range"] = (
+            f"bytes {start}-{end}/{total if total is not None else '*'}")
+    if dl:
+        headers["Content-Disposition"] = _content_disposition(name or "video.mp4")
+    stream = _ResumableVideoStream(
+        item_id, resp, extra, start, end, total, expected, opener=opener)
+    scope = "download" if dl else "play"
+    finalize = _media_finalizer(
+        stream, lease, on_close=lambda: _traffic_add(scope, stream.sent))
+    stream.set_on_close(finalize)
+    return _MediaStreamingResponse(
+        stream, finalize=finalize, status_code=status,
         media_type="video/mp4", headers=headers)
 
 
@@ -5799,7 +6063,7 @@ def admin_api_logs(request: Request, limit: int = 100):
     return {"logs": [dict(r) for r in rows]}
 
 
-# ---- AnyToCopy 增强线路（配置 / 测试 / 播放优先级）----
+# ---- AnyToCopy 统一解析（配置 / 测试 / 播放优先级）----
 
 @app.get("/api/admin/atc")
 def admin_atc_get(request: Request):
@@ -5815,19 +6079,30 @@ def admin_atc_get(request: Request):
         try:
             resp = _atc_request("GET", "/video/query",
                                 {"taskId": test["task_id"]}, cfg)
+            if resp.get("code") != 200:
+                raise _atc_rejected(resp, "测试任务查询")
             data = resp.get("data") or {}
-            st = data.get("status", "")
-            if st == "SUCCESS":
+            if not isinstance(data, dict):
+                raise ApiError(502, "AnyToCopy 测试任务结果格式无效")
+            st = str(data.get("status") or "").upper()
+            if st == "SUCCESS" or _atc_basic_result_ready(data):
                 test = {"state": "success", "ms": test.get("ms"),
                         "duration": data.get("duration"),
+                        "has_video": bool(data.get("videoUrl")
+                                          or data.get("videoUrlList")),
                         "has_text": bool(data.get("textContent"))}
             elif st in ("FAILED", "FAILURE"):
                 test = {"state": "failed",
                         "error": (data.get("errorMessage") or "任务失败")[:200]}
             set_app_setting("atc_test_state", json.dumps(test, ensure_ascii=False))
             status["test"] = json.dumps(test, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as exc:
+            detail = (exc.message if isinstance(exc, ApiError)
+                      else "测试任务查询失败")
+            test = {"state": "failed", "error": detail[:200]}
+            set_app_setting("atc_test_state", json.dumps(
+                test, ensure_ascii=False))
+            status["test"] = json.dumps(test, ensure_ascii=False)
     return status
 
 
@@ -5852,9 +6127,9 @@ def admin_atc_set(body: AtcSettingsBody, request: Request):
         set_app_setting("atc_api_secret", body.api_secret.strip()[:100])
     if body.base_url is not None:
         base = body.base_url.strip().rstrip("/")
-        if base and not base.startswith("https://"):
-            raise ApiError(400, "Base URL 必须是 https:// 地址")
-        set_app_setting("atc_base_url", base[:200])
+        if base and base != ATC_DEFAULT_BASE:
+            raise ApiError(400, "视频解析接口固定为 AnyToCopy 官方地址")
+        set_app_setting("atc_base_url", ATC_DEFAULT_BASE)
     if body.enabled is not None:
         set_app_setting("atc_enabled", "1" if body.enabled else "0")
     if body.play_enhance is not None:
@@ -5880,7 +6155,7 @@ class AtcTestBody(BaseModel):
 
 @app.post("/api/admin/atc/test")
 def admin_atc_test(body: AtcTestBody, request: Request):
-    """测试连接：真实提交一个提取任务验证密钥可用，结果异步到。
+    """测试连接：按默认解析模式只传 workUrl，不请求文案。
     状态写 app_settings.atc_test_state（task_id + 提交耗时），由 GET 轮询推进。"""
     _require_admin(request)
     cfg = _atc_cfg()
@@ -5890,19 +6165,35 @@ def admin_atc_test(body: AtcTestBody, request: Request):
     t0 = time.time()
     try:
         resp = _atc_request("POST", "/video/extract",
-                            {"workUrl": work_url, "taskType": "TEXT"}, cfg)
+                            {"workUrl": work_url}, cfg)
     except Exception as e:
+        detail = e.message if isinstance(e, ApiError) else type(e).__name__
         set_app_setting("atc_test_state", json.dumps(
-            {"state": "failed", "error": f"{type(e).__name__}: {e}"}))
-        raise ApiError(502, f"连接失败：{type(e).__name__}: {e}")
+            {"state": "failed", "error": detail}, ensure_ascii=False))
+        raise ApiError(502, f"连接失败：{detail}")
     ms = int((time.time() - t0) * 1000)
     if resp.get("code") != 200 or not resp.get("data"):
         set_app_setting("atc_test_state", json.dumps(
             {"state": "failed", "error": str(resp.get("msg") or resp)[:200]}))
         raise ApiError(502, f"任务提交被拒：{resp.get('msg') or '未知错误'}")
+    created = resp["data"]
+    if isinstance(created, dict) and (
+            str(created.get("status") or "").upper() == "SUCCESS"
+            or _atc_basic_result_ready(created)):
+        state = {"state": "success", "ms": ms,
+                 "duration": created.get("duration"),
+                 "has_video": bool(created.get("videoUrl")
+                                   or created.get("videoUrlList")),
+                 "has_text": bool(created.get("textContent"))}
+        set_app_setting("atc_test_state", json.dumps(state, ensure_ascii=False))
+        return {"ok": True, **state}
+    task_id = (str(created.get("taskId") or "")
+               if isinstance(created, dict) else str(created))
+    if not task_id:
+        raise ApiError(502, "任务提交响应缺少 taskId")
     set_app_setting("atc_test_state", json.dumps(
-        {"state": "submitted", "task_id": str(resp["data"]), "ms": ms}))
-    return {"ok": True, "task_id": str(resp["data"]), "ms": ms}
+        {"state": "submitted", "task_id": task_id, "ms": ms}))
+    return {"ok": True, "task_id": task_id, "ms": ms}
 
 
 # ---- 分享页管理（含侵权下架）----
@@ -6102,7 +6393,7 @@ def admin_play_logs(request: Request, page: int = 1, size: int = 20,
 
 @app.get("/api/admin/traffic-stats")
 def admin_traffic_stats(request: Request, days: int = 30):
-    """转发流量统计：/api/video 同源流式转发的按天字节/次数聚合。
+    """转发流量统计：两个同源视频路由的按天字节/次数聚合。
 
     scope=play 是播放兜底线路、scope=download 是视频下载；
     浏览器直连抖音 CDN 的流量不经过本服务器，无法也不需要统计。"""
@@ -6373,9 +6664,9 @@ _LANDING_SEO = {
                 "app_desc": "抖音视频文案提取工具：粘贴链接即可把视频语音转成文字，同时获得标题与正文。注册用户每天免费提取，同一视频只计一次；本站不保存媒体文件。",
                 "features": ["抖音视频语音转文字", "标题与正文提取", "音频试听", "注册用户每日免费", "结果可复制", "不保存媒体文件"],
                 "faq": [
-                    ("什么是抖音文案提取？", "把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。该功能由可选的增强线路处理，异步任务通常 1–3 分钟完成。"),
+                    ("什么是抖音文案提取？", "把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。语音转文字是需要主动开启的异步任务，通常 1–3 分钟完成。"),
                     ("文案提取收费吗？", "注册用户每天有免费提取次数（默认 5 次，以页面显示为准）。同一视频全站只提取一次，再次打开命中缓存不重复扣次。"),
-                    ("我的链接会发给第三方吗？", "仅在管理员开启增强线路后，你请求提取的作品链接会提交给第三方服务（AnyToCopy）处理，用于获取语音转文字结果与播放地址；未开启则不发送。本站只保存处理结果元数据，不保存视频文件。"),
+                    ("我的链接会发给第三方吗？", "基础解析会把作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址，但默认不请求语音文案；只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。"),
                     ("提取要等多久？", "通常 1–3 分钟，取决于视频时长，短视频更快。提交后可以离开页面，回来后重新打开开关即可查看结果。"),
                 ],
                 "howto": ("如何提取抖音视频文案", [
@@ -6387,9 +6678,9 @@ _LANDING_SEO = {
                 "app_desc": "A Douyin transcript extractor: paste a link to turn a video's speech into text, together with its title and caption. Signed-in users get a free daily quota; only one extraction per video site-wide. No media files are stored.",
                 "features": ["Douyin speech to text", "Title & caption extraction", "Audio preview", "Free daily quota", "One-click copy", "No media-file storage"],
                 "faq": [
-                    ("What is Douyin transcript extraction?", "It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Powered by an optional enhancement route as an async job, usually done in 1–3 minutes."),
+                    ("What is Douyin transcript extraction?", "It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Speech-to-text is an opt-in async job, usually done in 1–3 minutes."),
                     ("Is transcript extraction free?", "Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing."),
-                    ("Is my link sent to a third party?", "Only when the enhancement route is enabled by the site operator: the link you ask to transcribe is submitted to a third-party service (AnyToCopy) to produce the transcript and a playback URL; otherwise nothing is sent. Only result metadata is kept — never the video file."),
+                    ("Is my link sent to a third party?", "Basic parsing submits the post link to the third-party service AnyToCopy to obtain post metadata and media URLs, but does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file."),
                     ("How long does it take?", "Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result."),
                 ],
                 "howto": ("How to extract the transcript of a Douyin video", [
@@ -6433,7 +6724,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "无需登录抖音账号的抖音视频与图集无水印下载、分享工具：粘贴链接即可预览与下载，也能生成微信友好的分享页。播放直连、视频签名流式下载，开源可审查，不保存媒体文件，站内账号可选，并提供开发者 API。",
             "features": ["抖音视频无水印下载", "抖音图集下载", "一键生成分享页", "分享到微信生成卡片", "免 App 观看抖音视频", "分享海报生成", "在线预览播放", "批量解析", "播放直连且媒体不落地", "开发者 API"],
             "faq": [
-                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希；浏览器直连播放或图片时抖音会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。仅当管理员开启「增强线路」且用户主动使用文案提取时，对应作品链接会提交给第三方服务（AnyToCopy）处理；未开启或不使用则不发送。"),
+                ("这个抖音下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息，视频下载则由本站代理流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录抖音账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
@@ -6451,7 +6742,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "A no-watermark Douyin video and gallery downloader and sharing tool that requires no Douyin login. Playback is browser-direct while video downloads use a signed streaming route. It is open source and auditable, stores no media files, offers an optional site account, and includes a developer API.",
             "features": ["Douyin no-watermark video download", "Photo gallery download", "One-click share page", "WeChat share card", "Watch Douyin without the app", "Share poster generator", "In-browser preview", "Batch parsing", "Direct playback with no media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Direct playback and image requests disclose browser network information to Douyin; video downloads are streamed through the site's proxy. Only when the operator enables the enhancement route and the user actively uses transcript extraction is the corresponding video link submitted to a third-party service (AnyToCopy); otherwise nothing is sent."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
@@ -6607,13 +6898,21 @@ def share_page(sid: str, request: Request):
     view = None
     if row:
         row = dict(row)
-        # 图集直链会过期：超过刷新窗口就按 item_id 重新解析（视频靠 vid 重拼，无需刷新）
-        should_refresh_note = (row["kind"] == "note"
-                               and time.time() - (row["refreshed_at"] or 0)
-                               > SHARE_REFRESH_TTL)
-        should_repair_video = row["kind"] != "note" and not row["vid"]
+        # ATC 媒体地址是临时签名链；无论视频/图集都按后台 TTL 刷新。
+        try:
+            stored = json.loads(row["payload"] or "{}")
+        except ValueError:
+            stored = {}
+        is_atc = ((stored.get("video") or {}).get("source") == "atc"
+                  or stored.get("source") == "atc")
+        refresh_after = min(SHARE_REFRESH_TTL, _atc_cfg()["url_ttl"])
+        should_refresh_media = (
+            (row["kind"] == "note" or is_atc)
+            and time.time() - (row["refreshed_at"] or 0) > refresh_after)
+        should_repair_video = (
+            row["kind"] != "note" and not row["vid"] and not is_atc)
         if (_share_state(row) == "ok"
-                and (should_refresh_note or should_repair_video)):
+                and (should_refresh_media or should_repair_video)):
             row = _refresh_share(row)
         view = _share_view(row, origin)
         # pending 页面完成后会自动 reload；只在终态记录一次，避免单次访问被算成 2 次。
@@ -6833,7 +7132,8 @@ def llms_txt(request: Request):
 - **免 App 观看**：接收方无需安装抖音、无需登录，微信内置浏览器直接播放。
 - **分享海报**：前端合成带二维码的海报图，长按保存后可发朋友圈；链接被拦截时的传播兜底。
 - 在线预览：下载前可直接在网页中预览播放。
-- **文案提取（语音转文字）**：解析后打开「获取文案」开关，自动把视频语音转成完整文字；注册用户每天免费提取，同一视频全站只计一次。仅在管理员开启增强线路时，链接才会提交给第三方服务（AnyToCopy）处理；未开启则不发送。
+- **统一视频解析**：网页、开放 API 与分享页解析都会把规范化后的作品链接提交给 AnyToCopy，以获取作品信息和媒体地址。普通解析只提交 `workUrl`，默认不请求语音文案。
+- **文案提取（语音转文字）**：解析后主动打开「获取文案」开关，才会额外请求语音转文字；注册用户每天免费提取，同一视频全站只计一次。
 - 可靠媒体链路：播放与图片直连优先，视频下载走同源签名流式转发，本站不缓存、不留存。
 - 开源可审查、数据最小化：不保存媒体文件；免费额度和诊断只处理必要的用途化摘要、粗粒度环境与事件，保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；站内账号可选。
 - 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
@@ -6844,7 +7144,7 @@ def llms_txt(request: Request):
 3. 在线预览后一键下载无水印原片；**或点「生成分享页」，把链接发给微信好友，对方点开即可观看**。
 
 ## 常见问答
-- 会处理和保留哪些数据？——不保存视频或图片文件。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连抖音时，抖音会收到请求方网络与浏览器信息。
+- 会处理和保留哪些数据？——不保存视频或图片文件。每次解析会把规范化后的作品链接提交给 AnyToCopy 获取作品信息和媒体地址，普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
 - 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
 - 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，仅保存标题封面等元数据，不存储视频文件。
 - 需要登录或装软件吗？——无需登录抖音或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。

@@ -1555,7 +1555,7 @@ class PrivacyStorageTests(unittest.TestCase):
 
 
 class AtcEnhancementTests(unittest.TestCase):
-    """AnyToCopy 增强线路：开关静默、登录门禁、原子配额、缓存命中不扣次、优先级校验。"""
+    """AnyToCopy 统一解析：默认媒体模式、主动文案、配额、缓存与线路校验。"""
 
     def setUp(self):
         server.db_exec("DELETE FROM atc_cache")
@@ -1584,7 +1584,71 @@ class AtcEnhancementTests(unittest.TestCase):
         server.set_app_setting("atc_enabled", "1")
         server.set_app_setting("atc_api_key", "ak_test")
         server.set_app_setting("atc_api_secret", "sk_test")
+        server.set_app_setting("atc_transcript_enabled", "1")
         server.set_app_setting("atc_transcript_daily", daily)
+
+    def test_primary_extract_omits_text_task_by_default(self):
+        self._enable()
+        calls = []
+
+        def request(method, path, params, _cfg):
+            calls.append((method, path, dict(params)))
+            if path == "/video/extract":
+                return {"code": 200, "data": "task-basic"}
+            return {"code": 200, "data": {
+                "status": "WAITING", "title": "普通解析",
+                "videoUrl": "https://v3.douyinvod.com/basic.mp4",
+                "textContent": "不应该进入解析结果",
+                "workType": "video", "duration": 12.5,
+            }}
+
+        with mock.patch.object(server, "_atc_request", side_effect=request), \
+                mock.patch.object(server.time, "sleep"):
+            raw = server._atc_extract(
+                "https://v.douyin.com/BasicTask/", include_text=False)
+        self.assertEqual(raw["title"], "普通解析")
+        self.assertNotIn("taskType", calls[0][2])
+        self.assertEqual(calls[0][:2], ("POST", "/video/extract"))
+
+    def test_transcript_extract_explicitly_requests_text(self):
+        self._enable()
+        calls = []
+
+        def request(method, path, params, _cfg):
+            calls.append((method, path, dict(params)))
+            if path == "/video/extract":
+                return {"code": 200, "data": "task-text"}
+            return {"code": 200, "data": {
+                "status": "SUCCESS", "videoUrl":
+                "https://v3.douyinvod.com/text.mp4", "textContent": "全文"}}
+
+        with mock.patch.object(server, "_atc_request", side_effect=request), \
+                mock.patch.object(server.time, "sleep"):
+            server._atc_extract(
+                "https://v.douyin.com/TextTask/", include_text=True)
+        self.assertEqual(calls[0][2]["taskType"], "TEXT")
+
+    def test_atc_result_maps_to_existing_contract_without_transcript(self):
+        self._enable()
+        work_url = "https://v.douyin.com/MapTask/"
+        parsed = server._atc_result_to_parse(work_url, {
+            "title": "科幻产品 #科技",
+            "content": "科幻产品 #科技",
+            "videoUrlList": "https://v3.douyinvod.com/map.mp4",
+            "textContent": "默认解析不应下发这个字段",
+            "duration": 8.2, "workType": "video",
+        })
+        self.assertEqual(parsed["source"], "atc")
+        self.assertEqual(parsed["video"]["source"], "atc")
+        self.assertEqual(parsed["duration_ms"], 8200)
+        self.assertIn("/api/atc/video/", parsed["video"]["download_url"])
+        self.assertNotIn("textContent", parsed)
+        self.assertNotIn("text_content", parsed)
+        cached = server._atc_cache_get(parsed["item_id"])
+        self.assertEqual(cached["work_url"], work_url)
+        self.assertEqual(cached["video_url"],
+                         "https://v3.douyinvod.com/map.mp4")
+        self.assertFalse(cached["text_content"])
 
     def test_master_switch_off_is_silent(self):
         # 未配置密钥/未开启 → 404，不暴露功能存在
@@ -1672,7 +1736,42 @@ class AtcEnhancementTests(unittest.TestCase):
         # 非法 JSON 落库也不炸：自动回退默认顺序
         server.set_app_setting("share_play_priority", "not-json")
         self.assertEqual(server._atc_cfg()["play_priority"],
-                         ["dy1", "dy2", "atc", "proxy"])
+                         ["atc", "proxy", "dy1", "dy2"])
+
+    def test_admin_cannot_redirect_api_credentials_to_another_host(self):
+        admin = TestClient(server.app)
+        r = admin.post("/api/admin/login",
+                       json={"password": "test-only-admin-password"})
+        self.assertEqual(r.status_code, 200)
+        r = admin.post("/api/admin/atc", json={
+            "base_url": "https://example.com/v1"})
+        self.assertEqual(r.status_code, 400)
+        r = admin.post("/api/admin/atc", json={
+            "base_url": server.ATC_DEFAULT_BASE})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(server._atc_cfg()["base"], server.ATC_DEFAULT_BASE)
+
+    def test_admin_connection_test_uses_basic_mode_and_accepts_immediate_result(self):
+        self._enable()
+        admin = TestClient(server.app)
+        r = admin.post("/api/admin/login",
+                       json={"password": "test-only-admin-password"})
+        self.assertEqual(r.status_code, 200)
+        calls = []
+
+        def request(method, path, params, _cfg):
+            calls.append((method, path, dict(params)))
+            return {"code": 200, "data": {
+                "status": "WAITING", "duration": 9,
+                "videoUrlList": ["https://v3.douyinvod.com/test.mp4"]}}
+
+        with mock.patch.object(server, "_atc_request", side_effect=request):
+            r = admin.post("/api/admin/atc/test", json={
+                "work_url": "https://v.douyin.com/TestBasic/"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["state"], "success")
+        self.assertTrue(r.json()["has_video"])
+        self.assertNotIn("taskType", calls[0][2])
 
     def test_share_view_injects_atc_only_when_fresh(self):
         import json as _json
@@ -1684,7 +1783,7 @@ class AtcEnhancementTests(unittest.TestCase):
         # 关闭时：无 atc_url，但有默认优先级
         view = server._share_view(row)
         self.assertNotIn("atc_url", view["data"]["video"])
-        self.assertEqual(view["data"]["play_priority"], ["dy1", "dy2", "atc", "proxy"])
+        self.assertEqual(view["data"]["play_priority"], ["atc", "proxy", "dy1", "dy2"])
         # 开启 + 新鲜缓存：注入
         self._enable()
         now = int(time.time())

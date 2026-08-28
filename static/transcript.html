@@ -91,7 +91,7 @@ footer{margin-top:64px; padding:24px 0 36px; border-top:1px solid var(--border);
   <div class="faq-list">
     <details class="faq-item">
       <summary data-i18n="q1">什么是抖音文案提取？</summary>
-      <p data-i18n="a1">把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。该功能由可选的增强线路处理，异步任务通常 1–3 分钟完成。</p>
+      <p data-i18n="a1">把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。语音转文字是需要主动开启的异步任务，通常 1–3 分钟完成。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="q2">文案提取收费吗？</summary>
@@ -99,7 +99,7 @@ footer{margin-top:64px; padding:24px 0 36px; border-top:1px solid var(--border);
     </details>
     <details class="faq-item">
       <summary data-i18n="q3">我的链接会发给第三方吗？</summary>
-      <p data-i18n="a3">仅在管理员开启增强线路后，你请求提取的作品链接会提交给第三方服务（AnyToCopy）处理，用于获取语音转文字结果与播放地址；未开启则不发送。本站只保存处理结果元数据，不保存视频文件。</p>
+      <p data-i18n="a3">基础解析会把作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址，但默认不请求语音文案；只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="q4">提取要等多久？</summary>
@@ -128,11 +128,11 @@ const I18N = { en: {
   s3t:"Wait and copy", s3d:"Extraction usually takes 1–3 minutes. When done, copy the full text or listen to the audio.",
   faq:"FAQ",
   q1:"What is Douyin transcript extraction?",
-  a1:"It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Powered by an optional enhancement route as an async job, usually done in 1–3 minutes.",
+  a1:"It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Speech-to-text is an opt-in async job, usually done in 1–3 minutes.",
   q2:"Is transcript extraction free?",
   a2:"Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing.",
   q3:"Is my link sent to a third party?",
-  a3:"Only when the enhancement route is enabled by the site operator: the link you ask to transcribe is submitted to a third-party service (AnyToCopy) to produce the transcript and a playback URL; otherwise nothing is sent. Only result metadata is kept — never the video file.",
+  a3:"Basic parsing submits the post link to the third-party service AnyToCopy to obtain post metadata and media URLs, but does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file.",
   q4:"How long does it take?",
   a4:"Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result.",
   note:"No video or image files are stored; transcript results are removed automatically per the data retention period. Copyright belongs to the original creators — for personal study and authorized material archiving only.",

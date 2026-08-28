@@ -5,8 +5,9 @@
 密钥保存在 data/anytocopy.json（权限 0600，data/ 已在 .gitignore 中，不会进仓库）。
 
 用法：
-  python3 tools/anytocopy.py config                     # 交互式配置 API Key / Secret / Base URL
-  python3 tools/anytocopy.py extract "<作品链接或分享文案>"   # 提交任务并阻塞轮询直到出结果
+  python3 tools/anytocopy.py config                     # 交互式配置 API Key / Secret
+  python3 tools/anytocopy.py extract "<作品链接或分享文案>"   # 默认只提取媒体，不获取文案
+  python3 tools/anytocopy.py extract --with-text "<链接>"   # 主动请求语音转文字
   python3 tools/anytocopy.py extract --no-wait "<链接>"     # 只提交，打印 taskId 后退出
   python3 tools/anytocopy.py query <taskId>             # 按 taskId 查询一次
   python3 tools/anytocopy.py show                       # 查看当前已保存的配置（Secret 打码）
@@ -54,12 +55,10 @@ def cmd_config() -> int:
     api_secret = getpass.getpass(
         f"API Secret{' [已保存: ****]' if old_secret else ''}（输入不显示）: "
     ).strip() or old_secret
-    base = input(f"Base URL [{cfg.get('base_url') or DEFAULT_BASE}]: ").strip() \
-        or cfg.get("base_url") or DEFAULT_BASE
     if not api_key or not api_secret:
         print("错误：API Key 与 Secret 都不能为空", file=sys.stderr)
         return 1
-    save_config({"api_key": api_key, "api_secret": api_secret, "base_url": base.rstrip("/")})
+    save_config({"api_key": api_key, "api_secret": api_secret})
     print(f"已保存到 {CONFIG_FILE}（权限 0600）")
     return 0
 
@@ -73,13 +72,12 @@ def cmd_show() -> int:
     masked = (secret[:3] + "****" + secret[-2:]) if len(secret) > 5 else "****"
     print(f"API Key : {cfg.get('api_key', '')}")
     print(f"Secret  : {masked}")
-    print(f"Base URL: {cfg.get('base_url', '')}")
+    print(f"Base URL: {DEFAULT_BASE}（固定官方接口）")
     return 0
 
 
 def _request(method: str, path: str, params: dict, cfg: dict) -> dict:
-    base = cfg.get("base_url") or DEFAULT_BASE
-    url = base.rstrip("/") + path + "?" + urlparse.urlencode(params)
+    url = DEFAULT_BASE + path + "?" + urlparse.urlencode(params)
     req = urlreq.Request(url, method=method)
     req.add_header("X-API-Key", cfg["api_key"])
     req.add_header("X-API-Secret", cfg["api_secret"])
@@ -112,17 +110,21 @@ def require_config() -> dict:
 
 
 def cmd_extract(args: list) -> int:
-    wait = True
-    if args and args[0] == "--no-wait":
-        wait = False
-        args = args[1:]
+    wait = "--no-wait" not in args
+    include_text = "--with-text" in args
+    args = [value for value in args
+            if value not in ("--no-wait", "--with-text")]
     if not args:
-        print("用法: python3 tools/anytocopy.py extract [--no-wait] \"<作品链接或分享文案>\"", file=sys.stderr)
+        print("用法: python3 tools/anytocopy.py extract [--no-wait] [--with-text] "
+              "\"<作品链接或分享文案>\"", file=sys.stderr)
         return 1
     cfg = require_config()
     work_url = extract_url(args[0])
     print(f"提交任务: {work_url}")
-    resp = _request("POST", "/video/extract", {"workUrl": work_url, "taskType": "TEXT"}, cfg)
+    params = {"workUrl": work_url}
+    if include_text:
+        params["taskType"] = "TEXT"
+    resp = _request("POST", "/video/extract", params, cfg)
     print(f"提交响应: {json.dumps(resp, ensure_ascii=False)}")
     if resp.get("code") != 200 or not resp.get("data"):
         return 1
