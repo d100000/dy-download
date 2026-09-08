@@ -14,7 +14,7 @@
   --accent:#F02D55; --accent-hover:#D92149; --accent-ink:#FFFFFF; --accent-soft:#33151D;
   --ok:#25F4EE; --ok-ink:#062B29; --danger-bg:#2A161B; --danger-border:#57222E; --danger-text:#FF97AC;
   --shadow:0 22px 58px -38px rgba(0,0,0,.72);
-  --motion-ease:cubic-bezier(.16,1,.3,1); --motion-fast:160ms; --motion-ui:280ms; --motion-scene:720ms;
+  --motion-ease:cubic-bezier(.16,1,.3,1); --motion-fast:160ms; --motion-ui:280ms;
   --radius:16px;
 }
 :root[data-theme="light"]{
@@ -57,7 +57,7 @@ nav.is-scrolled{
   background:color-mix(in srgb,var(--bg) 82%,transparent); border-color:color-mix(in srgb,var(--border-strong) 70%,transparent);
   box-shadow:0 12px 30px -26px rgba(0,0,0,.7); -webkit-backdrop-filter:saturate(150%) blur(16px); backdrop-filter:saturate(150%) blur(16px);
 }
-.brand{display:flex; align-items:center; gap:11px; font-weight:700; font-size:16px}
+.brand{display:flex; align-items:center; gap:11px; min-width:0; font-weight:700; font-size:16px}
 .logo{
   width:38px; height:38px; border-radius:11px; color:#fff; flex:none;
   display:grid; place-items:center;
@@ -67,8 +67,7 @@ nav.is-scrolled{
 .logo svg{display:block}
 .brand:hover .logo{border-color:#4A5360}
 :root[data-theme="light"] .logo{background:#171A1F}
-.brand-name{display:flex; flex-direction:column; line-height:1.15}
-.brand small{font-weight:500; color:var(--muted); font-size:11px}
+.brand-name{min-width:0; line-height:1.3; overflow-wrap:anywhere}
 .icon-btn{
   width:36px; height:36px; border-radius:10px; display:grid; place-items:center;
   border:1px solid var(--border); background:var(--surface); font-size:15px;
@@ -76,37 +75,18 @@ nav.is-scrolled{
 }
 .icon-btn:hover{border-color:var(--border-strong)}
 
-/* ---------- hero ---------- */
-.hero{max-width:920px; margin:0 auto; text-align:center; padding:62px 0 24px}
-.hero-kicker{
-  width:max-content; max-width:100%; margin:0 auto 18px; padding:5px 11px; border-radius:999px;
-  border:1px solid var(--border); background:var(--surface); color:var(--muted);
-  display:flex; align-items:center; gap:7px; font-size:12px; font-weight:650; letter-spacing:.02em;
-}
-.hero-kicker::before{content:""; width:6px; height:6px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 16%,transparent)}
-h1{font-size:clamp(36px,5.3vw,58px); font-weight:820; line-height:1.12; letter-spacing:-.04em; text-wrap:balance}
-h1 .hl{color:var(--accent)}
-.hero-line{display:block; overflow:hidden; padding:.025em 0}
-.hero-line>span{display:block; transform-origin:50% 100%}
-.hero>p{max-width:680px; margin:18px auto 0; color:var(--muted); font-size:16px}
-/* 第二卖点：分享（与下载并列，弱于主标题但强于信任徽章） */
-.hero>p.hero-share{margin-top:8px; color:var(--faint); font-size:13px}
-.hero>p.hero-share strong{color:var(--muted); font-weight:600}
+/* ---------- 主操作 ---------- */
+.hero{max-width:760px; margin:0 auto; text-align:center; padding:44px 0 0}
+h1{font-size:34px; font-weight:750; line-height:1.3; text-wrap:balance}
+.hero>p{margin:10px auto 0; color:var(--muted); font-size:14px; line-height:1.7}
 
 /* ---------- composer ---------- */
 .composer{
   background:var(--surface); text-align:left;
   border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow);
-  padding:12px; margin-top:32px; position:relative; isolation:isolate; overflow:hidden;
+  padding:12px; margin-top:24px; position:relative; overflow:hidden;
   transition:border-color var(--motion-ui),box-shadow var(--motion-ui),background var(--motion-ui);
 }
-.composer::before{
-  content:""; position:absolute; z-index:0; inset:-1px; pointer-events:none; opacity:0;
-  background:radial-gradient(420px circle at var(--pointer-x,50%) var(--pointer-y,50%),color-mix(in srgb,var(--ok) 12%,transparent),transparent 58%);
-  transition:opacity var(--motion-ui);
-}
-.composer>*{position:relative; z-index:1}
-.composer.pointer-active::before{opacity:1}
 .composer.has-content{border-color:color-mix(in srgb,var(--border-strong) 78%,var(--accent))}
 .composer.has-link{box-shadow:0 22px 58px -40px rgba(0,0,0,.55),0 0 0 1px color-mix(in srgb,var(--ok) 32%,transparent)}
 .composer.is-error{border-color:var(--danger-border); box-shadow:0 0 0 3px color-mix(in srgb,var(--danger-text) 9%,transparent)}
@@ -136,13 +116,10 @@ h1 .hl{color:var(--accent)}
 .composer textarea::placeholder{color:var(--faint)}
 .composer-bar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 4px 1px; flex-wrap:wrap}
 .composer-actions{display:flex; gap:8px; flex-wrap:wrap}
-.composer-modes{display:flex; align-items:center; gap:6px; color:var(--faint); font-size:11.5px}
-.composer-modes span{padding:3px 8px; border-radius:999px; background:var(--surface-2); border:1px solid var(--border)}
-.composer-hint{margin:10px 4px 0; padding-top:9px; border-top:1px solid var(--border); font-size:12px; color:var(--faint); line-height:1.55}
 .quota-hint{display:block; margin:4px 4px 0; color:var(--muted); font-size:12px}
 .composer .ghost-btn{padding:7px 12px; border-radius:9px; font-size:13px}
 .composer .ghost-btn svg{flex:none}
-.composer .primary-btn{min-width:142px; border-radius:11px; background:var(--accent); box-shadow:none; font-size:14.5px; transition:background .15s,transform .15s}
+.composer .primary-btn{min-width:142px; justify-content:center; border-radius:11px; background:var(--accent); box-shadow:none; font-size:14.5px; transition:background .15s,transform .15s}
 .composer .primary-btn::after{display:none}
 .composer .primary-btn:hover{background:var(--accent-hover); transform:none; box-shadow:none}
 .composer .primary-btn:active{transform:scale(.98)}
@@ -156,34 +133,23 @@ h1 .hl{color:var(--accent)}
 .composer.is-loading .parse-progress::after{animation:parseScan 1.05s var(--motion-ease) infinite}
 @keyframes parseScan{to{transform:translateX(340%)}}
 
-/* ---------- 支持平台：紧邻主输入，先回答“能不能解析” ---------- */
-.platform-support{
-  margin-top:22px; padding:18px; text-align:left; border:1px solid var(--border);
-  border-radius:18px; background:color-mix(in srgb,var(--surface) 88%,transparent);
-}
-.platform-support-head{display:flex; justify-content:space-between; align-items:flex-end; gap:24px; margin-bottom:14px}
-.platform-support-title{display:flex; align-items:center; gap:9px; font-size:15px; font-weight:750; color:var(--text)}
-.platform-count{padding:2px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:750}
-.platform-support-head p{max-width:430px; color:var(--faint); font-size:11.5px; line-height:1.55; text-align:right}
-.platform-grid{display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; list-style:none}
-.platform-item{
-  min-width:0; min-height:64px; padding:9px 10px; display:flex; align-items:center; gap:9px;
-  border:1px solid var(--border); border-radius:12px; background:var(--surface-2);
-  transition:transform var(--motion-fast) var(--motion-ease),border-color var(--motion-fast),background var(--motion-fast);
-}
-.platform-item:hover{transform:translateY(-2px); border-color:var(--border-strong); background:var(--surface)}
-.platform-logo{
-  width:34px; height:34px; flex:none; display:grid; place-items:center; overflow:hidden;
-  border:1px solid rgba(0,0,0,.07); border-radius:9px; background:#fff;
-}
-.platform-logo img{width:25px; height:25px; display:block; object-fit:contain}
-.platform-meta{min-width:0; line-height:1.25}
-.platform-meta b,.platform-meta small{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.platform-meta b{color:var(--text); font-size:12.5px; font-weight:680}
-.platform-meta small{margin-top:4px; color:var(--faint); font-size:10px}
-.platform-item.more .platform-logo{color:var(--accent); background:var(--accent-soft); border-color:transparent; font-size:18px; font-weight:500}
-.platform-foot{display:flex; align-items:center; gap:7px; margin:12px 2px 0; color:var(--faint); font-size:11px}
-.platform-foot::before{content:""; width:6px; height:6px; flex:none; border-radius:50%; background:var(--ok)}
+/* ---------- 按需展开的帮助 ---------- */
+.home-help{max-width:760px; margin:28px auto 0}
+.help-panel{border-top:1px solid var(--border); text-align:left}
+.help-panel>summary{display:flex; align-items:center; gap:10px; min-height:48px; padding:12px 0; list-style:none; cursor:pointer; color:var(--muted); font-size:13px}
+.help-panel>summary::-webkit-details-marker{display:none}
+.help-panel>summary::after{content:"+"; margin-left:auto; font-size:18px; line-height:1}
+.help-panel[open]>summary::after{content:"−"}
+.help-panel>summary:hover{color:var(--text)}
+.platform-count{font-size:11px; color:var(--faint)}
+.platform-grid{display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; padding:4px 0 12px; list-style:none}
+.platform-item{min-width:0; display:flex; align-items:center; gap:8px}
+.platform-logo{width:28px; height:28px; flex:none; display:grid; place-items:center; border-radius:7px; background:#fff}
+.platform-logo img{width:21px; height:21px; display:block; object-fit:contain}
+.platform-meta{min-width:0; line-height:1.4}
+.platform-meta b{display:block; color:var(--text); font-size:12px; font-weight:500; overflow-wrap:anywhere}
+.platform-item.more .platform-logo{color:var(--muted); background:var(--surface-2)}
+.platform-foot{margin:0 0 16px; color:var(--muted); font-size:12px}
 .ghost-btn{
   display:inline-flex; align-items:center; gap:6px; padding:7px 14px; border-radius:10px;
   border:1px solid var(--border); color:var(--muted); font-size:13.5px; background:var(--surface-2);
@@ -382,10 +348,10 @@ a.ghost-btn{text-decoration:none}
 .mine-state{font-size:11px; padding:1px 7px; border-radius:999px; background:var(--surface); border:1px solid var(--border)}
 
 /* ---------- 导航右侧 / 用户 ---------- */
-.nav-right{display:flex; align-items:center; gap:10px}
+.nav-right{display:flex; flex-shrink:0; align-items:center; gap:10px}
 .nav-link{font-size:13.5px; color:var(--muted); background:none; border:none; cursor:pointer; text-decoration:none}
 .nav-link:hover{color:var(--text)}
-.nav-user{font-size:13.5px; font-weight:650; color:var(--bg); background:var(--text); border-radius:9px; padding:8px 15px; cursor:pointer}
+.nav-user{font-size:13.5px; font-weight:650; white-space:nowrap; color:var(--bg); background:var(--text); border-radius:9px; padding:8px 15px; cursor:pointer}
 .nav-user:hover{opacity:.86}
 .lang-switch{font-size:12.5px; font-weight:600; color:var(--muted); border:1px solid var(--border); border-radius:10px; padding:7px 11px; cursor:pointer; background:var(--surface)}
 .lang-switch:hover{color:var(--text); border-color:var(--border-strong)}
@@ -494,185 +460,17 @@ a.ghost-btn{text-decoration:none}
 .ts-acts .ghost-btn{font-size:12.5px; padding:5px 12px}
 .ts-acts a{font-size:12.5px; color:var(--muted)}
 
-/* ---------- 滚动揭示：默认始终可见，JS 仅做渐进增强 ---------- */
-.reveal{opacity:1; transform:none}
-
-/* ---------- Apple 式滚动叙事：链接 → 解析 → 原片 ---------- */
-.motion-story{margin-top:76px}
-.story-stage{
-  position:relative; min-height:650px; overflow:hidden; isolation:isolate;
-  padding:26px 30px 30px; border-radius:24px; color:#F5F5F7; background:#050506;
-  border:1px solid rgba(255,255,255,.1); box-shadow:0 30px 80px -52px rgba(0,0,0,.8);
-}
-.story-stage::before{
-  content:""; position:absolute; z-index:-1; width:520px; height:520px; right:-110px; top:50%; transform:translateY(-50%);
-  background:radial-gradient(circle,rgba(37,244,238,.12),rgba(240,45,85,.06) 36%,transparent 69%); pointer-events:none;
-}
-.story-topline{display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:44px}
-.story-label{font-size:12px; font-weight:650; color:#A1A1A6; letter-spacing:.02em}
-.story-progress{display:flex; align-items:center; padding:2px; border:1px solid rgba(255,255,255,.12); border-radius:999px; background:rgba(255,255,255,.06)}
-.story-progress button{width:44px; height:44px; display:grid; place-items:center; border-radius:999px}
-.story-progress button::before{content:""; width:18px; height:4px; border-radius:999px; background:#646468; transition:background var(--motion-ui),transform var(--motion-ui) var(--motion-ease)}
-.story-progress button[aria-current="step"]::before{background:#F5F5F7; transform:scaleX(1.45)}
-.story-layout{display:grid; grid-template-columns:minmax(0,.82fr) minmax(0,1.18fr); gap:34px; min-height:530px; align-items:center}
-.story-copy-wrap{padding:18px 0 18px 16px}
-.story-title{max-width:11ch; font-size:clamp(34px,4vw,52px); font-weight:780; line-height:1.08; letter-spacing:-.04em; text-wrap:balance}
-.story-title strong{display:block; color:#FF4B6C; font-weight:inherit}
-.story-steps{position:relative; min-height:210px; margin-top:34px; list-style:none}
-.story-copy{max-width:390px; padding:18px 0; border-top:1px solid rgba(255,255,255,.12)}
-.story-index{display:block; margin-bottom:8px; color:#7D7D82; font-size:12px; font-weight:700; font-variant-numeric:tabular-nums}
-.story-copy h3{font-size:22px; line-height:1.3; letter-spacing:-.02em}
-.story-copy p{margin-top:9px; color:#A1A1A6; font-size:14px; line-height:1.7; max-width:36ch}
-.story-visual{position:relative; min-height:500px; border-radius:18px; overflow:hidden; background:#0A0A0B; border:1px solid rgba(255,255,255,.08)}
-.story-visual::before{content:""; position:absolute; inset:0; opacity:.58; background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px); background-size:34px 34px; -webkit-mask-image:radial-gradient(circle at 58% 50%,black,transparent 78%); mask-image:radial-gradient(circle at 58% 50%,black,transparent 78%)}
-.story-visual-label{position:absolute; left:18px; top:16px; z-index:6; color:#77777C; font-size:10px; letter-spacing:.08em}
-.story-link-card{
-  position:absolute; z-index:4; left:24px; top:72px; width:min(250px,62%); padding:13px 14px;
-  display:flex; align-items:center; gap:11px; border:1px solid rgba(255,255,255,.14); border-radius:12px;
-  background:rgba(27,27,29,.94); box-shadow:0 18px 46px -26px #000; will-change:transform,opacity;
-  transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease);
-}
-.story-link-icon{width:32px; height:32px; flex:none; display:grid; place-items:center; border-radius:9px; color:#25F4EE; background:#15191B}
-.story-link-lines{flex:1; min-width:0}
-.story-link-lines b,.story-link-lines span{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-.story-link-lines b{font-size:12px; color:#F5F5F7}
-.story-link-lines span{font-size:10px; color:#7D7D82; margin-top:2px}
-.story-parser{position:absolute; z-index:3; left:50%; top:48%; width:146px; height:146px; transform:translate(-50%,-50%); will-change:transform,opacity; transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease)}
-.story-ring{position:absolute; border-radius:50%; border:1px solid rgba(255,255,255,.14); inset:0}
-.story-ring.r2{inset:17px; border-color:rgba(37,244,238,.25); transform:rotate(35deg)}
-.story-ring.r3{inset:34px; border-color:rgba(240,45,85,.3); transform:rotate(-28deg)}
-.story-ring::after{content:""; position:absolute; width:8px; height:8px; left:50%; top:-4px; border-radius:50%; background:#25F4EE; box-shadow:0 0 18px rgba(37,244,238,.58)}
-.story-ring.r2::after{left:auto; right:7px; top:13px; background:#F02D55; box-shadow:0 0 18px rgba(240,45,85,.55)}
-.story-parser-core{position:absolute; inset:48px; display:grid; place-items:center; border-radius:50%; background:#F5F5F7; color:#08080A; font-size:11px; font-weight:800; letter-spacing:.04em}
-.story-flow{position:absolute; z-index:2; height:1px; transform-origin:left center; background:linear-gradient(90deg,rgba(37,244,238,.15),rgba(37,244,238,.8),rgba(240,45,85,.55)); transition:opacity 360ms,transform 620ms var(--motion-ease)}
-.story-flow.f1{left:31%; top:38%; width:28%; transform:rotate(12deg)}
-.story-flow.f2{left:54%; top:60%; width:25%; transform:rotate(21deg)}
-.story-result-card{
-  position:absolute; z-index:5; right:22px; bottom:22px; width:min(290px,72%); padding:10px; border-radius:15px;
-  background:#171719; border:1px solid rgba(255,255,255,.14); box-shadow:0 22px 56px -26px #000; will-change:transform,opacity;
-  transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease);
-}
-.story-video{height:168px; position:relative; overflow:hidden; border-radius:10px; background:linear-gradient(145deg,#232329,#0D0D0F)}
-.story-video::before{content:""; position:absolute; width:112px; height:172px; left:50%; bottom:-48px; transform:translateX(-50%) rotate(7deg); border:1px solid rgba(255,255,255,.15); border-radius:28px; background:linear-gradient(145deg,#2A2A30,#111114)}
-.story-video::after{content:""; position:absolute; inset:0; background:linear-gradient(115deg,transparent 36%,rgba(255,255,255,.09) 50%,transparent 64%)}
-.story-play{position:absolute; z-index:2; left:50%; top:50%; width:42px; height:42px; transform:translate(-50%,-50%); display:grid; place-items:center; border-radius:50%; background:rgba(245,245,247,.92); color:#08080A}
-.story-quality{position:absolute; z-index:2; top:10px; left:10px; padding:3px 7px; border-radius:999px; color:#F5F5F7; background:rgba(0,0,0,.48); font-size:9px; font-weight:700; letter-spacing:.04em}
-.story-result-meta{display:flex; justify-content:space-between; gap:10px; align-items:center; padding:10px 2px 2px}
-.story-result-meta div{min-width:0}
-.story-result-meta b,.story-result-meta span{display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis}
-.story-result-meta b{font-size:12px}.story-result-meta span{color:#85858A; font-size:10px; margin-top:2px}
-.story-result-actions{display:flex; gap:6px; flex:none}
-.story-result-actions span{padding:5px 8px; border-radius:7px; color:#F5F5F7; background:#2A2A2E; font-size:9px; font-weight:650}
-.story-result-actions span:first-child{background:#E72D54}
-
-@media (min-width:721px) and (min-height:680px) and (prefers-reduced-motion:no-preference){
-  .motion-story.story-enhanced{height:220vh}
-  .story-enhanced .story-stage{position:sticky; top:88px; height:calc(100vh - 112px); height:calc(100svh - 112px); min-height:0; max-height:760px}
-  .story-enhanced .story-copy{position:absolute; inset:0 auto auto 0; opacity:0; transform:translateY(24px); border-top-color:transparent; transition:opacity 420ms var(--motion-ease),transform 560ms var(--motion-ease)}
-  .story-enhanced .story-stage[data-story-step="0"] .story-copy[data-story-copy="0"],
-  .story-enhanced .story-stage[data-story-step="1"] .story-copy[data-story-copy="1"],
-  .story-enhanced .story-stage[data-story-step="2"] .story-copy[data-story-copy="2"]{opacity:1; transform:none; border-top-color:rgba(255,255,255,.12)}
-  .story-enhanced .story-stage[data-story-step="0"] .story-link-card{left:50%; top:50%; transform:translate(-50%,-50%) scale(1.12)}
-  .story-enhanced .story-stage[data-story-step="0"] .story-parser{opacity:.12; transform:translate(-50%,-50%) scale(.68)}
-  .story-enhanced .story-stage[data-story-step="0"] .story-result-card{opacity:0; transform:translateY(34px) scale(.9)}
-  .story-enhanced .story-stage[data-story-step="0"] .story-flow{opacity:0}
-  .story-enhanced .story-stage[data-story-step="1"] .story-link-card{left:19%; top:25%; transform:translate(-10%,-10%) scale(.78); opacity:.46}
-  .story-enhanced .story-stage[data-story-step="1"] .story-parser{opacity:1; transform:translate(-50%,-50%) rotate(var(--story-turn,0deg)) scale(1)}
-  .story-enhanced .story-stage[data-story-step="1"] .story-result-card{opacity:.16; transform:translateY(20px) scale(.94)}
-  .story-enhanced .story-stage[data-story-step="1"] .story-flow.f1{opacity:1; transform:rotate(12deg) scaleX(1)}
-  .story-enhanced .story-stage[data-story-step="1"] .story-flow.f2{opacity:.22; transform:rotate(21deg) scaleX(.5)}
-  .story-enhanced .story-stage[data-story-step="2"] .story-link-card{left:7%; top:14%; transform:scale(.62); opacity:.16}
-  .story-enhanced .story-stage[data-story-step="2"] .story-parser{left:24%; top:28%; opacity:.32; transform:translate(-50%,-50%) rotate(var(--story-turn,0deg)) scale(.62)}
-  .story-enhanced .story-stage[data-story-step="2"] .story-result-card{opacity:1; transform:translateY(0) scale(1)}
-  .story-enhanced .story-stage[data-story-step="2"] .story-flow.f1{opacity:.25; transform:rotate(12deg) scaleX(.72)}
-  .story-enhanced .story-stage[data-story-step="2"] .story-flow.f2{opacity:1; transform:rotate(21deg) scaleX(1)}
-}
-
-/* ---------- 信任卖点区 ---------- */
-.trust{margin-top:54px; content-visibility:auto; contain-intrinsic-size:auto 320px}
-.trust-title{
-  text-align:center; font-size:22px; font-weight:800; margin-bottom:20px;
-  color:var(--text); text-wrap:balance; letter-spacing:-.01em;
-}
-.trust-grid{
-  display:grid; grid-template-columns:repeat(4,1fr); gap:10px;
-}
-.trust-card{
-  background:var(--surface); border:1px solid var(--border); border-radius:13px;
-  padding:18px; position:relative; overflow:hidden;
-  transition:border-color .18s,background .18s;
-}
-.trust-card:hover{border-color:var(--border-strong); background:var(--surface-2)}
-.trust-card .tc-icon{
-  width:30px; height:30px; border-radius:8px; display:grid; place-items:center;
-  font-size:11px; font-weight:750; color:var(--accent); background:var(--accent-soft); margin-bottom:13px;
-}
-.trust-card h3{font-size:15px; font-weight:700; margin-bottom:7px}
-.trust-card p{font-size:13px; color:var(--muted); line-height:1.65}
-.trust-card strong{color:var(--text); font-weight:600}
-
 /* ---------- FAQ ---------- */
-.faq{margin-top:60px; content-visibility:auto; contain-intrinsic-size:auto 520px}
-.faq-title{text-align:center; font-size:21px; font-weight:800; letter-spacing:-.01em; margin-bottom:12px}
-.faq-lead{text-align:center; color:var(--muted); font-size:14.5px; max-width:60ch; margin:0 auto 22px; line-height:1.75}
-.faq-list{display:flex; flex-direction:column; gap:10px; max-width:720px; margin:0 auto}
-.faq-item{background:var(--surface); border:1px solid var(--border); border-radius:12px; overflow:hidden}
-.faq-item summary{list-style:none; cursor:pointer; padding:16px 18px; font-weight:600; font-size:15px;
+.faq-list{padding-bottom:12px}
+.faq-item{border-top:1px solid var(--border)}
+.faq-item summary{list-style:none; cursor:pointer; padding:12px 0; font-weight:500; font-size:13px;
   display:flex; justify-content:space-between; align-items:center; gap:12px}
 .faq-item summary::-webkit-details-marker{display:none}
-.faq-item summary::after{content:"+"; color:var(--accent); font-size:22px; font-weight:400; line-height:1; transition:transform .2s; flex:none}
-.faq-item[open] summary::after{transform:rotate(45deg)}
-.faq-item p{padding:0 18px 18px; color:var(--muted); font-size:14px; line-height:1.8; margin:0}
-.faq-item[open] p{animation:faqAnswer 220ms var(--motion-ease) both}
-@keyframes faqAnswer{from{opacity:0; transform:translateY(-5px)}to{opacity:1; transform:none}}
+.faq-item summary::after{content:"+"; color:var(--muted); font-size:18px; line-height:1; flex:none}
+.faq-item[open] summary::after{content:"−"}
+.faq-item p{padding:0 0 16px; color:var(--muted); font-size:13px; line-height:1.8; margin:0}
 .faq-item strong{color:var(--text); font-weight:600}
-
-/* ---------- 开发者 API 介绍 ---------- */
-.api-band{margin-top:60px}
-.api-band-inner{display:grid; grid-template-columns:1.1fr .9fr; gap:28px; align-items:center;
-  background:var(--surface); border:1px solid var(--border); border-radius:16px; padding:30px}
-.api-tag{display:inline-block; font-size:12px; font-weight:600; color:var(--accent); background:var(--accent-soft);
-  padding:4px 12px; border-radius:99px; margin-bottom:12px}
-.api-band-text h2{font-size:23px; font-weight:800; letter-spacing:-.01em; line-height:1.3}
-.api-band-text p{color:var(--muted); font-size:14.5px; margin-top:12px; line-height:1.75}
-.api-feats{display:flex; flex-direction:column; gap:6px; margin:16px 0; font-size:13.5px; color:var(--text)}
-.api-cta{display:flex; gap:10px; flex-wrap:wrap; margin-top:18px}
-.api-cta .primary-btn, .api-cta .ghost-btn{text-decoration:none}
-.api-code{background:#0b0d10; border:1px solid var(--border); border-radius:14px; padding:18px 20px;
-  overflow-x:auto; font-size:12.5px; line-height:1.7; color:#c7d0da; margin:0;
-  font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-:root[data-theme="light"] .api-code{background:#16191E; color:#d7dee6}
-@media(max-width:720px){.api-band-inner{grid-template-columns:1fr; padding:24px}}
-
-@media(max-width:720px){
-  .motion-story{margin-top:60px}
-  .story-stage{min-height:0; padding:20px 18px 24px; border-radius:20px}
-  .story-topline{min-height:38px}
-  .story-progress{display:none}
-  .story-layout{grid-template-columns:1fr; gap:24px; min-height:0}
-  .story-copy-wrap{padding:20px 2px 0}
-  .story-title{max-width:12ch; font-size:clamp(32px,9vw,42px)}
-  .story-steps{min-height:0; margin-top:26px}
-  .story-copy{max-width:none; padding:16px 0}
-  .story-copy h3{font-size:19px}
-  .story-visual{min-height:360px; order:-1}
-  .story-link-card{left:15px; top:56px; width:64%}
-  .story-parser{width:122px; height:122px; top:48%}
-  .story-parser-core{inset:40px; font-size:10px}
-  .story-result-card{right:14px; bottom:14px; width:72%}
-  .story-video{height:132px}
-  .story-flow.f1{left:27%; top:35%; width:32%}
-  .story-flow.f2{left:51%; top:57%; width:27%}
-}
-
-/* 矮桌面无法容纳粘性舞台时，使用普通纵向叙事，避免进度控件误导或裁切内容。 */
-@media (min-width:721px) and (max-height:679px){
-  .story-progress{display:none}
-}
-
-@media (max-width:900px) and (min-width:601px){
-  .platform-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
-}
+.faq-item a{color:var(--accent)}
 
 /* ---------- 手机端适配 ---------- */
 @media (max-width:600px){
@@ -682,16 +480,12 @@ a.ghost-btn{text-decoration:none}
   .brand{font-size:15px; gap:9px}
   .logo{width:34px; height:34px; border-radius:10px}
   .logo svg{width:28px; height:28px}
-  .brand small{font-size:10.5px}
-  .brand-name small{display:none}
   .nav-link{display:none}
   .user-email{max-width:80px}
   .icon-btn{width:36px; height:36px}
-  .hero{padding:38px 0 20px}
-  .hero-kicker{margin-bottom:14px}
-  h1{font-size:clamp(34px,10.2vw,44px); line-height:1.14}
-  .hero>p{font-size:14px; line-height:1.65; margin-top:14px}
-  .hero>p.hero-share{font-size:12px; margin-top:7px}
+  .hero{padding:28px 0 0}
+  h1{font-size:28px}
+  .hero>p{font-size:13px; margin-top:8px}
   .composer{padding:10px; border-radius:15px; margin-top:23px}
   .composer-head{padding:3px 3px 9px}
   .composer-status{font-size:10.5px}
@@ -700,18 +494,7 @@ a.ghost-btn{text-decoration:none}
   .composer-input-row>.primary-btn{width:100%; min-height:46px; padding:11px 22px}
   .composer-bar{align-items:flex-start; padding:10px 2px 1px}
   .composer-actions .ghost-btn{min-height:44px}
-  .composer-modes{width:100%}
-  .composer-modes span{flex:1; text-align:center}
-  .platform-support{margin-top:16px; padding:14px 12px; border-radius:15px}
-  .platform-support-head{display:block; margin-bottom:11px}
-  .platform-support-head p{margin-top:5px; max-width:none; text-align:left}
-  .platform-grid{grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px}
-  .platform-item{min-height:76px; padding:9px 5px; flex-direction:column; justify-content:center; gap:6px; text-align:center}
-  .platform-logo{width:32px; height:32px; border-radius:8px}
-  .platform-logo img{width:23px; height:23px}
-  .platform-meta b{font-size:11.5px}
-  .platform-meta small{display:none}
-  .platform-foot{align-items:flex-start; line-height:1.5}
+  .platform-grid{grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px 8px}
   .card-body{padding:16px; gap:18px}
   .player-wrap{width:100%}
   .meta-row{gap:16px; padding:12px 0}
@@ -719,19 +502,15 @@ a.ghost-btn{text-decoration:none}
   .actions>*{flex:1 1 auto; justify-content:center; min-height:44px}
   .album-head{padding:16px 16px 0}
   .album-grid{padding:14px 16px 16px; grid-template-columns:repeat(2,1fr); gap:10px}
-  .trust{margin-top:42px}
-  .trust-title{font-size:19px}
-  .trust-grid{grid-template-columns:1fr 1fr; gap:8px}
-  .trust-card{padding:15px}
   .ghost-btn{padding:9px 14px}
-  .faq{margin-top:52px}
-  .faq-item summary{padding:14px 15px; font-size:14.5px}
-  .faq-item p{padding:0 15px 15px}
+}
+@media (max-width:360px){
+  .brand .logo{display:none}
 }
 
 /* ---------- footer ---------- */
 footer{
-  margin-top:60px; padding:24px 0 36px; border-top:1px solid var(--border);
+  max-width:760px; margin:28px auto 0; padding:20px 0 28px; border-top:1px solid var(--border);
   color:var(--faint); font-size:12.5px; text-align:center; line-height:1.9;
 }
 
@@ -739,11 +518,7 @@ footer{
   html{scroll-behavior:auto}
   *,*::before,*::after{scroll-behavior:auto !important; animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important}
   .spinner{animation:none !important}
-  .composer::before,.parse-progress{display:none}
-  .motion-story{height:auto !important}
-  .story-stage{position:relative !important; top:auto !important; height:auto !important; max-height:none !important}
-  .story-copy{position:relative !important; opacity:1 !important; transform:none !important}
-  .story-result-card{opacity:1 !important; transform:none !important}
+  .parse-progress{display:none}
 }
 </style>
 </head>
@@ -762,7 +537,7 @@ footer{
         <path d="M20 47 h24" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
       </svg>
     </span>
-    <span class="brand-name"><span data-i18n="brand_name">多平台下载器</span><small data-i18n="brand_tagline">50+ 平台 · 开源 · 无广告</small></span>
+    <span class="brand-name" data-i18n="brand_name">多平台下载器</span>
   </div>
   <div class="nav-right">
     <a class="nav-link" href="/api-docs" data-i18n="nav_api">API 接入</a>
@@ -844,17 +619,15 @@ footer{
 
 <main>
 <section class="hero">
-  <div class="hero-kicker" data-i18n="hero_kicker">50+ 内容平台 · 视频 · 图集</div>
-  <h1 data-i18n-html="hero_h1"><span class="hero-line"><span>粘贴分享链接</span></span><span class="hero-line hl"><span>获取无水印原片</span></span></h1>
-  <p data-i18n="hero_sub">支持抖音、小红书、快手、B站、微博、TikTok、YouTube 等公开作品链接。</p>
-  <p class="hero-share" data-i18n-html="hero_share">无需登录源平台 · 不保存媒体文件 · <strong>抖音作品可生成分享页</strong></p>
+  <h1 data-i18n="hero_h1">获取无水印原片</h1>
+  <p data-i18n="hero_sub">支持抖音、小红书、快手、B站等 50+ 平台。</p>
 
   <div class="composer" aria-busy="false">
     <div class="composer-head">
-      <div class="composer-label">
+      <label class="composer-label" for="input">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-        <span data-i18n="composer_label">平台分享链接</span>
-      </div>
+        <span data-i18n="composer_label">分享链接</span>
+      </label>
       <div class="composer-status" role="status" aria-live="polite" aria-atomic="true">
         <span class="status-default" data-i18n="composer_status">支持 50+ 平台</span>
         <span class="status-ready" data-i18n="composer_ready">已识别支持的平台链接</span>
@@ -863,7 +636,7 @@ footer{
     </div>
     <div class="composer-input-row">
       <div class="input-shell">
-        <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴视频 / 图集分享文案或链接&#10;支持抖音、小红书、快手、B站、微博等 50+ 平台"></textarea>
+        <textarea id="input" rows="3" data-i18n-ph="ph_input" placeholder="粘贴视频 / 图集链接或分享文案&#10;多条链接可一起粘贴，自动批量解析"></textarea>
         <button class="clear-x" id="clearBtn" aria-label="清空" title="清空" style="display:none">✕</button>
       </div>
       <button class="primary-btn" id="parseBtn">
@@ -884,11 +657,7 @@ footer{
         </button>
         <input type="file" id="fileInput" accept=".txt,.csv,text/plain" hidden>
       </div>
-      <div class="composer-modes" aria-label="支持的内容类型">
-        <span data-i18n="mode_video">视频</span><span data-i18n="mode_album">图集</span><span data-i18n="mode_batch">批量</span>
-      </div>
     </div>
-    <div class="composer-hint" data-i18n="hint">支持一次粘贴多条受支持平台链接，系统会自动拆分并批量解析，结果可导出 Excel。</div>
     <div class="quota-hint" id="quotaHint"></div>
     <div class="parse-progress" aria-hidden="true"></div>
   </div>
@@ -900,190 +669,72 @@ footer{
     </svg>
     <span id="alertText"></span>
   </div>
-
-  <section class="platform-support" aria-labelledby="platformTitle">
-    <div class="platform-support-head">
-      <h2 class="platform-support-title" id="platformTitle"><span data-i18n="platform_title">支持的平台</span><span class="platform-count">50+</span></h2>
-      <p data-i18n="platform_intro">一个输入框统一解析视频、图集与公开作品链接；实际可提取内容以源平台和作品类型为准。</p>
-    </div>
-    <ul class="platform-grid" aria-label="支持的平台列表" data-i18n-aria="platform_list_label">
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_douyin">抖音</b><small data-i18n="platform_short">短视频 · 图集</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/xiaohongshu.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_xiaohongshu">小红书</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/kuaishou.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_kuaishou">快手</b><small data-i18n="platform_short">短视频 · 图集</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/bilibili.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_bilibili">B站</b><small data-i18n="platform_long">长视频 · 动态</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/pinduoduo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_pinduoduo">多多视频</b><small data-i18n="platform_ecommerce">电商视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/twitter.svg" alt="" decoding="async"></span><span class="platform-meta"><b>Twitter/X</b><small data-i18n="platform_social_video">社交视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/toutiao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_toutiao">今日头条</b><small data-i18n="platform_news">资讯视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/shipinhao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_shipinhao">视频号</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/weibo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_weibo">微博</b><small data-i18n="platform_social">图文 · 视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b>TikTok</b><small data-i18n="platform_short_video">短视频</small></span></li>
-      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/youtube.svg" alt="" decoding="async"></span><span class="platform-meta"><b>YouTube</b><small data-i18n="platform_long_video">长视频</small></span></li>
-      <li class="platform-item more"><span class="platform-logo" aria-hidden="true">＋</span><span class="platform-meta"><b data-i18n="platform_more">更多平台</b><small data-i18n="platform_growing">持续增加中</small></span></li>
-    </ul>
-    <p class="platform-foot" data-i18n="platform_foot">一个入口覆盖 50+ 内容平台，无需在不同工具之间来回切换。</p>
-  </section>
 </section>
 
 <section class="result" id="result"></section>
 
-<section class="motion-story" id="motionStory" aria-labelledby="storyTitle">
-  <div class="story-stage" id="storyStage" data-story-step="0">
-    <div class="story-topline">
-      <span class="story-label" data-i18n="story_label">从分享链接到无水印原片</span>
-      <div class="story-progress" role="group" data-i18n-aria="story_progress_label" aria-label="解析流程步骤">
-        <button type="button" data-story-goto="0" aria-label="查看粘贴链接步骤" data-i18n-aria="story_goto1" aria-current="step"></button>
-        <button type="button" data-story-goto="1" aria-label="查看获取作品信息步骤" data-i18n-aria="story_goto2"></button>
-        <button type="button" data-story-goto="2" aria-label="查看下载与分享步骤" data-i18n-aria="story_goto3"></button>
-      </div>
-    </div>
-    <div class="story-layout">
-      <div class="story-copy-wrap">
-        <h2 class="story-title" id="storyTitle" data-i18n-html="story_title">一次粘贴。<strong>三步完成。</strong></h2>
-        <ol class="story-steps">
-          <li class="story-copy" data-story-copy="0">
-            <span class="story-index">01</span>
-            <h3 data-i18n="story_h1">粘贴，原样识别。</h3>
-            <p data-i18n="story_p1">整段分享文案也能直接使用，多条链接会自动拆分。</p>
-          </li>
-          <li class="story-copy" data-story-copy="1">
-            <span class="story-index">02</span>
-            <h3 data-i18n="story_h2">作品信息，自动整理。</h3>
-            <p data-i18n="story_p2">自动整理标题、作者和封面，并识别视频或图集。</p>
-          </li>
-          <li class="story-copy" data-story-copy="2">
-            <span class="story-index">03</span>
-            <h3 data-i18n="story_h3">原片就绪，自由使用。</h3>
-            <p data-i18n="story_p3">在线预览原片；抖音作品还可生成分享页发给好友。</p>
-          </li>
-        </ol>
-      </div>
-      <div class="story-visual" aria-hidden="true">
-        <span class="story-visual-label">LINK TO ORIGINAL</span>
-        <div class="story-flow f1"></div><div class="story-flow f2"></div>
-        <div class="story-link-card">
-          <span class="story-link-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
-          <span class="story-link-lines"><b>share.link/public-post</b><span data-i18n="story_visual_link">分享文案 · 自动识别平台链接</span></span>
-        </div>
-        <div class="story-parser">
-          <span class="story-ring r1"></span><span class="story-ring r2"></span><span class="story-ring r3"></span>
-          <span class="story-parser-core">AUTO</span>
-        </div>
-        <div class="story-result-card">
-          <div class="story-video">
-            <span class="story-quality">1080P · NO WATERMARK</span>
-            <span class="story-play"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></span>
-          </div>
-          <div class="story-result-meta">
-            <div><b data-i18n="story_visual_ready">无水印原片已就绪</b><span data-i18n="story_visual_meta">视频 · 00:27 · MP4</span></div>
-            <div class="story-result-actions"><span data-i18n="story_visual_download">下载</span><span data-i18n="story_visual_share">分享</span></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="trust">
-  <h2 class="trust-title reveal" data-i18n="trust_title">简单，也值得放心</h2>
-  <div class="trust-grid">
-    <div class="trust-card reveal">
-      <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.7-1.7"/></svg></div>
-      <h3 data-i18n="tc1_h">开源且克制</h3>
-      <p data-i18n-html="tc1_p">前端开源可审查，<strong>不保存视频或图片文件</strong>，媒体线路只做流式转发。</p>
-    </div>
-    <div class="trust-card reveal">
-      <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-9 12h8l-1 8 9-12h-8z"/></svg></div>
-      <h3 data-i18n="tc2_h">解析更稳定</h3>
-      <p data-i18n-html="tc2_p">遇到临时线路异常时会自动重试，让预览和下载更顺畅。</p>
-    </div>
-    <div class="trust-card reveal">
-      <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg></div>
-      <h3 data-i18n="tc3_h">干净无广告</h3>
-      <p data-i18n-html="tc3_p">没有弹窗或插播广告，也不会给下载内容添加二次水印。</p>
-    </div>
-    <div class="trust-card reveal">
-      <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 10.5 6.8-4M8.6 13.5l6.8 4"/></svg></div>
-      <h3 data-i18n="tc4_h">分享更方便</h3>
-      <p data-i18n-html="tc4_p">抖音作品可一键生成分享页或海报，好友打开即可观看，无需安装 App。</p>
-    </div>
-  </div>
-</section>
-
-<!-- 开发者 API 介绍 -->
-<section class="api-band">
-  <div class="api-band-inner reveal">
-    <div class="api-band-text">
-      <span class="api-tag" data-i18n="api_tag">开发者 API</span>
-      <h2 data-i18n="api_h">需要批量 / 自动化？用开放 API</h2>
-      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交受支持平台链接——标题、作者、视频地址与图集图片一次拿全。按次计费、稳定可靠，适合研究、备份与二次开发。</p>
-      <div class="api-feats">
-        <span data-i18n="api_f1">✓ 异步批量：提交即返回任务号</span>
-        <span data-i18n="api_f2">✓ 规范 JSON：结构化字段</span>
-        <span data-i18n="api_f3">✓ 按次计费 · 余额可查</span>
-      </div>
-      <div class="api-cta">
-        <a class="primary-btn" href="/api-docs" data-i18n="api_cta1">查看接口文档</a>
-        <a class="ghost-btn" href="/api-console" data-i18n="api_cta2">前往 API 控制台</a>
-      </div>
-    </div>
-    <pre class="api-code"><code>POST /api/v1/jobs
-X-API-Key: dy_xxx
-
-{ "links": [
-  "https://v.douyin.com/xxx/",
-  "https://www.xiaohongshu.com/explore/xxx" ] }
-→ { "code":0, "data":{
-     "job_id":"job_xxx", "status":"pending" } }
-
-GET /api/v1/jobs/job_xxx
-→ { "data":{ "status":"done",
-     "results":[{ "ok":true, "data":{…} }] } }</code></pre>
-  </div>
-</section>
-
-<section class="faq" aria-labelledby="faq-title">
-  <h2 class="faq-title reveal" id="faq-title" data-i18n="faq_title">常见问题</h2>
-  <p class="faq-lead reveal" data-i18n="faq_lead">粘贴受支持平台的公开作品链接，即可在线预览视频或图集；抖音作品还可生成适合微信打开的分享页。无需登录源平台，基础解析也不要求注册本站账号或安装应用。</p>
+<div class="home-help">
+  <details class="help-panel platform-support">
+    <summary><span data-i18n="platform_title">支持的平台</span><span class="platform-count">50+</span></summary>
+    <ul class="platform-grid" aria-label="支持的平台列表" data-i18n-aria="platform_list_label">
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_douyin">抖音</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/xiaohongshu.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_xiaohongshu">小红书</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/kuaishou.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_kuaishou">快手</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/bilibili.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_bilibili">B站</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/pinduoduo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_pinduoduo">多多视频</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/twitter.svg" alt="" decoding="async"></span><span class="platform-meta"><b>Twitter/X</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/toutiao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_toutiao">今日头条</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/shipinhao.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_shipinhao">视频号</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/weibo.svg" alt="" decoding="async"></span><span class="platform-meta"><b data-i18n="platform_weibo">微博</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/tiktok.svg" alt="" decoding="async"></span><span class="platform-meta"><b>TikTok</b></span></li>
+      <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/youtube.svg" alt="" decoding="async"></span><span class="platform-meta"><b>YouTube</b></span></li>
+      <li class="platform-item more"><span class="platform-logo" aria-hidden="true">＋</span><span class="platform-meta"><b data-i18n="platform_more">更多平台</b></span></li>
+    </ul>
+    <p class="platform-foot" data-i18n="platform_intro">实际可提取内容以源平台和作品类型为准。</p>
+  </details>
+  <details class="help-panel faq">
+    <summary data-i18n="faq_title">常见问题</summary>
   <div class="faq-list">
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q1">这个下载器会处理和保留哪些数据？</summary>
       <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
       <p data-i18n-html="faq_a6">解析后点<strong>生成分享页</strong>，得到一条链接。想让好友收到<strong>带封面和标题的卡片</strong>，要在<strong>微信里打开这个页面</strong>，再点右上角 <strong>···</strong> →「发送给朋友」——这样转发出去才是卡片。如果只是复制链接、粘贴到聊天窗口，微信不会把网址展开成卡片，会显示成一条普通网址（这是微信的机制，任何网站都一样）。两种方式好友点开都能<strong>直接观看无水印原片</strong>，无需安装抖音 App、不用复制口令跳转。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q7">分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？</summary>
       <p data-i18n-html="faq_a7">不需要装任何 App，用微信内置浏览器点开就能看。分享页<strong>匿名有效期 7 天、登录后 30 天</strong>；页面只保存作品的标题封面等信息，<strong>不存储任何视频文件</strong>，版权仍归原作者。你也可以生成<strong>分享海报</strong>（带二维码），长按保存后发朋友圈。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q2">需要登录或安装软件吗？</summary>
       <p data-i18n="faq_a2">无需登录源平台账号，也无需安装任何 App 或浏览器插件。本站账号为可选；基础解析可直接使用，API 控制台等账号功能需要登录。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q3">解析得到的视频有水印吗？</summary>
       <p data-i18n-html="faq_a3">没有水印。下载的是<strong>无水印原片</strong>，也不会加入本站自己的二次水印。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q4">支持图集（图片作品）下载吗？</summary>
       <p data-i18n="faq_a4">支持。图集作品会自动识别，可逐张下载原图，也可批量解析下载。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q5">有没有 API 可以批量调用？</summary>
       <p data-i18n="faq_a5">有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。</p>
     </details>
-    <details class="faq-item reveal">
+    <details class="faq-item">
       <summary data-i18n="faq_q8">怎么提取视频文案（语音转文字）？</summary>
       <p data-i18n-html="faq_a8">解析后打开结果卡上的<strong>「获取文案（语音转文字）」</strong>开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。详见<a href="/transcript">文案提取</a>。</p>
     </details>
   </div>
-</section>
+  </details>
+</div>
 </main>
 
 <footer>
-  <span data-i18n="footer1">仅供个人学习、收藏及获得授权的素材备份使用 · 内容版权归原作者所有</span><br>
-  <span data-i18n="footer2">未经授权请勿二次发布或商用 · 本站不保存视频或图片文件；站内账号可选</span>
+  <span data-i18n="footer1">仅供个人学习与授权备份 · 内容版权归原作者</span><br>
+  <span data-i18n="footer2">本站不保存视频或图片文件</span>
 </footer>
 
 </div>
@@ -1100,34 +751,18 @@ const IS_WECHAT_UA = /micromessenger/i.test(navigator.userAgent);
 const I18N = {
   en: {
     nav_api:"API", nav_login:"Sign in", nav_console:"API Console", nav_logout:"Log out",
-    brand_name:"Multi-platform downloader", brand_tagline:"50+ platforms · Open source · No ads",
-    hero_kicker:"50+ content platforms · Video · Gallery",
-    hero_h1:'<span class="hero-line"><span>Paste a share link.</span></span><span class="hero-line hl"><span>Get the watermark-free original.</span></span>',
-    hero_sub:"Works with public posts from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok, YouTube and more.",
-    hero_share:"No source-platform sign-in · No media-file storage · <strong>Share pages for Douyin posts</strong>",
-    composer_label:"Platform share link", composer_status:"Supports 50+ platforms",
+    brand_name:"Multi-platform downloader",
+    hero_h1:"Get the watermark-free original",
+    hero_sub:"Supports Douyin, Xiaohongshu, Kuaishou, Bilibili and 50+ platforms.",
+    composer_label:"Share link", composer_status:"Supports 50+ platforms",
     composer_ready:"Supported platform link detected", composer_loading:"Fetching post details",
-    ph_input:"Paste video / gallery share text or a link\nSupports Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo and 50+ platforms",
+    ph_input:"Paste links or share text\nMultiple links are supported",
     btn_paste:"Paste", btn_upload:"Upload file", btn_parse:"Start parsing", btn_loading:"Parsing…",
-    mode_video:"Video", mode_album:"Gallery", mode_batch:"Batch",
-    hint:"Paste multiple supported-platform links at once — they will be split and parsed in batch, and results can be exported to Excel.",
-    platform_title:"Supported platforms", platform_intro:"One input for videos, galleries and public post links. Available content depends on the source platform and post type.",
+    platform_title:"Supported platforms", platform_intro:"Available content depends on the source platform and post type.",
     platform_list_label:"Supported platform list", platform_douyin:"Douyin", platform_xiaohongshu:"Xiaohongshu",
     platform_kuaishou:"Kuaishou", platform_bilibili:"Bilibili", platform_pinduoduo:"Pinduoduo Video",
-    platform_toutiao:"Toutiao", platform_shipinhao:"WeChat Channels", platform_weibo:"Weibo",
-    platform_short:"Short video · Gallery", platform_social:"Post · Video", platform_long:"Long video · Post",
-    platform_ecommerce:"Commerce video", platform_social_video:"Social video", platform_news:"News video",
-    platform_short_video:"Short video", platform_long_video:"Long video", platform_more:"More platforms",
-    platform_growing:"More being added", platform_foot:"One place for 50+ content platforms, so you do not need a different tool for every platform.",
+    platform_toutiao:"Toutiao", platform_shipinhao:"WeChat Channels", platform_weibo:"Weibo", platform_more:"More platforms",
     err_link:"Paste a public post link from a supported platform.",
-    story_label:"From share link to watermark-free original",
-    story_title:'One paste.<strong>Three steps.</strong>', story_progress_label:"Parsing flow steps",
-    story_goto1:"View paste-link step", story_goto2:"View post-details step", story_goto3:"View download and sharing step",
-    story_h1:"Paste it as-is.", story_p1:"Full share text works too, and multiple links are split automatically.",
-    story_h2:"Post details, organized.", story_p2:"Title, creator and cover are organized automatically, with video or gallery detected for you.",
-    story_h3:"Original ready. Use it your way.", story_p3:"Preview the original online; Douyin posts can also become share pages for friends.",
-    story_visual_link:"Share text · Platform link detected", story_visual_ready:"Watermark-free original ready",
-    story_visual_meta:"Video · 00:27 · MP4", story_visual_download:"Download", story_visual_share:"Share",
     quota_login_cta:"Sign in for 10/day →",
     reg_tip:"Create an account: 10 free parses/day, 30-day share pages",
     reg_tip_cta:"Sign up free",
@@ -1136,16 +771,7 @@ const I18N = {
     ts_ing:"Extracting… usually 1-3 minutes",
     ts_slow:"Still extracting — reopen the toggle later to see the result",
     ts_copy:"Copy all", ts_audio:"Listen to audio ↗",
-    trust_title:"Simple, private, reliable",
-    tc1_h:"Open and restrained", tc1_p:"The front end is auditable and we <strong>do not store video or image files</strong>; media routes only stream bytes.",
-    tc2_h:"More reliable parsing", tc2_p:"Temporary route issues are retried automatically for smoother previews and downloads.",
-    tc3_h:"Clean and ad-free", tc3_p:"No popups or pre-roll ads, and no second watermark added to your downloads.",
-    tc4_h:"Easy to share", tc4_p:"Douyin posts can become a share page or poster so friends can watch without installing the app.",
-    api_tag:"Developer API", api_h:"Need bulk / automation? Use the open API",
-    api_p:"Sign in, create an API key in the console, and submit supported-platform links in bulk via the async API — title, author, video URL and gallery images in one call. Billed per request, reliable, built for research, backup and integration.",
-    api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance visible",
-    api_cta1:"View API docs", api_cta2:"Open API console",
-    faq_title:"FAQ", faq_lead:"Paste a public post link from a supported platform to preview its video or gallery. Douyin posts can also become a WeChat-friendly share page. No source-platform sign-in is required; basic parsing needs no site account or app installation.",
+    faq_title:"FAQ",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
     faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; media routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. <strong>Public post links are sent to a configured third-party content service</strong>; missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
@@ -1154,8 +780,8 @@ const I18N = {
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
     faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
     faq_q8:"How do I extract the transcript of a Douyin video (speech to text)?", faq_a8:"After parsing, switch on <strong>“Transcript (speech to text)”</strong> on the result card — extraction usually takes 1–3 minutes, and you can copy the full text or listen to the audio. Sign-in is required; signed-in users get a free daily quota, and each video is extracted only once site-wide (cached results cost nothing). See the <a href=\"/transcript\">transcript page</a>.",
-    footer1:"For personal, authorized backup use only · All content copyright belongs to its original creators",
-    footer2:"Do not re-publish or use commercially without permission · No video or image files are stored; a site account is optional",
+    footer1:"For personal use and authorized backups · Copyright belongs to creators",
+    footer2:"No video or image files stored",
     auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
     auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
     quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
@@ -1235,127 +861,17 @@ $('#themeBtn').onclick = () => {
   } else applyThemeToggle();
 };
 
-/* ---------- 首屏入场：默认内容可见，Web Animations 仅渐进增强 ---------- */
-function playHeroEntrance(){
-  if (motionQuery.matches || !Element.prototype.animate) return;
-  const items = [
-    [document.querySelector('nav'), [{opacity:0,transform:'translateY(-12px)'},{opacity:1,transform:'none'}], 0, 500],
-    [$('.hero-kicker'), [{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}], 70, 520],
-    ...[...document.querySelectorAll('.hero-line>span')].map((el,i) => [el,[{opacity:.15,transform:'translateY(108%) rotateX(-7deg)'},{opacity:1,transform:'none'}],120+i*70,720]),
-    [$('.hero>p:not(.hero-share)'), [{opacity:0,transform:'translateY(12px)'},{opacity:1,transform:'none'}], 260, 520],
-    [$('.hero-share'), [{opacity:0},{opacity:1}], 330, 460],
-    [composer, [{opacity:0,transform:'translateY(24px) scale(.985)',filter:'blur(4px)'},{opacity:1,transform:'none',filter:'none'}], 360, 720],
-    [$('.platform-support'), [{opacity:0,transform:'translateY(18px)'},{opacity:1,transform:'none'}], 470, 650],
-  ];
-  items.forEach(([el,frames,delay,duration]) => el?.animate(frames,{duration,delay,easing:'cubic-bezier(.16,1,.3,1)',fill:'backwards'}));
+/* ---------- 滚动时更新导航背景 ---------- */
+const pageNav = document.querySelector('nav');
+let navFrame = 0;
+function updateNav(){
+  navFrame = 0;
+  pageNav.classList.toggle('is-scrolled', scrollY > 12);
 }
-playHeroEntrance();
-
-/* ---------- 下半页分组入场：只观察父级一次，不把整页变成重复 fade-up ---------- */
-function setupSectionMotion(){
-  if (motionQuery.matches || !('IntersectionObserver' in window) || !Element.prototype.animate) return;
-  const groups = [
-    {trigger:$('.trust'), items:[...document.querySelectorAll('.trust-title,.trust-card')], axis:'y'},
-    {trigger:$('.api-band'), items:[...document.querySelectorAll('.api-band-text,.api-code')], axis:'x'},
-    {trigger:$('.faq'), items:[...document.querySelectorAll('.faq-title,.faq-lead')], axis:'y'},
-  ];
-  const observer = new IntersectionObserver(entries => {
-    entries.forEach(entry => {
-      if (!entry.isIntersecting) return;
-      const group = groups.find(g => g.trigger === entry.target); if (!group) return;
-      group.items.forEach((el,i) => {
-        const offset = group.axis === 'x' ? (i ? '16px' : '-16px') : '16px';
-        const transform = group.axis === 'x' ? `translateX(${offset})` : `translateY(${offset})`;
-        el.animate([{opacity:0,transform},{opacity:1,transform:'none'}],{
-          duration:500, delay:Math.min(i*48,180), easing:'cubic-bezier(.16,1,.3,1)', fill:'backwards'
-        });
-      });
-      observer.unobserve(entry.target);
-    });
-  },{threshold:.12});
-  groups.forEach(group => group.trigger && observer.observe(group.trigger));
-}
-setupSectionMotion();
-
-/* ---------- 粘性滚动舞台：原生滚动，不拦截滚轮或触摸 ---------- */
-const story = $('#motionStory'), storyStage = $('#storyStage');
-const storyDesktop = matchMedia('(min-width:721px) and (min-height:680px)');
-const storyButtons = [...document.querySelectorAll('[data-story-goto]')];
-let storyVisible = false, pageMotionFrame = 0, storyTravel = 1, activeStoryStep = -1, lastStoryTurn = '';
-function setStoryStep(step){
-  if (activeStoryStep === step) return;
-  activeStoryStep = step;
-  storyStage.dataset.storyStep = String(step);
-  storyButtons.forEach((btn,i) => i === step ? btn.setAttribute('aria-current','step') : btn.removeAttribute('aria-current'));
-}
-function measureStory(){ storyTravel = Math.max(1,story.offsetHeight - storyStage.offsetHeight); }
-function updateStoryMotion(){
-  if (!story.classList.contains('story-enhanced')) return;
-  const rect = story.getBoundingClientRect();
-  const progress = Math.max(0,Math.min(1,(88 - rect.top) / storyTravel));
-  const step = progress < .3 ? 0 : progress < .68 ? 1 : 2;
-  const turn = `${(-28 + progress * 150).toFixed(1)}deg`;
-  if (turn !== lastStoryTurn){
-    lastStoryTurn = turn;
-    storyStage.style.setProperty('--story-turn',turn);
-  }
-  setStoryStep(step);
-}
-function updatePageMotion(){
-  pageMotionFrame = 0;
-  document.querySelector('nav')?.classList.toggle('is-scrolled',scrollY > 12);
-  if (storyVisible) updateStoryMotion();
-}
-function schedulePageMotion(){
-  if (!pageMotionFrame) pageMotionFrame = requestAnimationFrame(updatePageMotion);
-}
-function syncStoryMode(){
-  const enhanced = storyDesktop.matches && !motionQuery.matches;
-  story.classList.toggle('story-enhanced',enhanced);
-  if (enhanced){ measureStory(); updateStoryMotion(); } else setStoryStep(0);
-}
-if ('IntersectionObserver' in window){
-  new IntersectionObserver(entries => {
-    storyVisible = entries[0]?.isIntersecting || false;
-    if (storyVisible) schedulePageMotion();
-  },{rootMargin:'120px 0px'}).observe(story);
-} else storyVisible = true;
-storyButtons.forEach((btn,i) => btn.onclick = () => {
-  const behavior = motionQuery.matches ? 'auto' : 'smooth';
-  if (story.classList.contains('story-enhanced')){
-    const top = scrollY + story.getBoundingClientRect().top;
-    scrollTo({top:top + storyTravel * (i / 2),behavior});
-  } else {
-    setStoryStep(i);
-    document.querySelector(`[data-story-copy="${i}"]`)?.scrollIntoView({behavior,block:'center'});
-  }
-});
-window.addEventListener('scroll',schedulePageMotion,{passive:true});
-window.addEventListener('resize',() => { measureStory(); schedulePageMotion(); },{passive:true});
-const onStoryModeChange = () => syncStoryMode();
-const onMotionPreferenceChange = () => {
-  if (motionQuery.matches) document.getAnimations().forEach(animation => animation.cancel());
-  syncStoryMode(); schedulePageMotion();
-};
-if (storyDesktop.addEventListener) storyDesktop.addEventListener('change',onStoryModeChange);
-else storyDesktop.addListener?.(onStoryModeChange);
-if (motionQuery.addEventListener) motionQuery.addEventListener('change',onMotionPreferenceChange);
-else motionQuery.addListener?.(onMotionPreferenceChange);
-syncStoryMode(); schedulePageMotion();
-
-/* ---------- 解析器局部指针光：仅精细指针启用 ---------- */
-if (matchMedia('(pointer:fine)').matches){
-  let pointerFrame = 0, pointerX = 0, pointerY = 0;
-  composer.addEventListener('pointerenter',() => { if (!motionQuery.matches) composer.classList.add('pointer-active'); });
-  composer.addEventListener('pointermove',e => {
-    if (motionQuery.matches) return;
-    const rect = composer.getBoundingClientRect(); pointerX = e.clientX - rect.left; pointerY = e.clientY - rect.top;
-    if (!pointerFrame) pointerFrame = requestAnimationFrame(() => {
-      pointerFrame = 0; composer.style.setProperty('--pointer-x',`${pointerX}px`); composer.style.setProperty('--pointer-y',`${pointerY}px`);
-    });
-  });
-  composer.addEventListener('pointerleave',() => composer.classList.remove('pointer-active'));
-}
+window.addEventListener('scroll', () => {
+  if (!navFrame) navFrame = requestAnimationFrame(updateNav);
+}, {passive:true});
+updateNav();
 
 /* ---------- 30 天随机第一方匿名 ID（用于免费额度与防滥用）---------- */
 const ANON_ID_KEY = 'dyanon';
