@@ -16,20 +16,32 @@ function pendingPlayResult() {
   };
 }
 
+function resolvedPlayResult() {
+  return {
+    then(fn) { fn(); return {catch() {}}; },
+    catch() {},
+  };
+}
+
 class FakeVideo {
-  constructor() {
+  constructor(playResult) {
     this.listeners = new Map();
+    this.dataset = {};
+    this.style = {setProperty() {}};
     this.currentTime = 0;
     this.paused = true;
     this.readyState = 0;
     this.networkState = 2;
     this.error = null;
     this.src = '';
+    this.videoWidth = 0;
+    this.videoHeight = 0;
+    this.playResult = playResult || pendingPlayResult();
   }
 
   setAttribute() {}
   load() {}
-  play() { return pendingPlayResult(); }
+  play() { return this.playResult; }
   addEventListener(name, fn) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
     this.listeners.get(name).add(fn);
@@ -42,7 +54,7 @@ class FakeVideo {
   }
 }
 
-function createHarness() {
+function createHarness(options = {}) {
   const timers = [];
   const videos = [];
   const tracks = [];
@@ -51,6 +63,8 @@ function createHarness() {
   const elements = {
     playerBox: {
       children: [],
+      style: {values: {}, setProperty(name, value) { this.values[name] = value; }},
+      classList: {toggle() {}},
       appendChild(node) {
         this.children.push(node);
         if (node.id) elements[node.id] = node;
@@ -77,7 +91,7 @@ function createHarness() {
       getElementById(id) { return elements[id] || null; },
       createElement(name) {
         assert.equal(name, 'video');
-        const video = new FakeVideo();
+        const video = new FakeVideo(options.playResult);
         videos.push(video);
         return video;
       },
@@ -94,7 +108,10 @@ function createHarness() {
       if (timer) timer.cancelled = true;
     },
     Date,
+    window: {innerWidth: 390, innerHeight: 844},
   };
+  if (options.video) context.S.data.video = options.video;
+  if (options.priority) context.S.data.play_priority = options.priority;
   vm.runInNewContext(playbackSource, context, {filename: 'static/share.html'});
 
   function runNextTimer() {
@@ -162,15 +179,61 @@ test('repeated start reuses one player and automatic failure never opens a mask'
   assert.match(h.toasts[0], /画面已播放可继续观看/);
 });
 
-test('height-capped players keep their aspect ratio and stay centered', () => {
+test('loaded metadata changes the player box to the real landscape ratio', () => {
+  const h = createHarness();
+  h.startPlay();
+  const video = h.videos[0];
+  video.videoWidth = 1920;
+  video.videoHeight = 1080;
+  video.dispatch('loadedmetadata');
+  assert.equal(h.elements.playerBox.style.values['--video-ratio'], '1920 / 1080');
+  assert.match(h.elements.playerBox.style.values['--player-width'], /px$/);
+});
+
+test('a resolved play promise alone does not report playback success', () => {
+  const h = createHarness({playResult: resolvedPlayResult()});
+  h.startPlay();
+  const video = h.videos[0];
+  assert.equal(h.tracks.filter(item => item.kind === 'play_ok').length, 0);
+  video.currentTime = 0.1;
+  video.paused = false;
+  video.readyState = 2;
+  video.dispatch('playing');
+  assert.equal(h.tracks.filter(item => item.kind === 'play_ok').length, 1);
+});
+
+test('players use metadata-driven aspect ratios and stay centered', () => {
   const portrait = html.match(/\.player\{([^}]*)\}/)?.[1] || '';
   const landscape = html.match(/\.player\.wide\{([^}]*)\}/)?.[1] || '';
 
-  assert.match(portrait, /width:100%/);
-  assert.match(portrait, /max-width:39\.375vh/);   // 70vh × 9/16
+  assert.match(portrait, /width:min\(100%,var\(--player-width,39\.375vh\)\)/);
+  assert.match(portrait, /aspect-ratio:var\(--video-ratio,9\/16\)/);
   assert.match(portrait, /margin-inline:auto/);
-  assert.doesNotMatch(portrait, /max-height/);
-  assert.match(landscape, /max-width:124\.444vh/); // 70vh × 16/9
-  assert.match(html, /\.player\{max-width:39\.375dvh\}/);
-  assert.match(html, /\.player\.wide\{max-width:124\.444dvh\}/);
+  assert.match(landscape, /aspect-ratio:var\(--video-ratio,16\/9\)/);
+  assert.match(html, /function syncPlayerRatio/);
+  assert.match(html, /loadedmetadata/);
+  assert.match(html, /syncPlayerRatio\(v\)/);
+  assert.doesNotMatch(portrait, /aspect-ratio:9\/16/);
+});
+
+test('share page hides interaction counts and backend provider details', () => {
+  assert.doesNotMatch(html, /function statsBlock/);
+  assert.doesNotMatch(html, /class="stats"/);
+  assert.doesNotMatch(html, /class="stat"/);
+  assert.doesNotMatch(html, /\[['"]点赞['"],/);
+  assert.doesNotMatch(html, /❤.*💬.*★/);
+  assert.doesNotMatch(html, /AnyToCopy/i);
+  assert.doesNotMatch(html, /直连优先 · 兼容线路兜底/);
+  assert.match(html, /第三方内容解析服务/);
+});
+
+
+test('neutral parser source honors direct-media priority', () => {
+  const h = createHarness({video: {
+    source: 'parser', url: 'https://v3.douyinvod.com/main.mp4',
+    direct_url: 'https://v3.douyinvod.com/main.mp4',
+    proxy_url: '/api/media/video/item_123?exp=1&sig=test',
+  }, priority: ['atc', 'proxy', 'dy1', 'dy2']});
+  h.startPlay();
+  assert.equal(h.videos[0].src, 'https://v3.douyinvod.com/main.mp4');
 });

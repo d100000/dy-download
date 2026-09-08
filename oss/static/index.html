@@ -135,7 +135,7 @@ $('#langLabel').textContent=LANG==='zh'?'EN':'中';
 $('#langBtn').onclick=()=>{const to=LANG==='zh'?'en':'zh';document.cookie='lang='+to+';path=/;max-age=31536000';const u=new URL(location.href);u.searchParams.set('lang',to);location.href=u.toString()};
 const root=document.documentElement;root.dataset.theme=localStorage.getItem('theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
 $('#themeBtn').onclick=()=>{root.dataset.theme=root.dataset.theme==='light'?'dark':'light';localStorage.setItem('theme',root.dataset.theme)};
-$('#pasteBtn').onclick=async()=>{try{input.value=await navigator.clipboard.readText();input.focus()}catch{err('请手动粘贴')}};
+$('#pasteBtn').onclick=async()=>{try{if(!navigator.clipboard||typeof navigator.clipboard.readText!=='function')throw new Error();input.value=await navigator.clipboard.readText();input.focus()}catch{err('请手动粘贴')}};
 input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();parse()}});
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtN=n=>n==null?'—':(n>=10000?(n/10000).toFixed(1)+'w':n);
@@ -153,11 +153,11 @@ async function parse(){
 function downloadTarget(onError){
   const id='nativeDownloadTarget';let frame=document.getElementById(id);
   if(!frame){frame=document.createElement('iframe');frame.id=id;frame.name=id;frame.hidden=true;frame.setAttribute('aria-hidden','true');document.body.appendChild(frame)}
-  frame.onload=()=>{try{const href=frame.contentWindow?.location?.href||'';if(!href.includes('/api/video/')&&!href.includes('/api/atc/video/'))return;const text=(frame.contentDocument?.body?.textContent||'').trim();let message='';try{message=JSON.parse(text).error||''}catch{}onError?.(message||'下载未能启动，请稍后重试')}catch{}};
+  frame.onload=()=>{try{const href=frame.contentWindow?.location?.href||'';if(!href.includes('/api/video/')&&!href.includes('/api/atc/video/') && !href.includes('/api/media/video/')&&!href.includes('/api/douyin/video/'))return;const text=(frame.contentDocument?.body?.textContent||'').trim();let message='';try{message=JSON.parse(text).error||''}catch{}onError?.(message||'下载未能启动，请稍后重试')}catch{}};
   return frame.name;
 }
 function clickDownload(url,name,isolated=false,onError=null){const a=document.createElement('a');a.href=url;if(isolated)a.target=downloadTarget(onError);else a.download=name||'download';a.style.display='none';document.body.appendChild(a);a.click();a.remove()}
-function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin||!(u.pathname.startsWith('/api/video/')||u.pathname.startsWith('/api/atc/video/')))return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
+function fallbackURL(url,name){if(!url)return'';try{const u=new URL(url,location.href);if(u.origin!==location.origin||!(u.pathname.startsWith('/api/video/')||u.pathname.startsWith('/api/atc/video/') || u.pathname.startsWith('/api/media/video/')||u.pathname.startsWith('/api/douyin/video/')))return'';u.searchParams.set('dl','1');u.searchParams.set('name',name||'video.mp4');return u.pathname+u.search}catch{return''}}
 async function downloadResponseError(r){let m='';try{const d=await r.json();m=typeof d.error==='string'?d.error:''}catch{}if(m)return m;if(r.status===401||r.status===403)return'下载地址已过期，请重新解析后再试';if(r.status===429)return'下载请求过于频繁，请稍后再试';return'下载线路暂时不可用（HTTP '+r.status+'），请稍后重试'}
 async function responseBlobWithProgress(r,onProgress){const type=(r.headers.get('content-type')||'application/octet-stream').split(';',1)[0],total=Number(r.headers.get('content-length'))||0;if(!r.body||!r.body.getReader){const b=await r.blob();onProgress?.(b.size,total||b.size);return b}const reader=r.body.getReader(),chunks=[];let loaded=0;while(true){const{done,value}=await reader.read();if(done)break;chunks.push(value);loaded+=value.byteLength;onProgress?.(loaded,total)}return new Blob(chunks,{type})}
 function downloadProgress(loaded,total){return total?'下载中 '+Math.min(100,Math.round(loaded/total*100))+'%':'已下载 '+(loaded/1024/1024).toFixed(1)+' MB'}
@@ -170,15 +170,18 @@ function stats(s){if(!s)return'';return `<div class="stats">${[['❤ 点赞',s.d
 function author(d){return `<div class="author">${d.avatar?`<img src="${esc(d.avatar)}">`:''}<div class="n">${esc(d.author)||'未知作者'}</div></div>`}
 let _imgs=[],_video=null;
 function downloadVideo(btn){if(_video)dl(_video.url,_video.filename,btn,_video.download_url||_video.proxy_url,true)}
-function videoPlaySrc(v){return IS_WECHAT_UA&&v.proxy_url?v.proxy_url:(v.url||v.proxy_url||'')}
+function videoPlaySrc(v){if(!v)return'';if(IS_WECHAT_UA&&v.proxy_url)return v.proxy_url;return v.url||v.proxy_url||''}
+function imageSrc(im){return im?.proxy_url||im?.url||''}
+function imageDownloadSrc(im){return im?.download_url||im?.proxy_url||im?.url||''}
+function downloadImageAt(index,btn){const im=_imgs[Number(index)];if(im)dl(imageDownloadSrc(im),im.filename,btn)}
 function render(d){
   if(d.kind==='note'){_video=null;_imgs=d.images||[];
     result.innerHTML=`<div class="card"><div style="padding:22px 22px 0"><span class="badge">图集 · ${_imgs.length} 张 · 浏览器直连</span><div class="v-title" style="margin-top:10px">${esc(d.title)}</div>${author(d)}${stats(d.stats)}</div>
-    <div class="album-grid">${_imgs.map((im,i)=>`<figure class="album-item"><img src="${esc(im.url)}" loading="lazy"><button onclick="dl('${esc(im.url)}','${esc(im.filename)}',this)">⬇</button></figure>`).join('')}</div></div>`;
+    <div class="album-grid">${_imgs.map((im,i)=>`<figure class="album-item"><img src="${esc(imageSrc(im))}" loading="lazy"><button onclick="downloadImageAt(${i},this)">⬇</button></figure>`).join('')}</div></div>`;
   }else{_video=d.video;
     result.innerHTML=`<div class="card"><div class="card-body">
     <div class="player"><video controls playsinline webkit-playsinline x5-playsinline x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata" src="${esc(videoPlaySrc(d.video))}" ${d.cover?`poster="${esc(d.cover)}"`:''}></video></div>
-    <div class="info"><span class="badge">视频 · 无水印 · ${IS_WECHAT_UA?'微信兼容线路':'直连播放'}</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
+    <div class="info"><span class="badge">视频 · 无水印 · ${IS_WECHAT_UA?'微信内适配播放':'官方直连播放'}</span><div class="v-title">${esc(d.title)}</div>${author(d)}${stats(d.stats)}
     <div class="actions"><button class="primary" onclick="downloadVideo(this)">⬇ 下载视频</button><a class="ghost" href="${esc(d.video.proxy_url||d.video.url)}" target="_blank" rel="noopener" style="text-decoration:none">新窗口播放</a></div>
     <div class="tip">播放优先浏览器直连；下载使用本站同源流式转发，服务器不落地保存文件</div></div></div></div>`;
   }
@@ -186,6 +189,7 @@ function render(d){
 }
 window.dl=dl;
 window.downloadVideo=downloadVideo;
+window.downloadImageAt=downloadImageAt;
 </script>
 </body>
 </html>

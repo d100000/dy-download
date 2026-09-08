@@ -578,25 +578,24 @@ th.sortable:hover{color:var(--text)}
       </div>
     </div>
 
-    <!-- AnyToCopy 主解析 API -->
+    <!-- 视频解析服务 -->
     <div class="view" id="v-atc" style="display:none">
     <div class="panel">
       <div class="panel-head">
-        <div><h3>AnyToCopy 视频解析 API</h3>
+        <div><h3>视频解析 API</h3>
           <div class="desc">网页、批量 API 和分享页统一通过此接口获取视频/图集。普通解析默认不请求语音文案；只有用户主动点击文案提取时才单独提交。</div></div>
         <span id="atcState" class="badge idle">未启用</span>
       </div>
       <div class="panel-body">
         <div class="setting-row">
-          <div class="label"><b>视频解析服务</b><p>这是主解析开关；关闭后新的网页解析、批量 API 与分享页任务都会停止。</p></div>
+          <div class="label"><b>视频解析服务</b><p>优先通过此服务获取作品信息；抖音缺失的视频与作者信息由服务器自动补全。关闭后抖音仍可尝试补充线路。</p></div>
           <label class="switch ctl"><input type="checkbox" id="atc_enabled"><span class="slider"></span></label>
         </div>
         <div class="setting-row" style="align-items:flex-start">
           <div class="label" style="flex:1"><b>API 密钥</b>
-            <p>在 anytocopy.com「API Key 管理」创建（仅专业版会员）。Secret 保存后打码显示，留空表示不修改。</p>
+            <p>填写已开通的视频解析服务凭据。Secret 保存后打码显示，留空表示不修改。</p>
             <input class="ctl" id="atc_key" type="text" style="width:100%;margin-top:8px" placeholder="API Key（ak_…）">
             <input class="ctl" id="atc_secret" type="password" style="width:100%;margin-top:8px" placeholder="API Secret（留空不修改）" autocomplete="new-password">
-            <input class="ctl" id="atc_base" type="text" style="width:100%;margin-top:8px" value="https://api.anytocopy.com/vip/open-api/v1" readonly aria-readonly="true" title="固定使用 AnyToCopy 官方接口">
           </div>
         </div>
         <div class="setting-row">
@@ -624,7 +623,7 @@ th.sortable:hover{color:var(--text)}
     <div class="panel">
       <div class="panel-head">
         <div><h3>分享页播放优先级</h3>
-          <div class="desc">拖动排序，保存即时生效。新解析优先使用 ATC 地址与同源代理；dy1/dy2 仅为存量分享页兼容线路。</div></div>
+          <div class="desc">拖动排序，保存即时生效。新解析优先使用原片地址与同源代理；dy1/dy2 仅为存量分享页兼容线路。</div></div>
       </div>
       <div class="panel-body">
         <div id="prioList" class="prio-list"></div>
@@ -716,10 +715,10 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   else if(v==='proxies') load();
 });
 
-/* ---------------- AnyToCopy 主解析 API ---------------- */
+/* ---------------- 视频解析服务 ---------------- */
 const PRIO_META = {
-  atc:  ['AnyToCopy 直连', 'API 返回的无水印媒体地址，默认首选'],
-  proxy:['服务器同源流', '受签名保护的 /api/atc/video 播放与下载兜底'],
+  atc:  ['原片直连', 'API 返回的无水印媒体地址，默认首选'],
+  proxy:['服务器同源流', '受签名保护的同源播放与下载兜底'],
   dy1:  ['旧数据 · 抖音主域名', '仅用于兼容升级前已生成的分享页'],
   dy2:  ['旧数据 · 抖音备用域名', '仅用于兼容升级前已生成的分享页'],
 };
@@ -766,12 +765,11 @@ function renderAtc(d){
   const on = d.master_on && d.configured;
   const el = $('#atcState');
   el.className = 'badge ' + (on ? 'ok' : 'idle');
-  el.textContent = on ? '主解析正常' : (d.master_on ? '密钥缺失' : '解析已停用');
+  el.textContent = on ? '已启用' : (d.master_on ? '密钥缺失' : '解析已停用');
   $('#atc_enabled').checked = !!d.master_on;
   $('#atc_transcript').checked = !!d.transcript_enabled;
   if (document.activeElement !== $('#atc_key')) $('#atc_key').value = d.api_key || '';
   $('#atc_secret').placeholder = d.api_secret_masked ? `已保存（${d.api_secret_masked}），留空不修改` : 'API Secret';
-  if (document.activeElement !== $('#atc_base')) $('#atc_base').value = d.base_url || '';
   $('#atc_daily').value = d.transcript_daily ?? 5;
   $('#atc_ttl').value = d.url_ttl ?? 7200;
   const parts = [`队列 ${d.queue_pending}`, `今日 提交${d.today_total}/成功${d.today_done}/失败${d.today_failed}`];
@@ -787,7 +785,7 @@ function renderAtc(d){
 }
 
 async function loadAtc(){
-  let d; try { d = await api('/api/admin/atc'); } catch { return; }
+  let d; try { d = await api('/api/admin/parser'); } catch { return; }
   renderAtc(d);
   let testing = false;
   try { testing = JSON.parse(d.test||'{}').state === 'submitted'; } catch {}
@@ -799,7 +797,6 @@ $('#atcSave').onclick = async e => {
   const btn = e.currentTarget, old = btn.textContent; btn.disabled = true; btn.textContent = '保存中…';
   const body = {
     api_key: $('#atc_key').value.trim(),
-    base_url: $('#atc_base').value.trim(),
     enabled: $('#atc_enabled').checked,
     transcript_enabled: $('#atc_transcript').checked,
     transcript_daily: +$('#atc_daily').value,
@@ -807,7 +804,7 @@ $('#atcSave').onclick = async e => {
   };
   const sec = $('#atc_secret').value.trim();
   if (sec) body.api_secret = sec;
-  try { renderAtc(await api('/api/admin/atc', {method:'POST', body:JSON.stringify(body)}));
+  try { renderAtc(await api('/api/admin/parser', {method:'POST', body:JSON.stringify(body)}));
     $('#atc_secret').value = ''; toast('已保存');
   } catch(err){ toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = old; }
@@ -815,14 +812,14 @@ $('#atcSave').onclick = async e => {
 $('#atcRefresh').onclick = loadAtc;
 $('#atcTest').onclick = async e => {
   const btn = e.currentTarget, old = btn.textContent; btn.disabled = true; btn.textContent = '提交中…';
-  try { const r = await api('/api/admin/atc/test', {method:'POST', body:'{}'});
+  try { const r = await api('/api/admin/parser/test', {method:'POST', body:'{}'});
     toast(`测试任务已提交（${r.ms}ms），结果异步到`); loadAtc();
   } catch(err){ toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = old; }
 };
 $('#prioSave').onclick = async e => {
   const btn = e.currentTarget, old = btn.textContent; btn.disabled = true;
-  try { await api('/api/admin/atc', {method:'POST', body:JSON.stringify({play_priority:_prio})});
+  try { await api('/api/admin/parser', {method:'POST', body:JSON.stringify({play_priority:_prio})});
     toast('播放优先级已保存');
   } catch(err){ toast(err.message, true); }
   finally { btn.disabled = false; btn.textContent = old; }

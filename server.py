@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""多平台无水印下载器 · Web 服务版（AnyToCopy 统一解析 + 管理后台）
+"""多平台无水印下载器 · Web 服务版（抖音官方解析 + 兼容平台解析）
 
-无需登录源平台账号或客户端签名。网页、开放 API 与抖音分享页 worker 统一通过 AnyToCopy
-提取作品元数据和无水印媒体地址；普通解析默认不请求语音文案。视频可浏览器直连，
-也可通过受签名保护且支持 Range 的同源流播放/下载，服务器不落地媒体文件。
+抖音作品链接通过官方网页/公开接口获取元数据和短时签名媒体地址；其他平台继续
+使用配置的兼容解析服务。服务端只保留必要的短时缓存与分享快照，不落地媒体文件。
+普通解析默认不请求语音文案。视频可浏览器直连，也可通过受签名保护且支持 Range
+的同源流播放/下载。
 
 反封锁能力：
-  · 代理 IP 池（http/https/socks5），抖音媒体与旧兼容线路按策略轮换代理
+  · 代理 IP 池（http/https/socks5），统一解析链路按策略轮换代理
   · 失败自动转移到下一个代理 + 失败计数退避
   · 移动端 UA 池轮换 + Referer 伪装
   · 管理后台（密码鉴权）增删/启停/测试代理、查看出口 IP 与统计
@@ -15,22 +16,29 @@
 环境变量:  ADMIN_PASSWORD  管理后台密码（默认 douyin-admin，生产务必修改）
 """
 
+import base64
+from contextlib import contextmanager
 import gzip
 import hashlib
 import hmac
 import ipaddress
 import io
 import json
+import math
 import os
 import platform
 import queue
 import random
 import re
 import secrets
+import signal
 import shutil
+import socket
 import sqlite3
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -42,13 +50,13 @@ from urllib import request as urlreq
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response, StreamingResponse)
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------- 常量与存储
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.21.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -103,7 +111,22 @@ def _load_app_secret() -> bytes:
 
 APP_SECRET = _load_app_secret()
 
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "douyin-admin")
+_admin_password_env = os.environ.get("ADMIN_PASSWORD")
+_require_admin_password = os.environ.get(
+    "REQUIRE_ADMIN_PASSWORD", "").lower() in ("1", "true", "yes", "on")
+if _admin_password_env is None:
+    if _require_admin_password:
+        raise RuntimeError("ADMIN_PASSWORD 未设置；当前部署禁止使用默认管理密码")
+    ADMIN_PASSWORD = "douyin-admin"
+else:
+    # 显式传入空值时必须拒绝启动；否则 compare_digest('', '') 会让后台
+    # 允许空密码登录。默认值仅用于本地开发，生产环境仍应显式覆盖。
+    if not _admin_password_env.strip():
+        raise RuntimeError("ADMIN_PASSWORD 不能为空；请设置强密码后再启动")
+    ADMIN_PASSWORD = _admin_password_env
+if (_require_admin_password
+        and (ADMIN_PASSWORD == "douyin-admin" or len(ADMIN_PASSWORD) < 12)):
+    raise RuntimeError("ADMIN_PASSWORD 至少需要 12 位，且不能使用默认密码")
 if ADMIN_PASSWORD == "douyin-admin":
     import sys as _sys
     print("⚠️  警告：正在使用默认管理员密码，请设置环境变量 ADMIN_PASSWORD 后再对外部署！",
@@ -126,6 +149,10 @@ def _clamped_env_int(name: str, default: int,
 MEDIA_TOKEN_TTL = max(300, min(86400, int(os.environ.get("MEDIA_TOKEN_TTL", "43200"))))
 MEDIA_REQUESTS_PER_MIN = max(10, int(os.environ.get("MEDIA_REQUESTS_PER_MIN", "120")))
 MEDIA_MAX_CONCURRENT = max(1, int(os.environ.get("MEDIA_MAX_CONCURRENT", "6")))
+IMAGE_REQUESTS_PER_MIN = _clamped_env_int(
+    "IMAGE_REQUESTS_PER_MIN", 240, MEDIA_REQUESTS_PER_MIN, 1000)
+IMAGE_MAX_BYTES = _clamped_env_int(
+    "IMAGE_MAX_BYTES", 50 * 1024 * 1024, 1024 * 1024, 100 * 1024 * 1024)
 MEDIA_RESUME_MAX_ATTEMPTS = _clamped_env_int(
     "MEDIA_RESUME_MAX_ATTEMPTS", 64, 1, 256)
 MEDIA_RESUME_MAX_SECONDS = _clamped_env_int(
@@ -139,6 +166,11 @@ API_JOB_WORKERS = max(1, min(8, int(os.environ.get("API_JOB_WORKERS", "2"))))
 QUOTA_RESERVATION_TTL = max(300, int(os.environ.get("QUOTA_RESERVATION_TTL", "3600")))
 ASYNC_SHARE_BODY_MAX = _clamped_env_int(
     "ASYNC_SHARE_BODY_MAX", 8192, 1024, 65536)
+PARSE_TEXT_MAX = _clamped_env_int("PARSE_TEXT_MAX", 8192, 1024, 65536)
+BATCH_TEXT_MAX = _clamped_env_int("BATCH_TEXT_MAX", 65536, 4096, 262144)
+EXPORT_ITEMS_MAX = _clamped_env_int("EXPORT_ITEMS_MAX", 100, 1, 500)
+API_JOB_BODY_MAX = _clamped_env_int("API_JOB_BODY_MAX", 131072, 8192, 1048576)
+EXPORT_BODY_MAX = _clamped_env_int("EXPORT_BODY_MAX", 2097152, 65536, 8388608)
 
 # ---------------------------------------------------------------- SQLite 数据层
 
@@ -168,7 +200,8 @@ CREATE TABLE IF NOT EXISTS page_views(
 CREATE INDEX IF NOT EXISTS idx_pv_ts ON page_views(ts);
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, pw_salt TEXT, pw_hash TEXT,
-  created_at INTEGER, last_login INTEGER, disabled INTEGER DEFAULT 0, reg_ip TEXT
+  created_at INTEGER, last_login INTEGER, disabled INTEGER DEFAULT 0, reg_ip TEXT,
+  api_trial_granted_cents INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS api_keys(
   key TEXT PRIMARY KEY, user_id INTEGER, name TEXT, created INTEGER, enabled INTEGER DEFAULT 1,
@@ -245,7 +278,7 @@ CREATE TABLE IF NOT EXISTS blocked_share_sources(
 CREATE TABLE IF NOT EXISTS share_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, sid TEXT, kind TEXT,
   ip TEXT, ua TEXT, referer TEXT, wechat INTEGER, fp TEXT,
-  source TEXT, stage TEXT, detail TEXT, ms INTEGER
+  source TEXT, stage TEXT, detail TEXT, ms INTEGER, event_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_share_ev ON share_events(ts, sid);
 CREATE INDEX IF NOT EXISTS idx_share_ev_kind ON share_events(kind, ts);
@@ -258,7 +291,7 @@ CREATE TABLE IF NOT EXISTS media_traffic(
   requests INTEGER DEFAULT 0, bytes INTEGER DEFAULT 0,
   PRIMARY KEY(day, scope)
 );
--- AnyToCopy 统一解析：结果缓存（按 item_id 全站共享，热门视频只调一次 API）
+-- 兼容平台解析：结果缓存（按 item_id 全站共享，热门视频只调一次 API）
 CREATE TABLE IF NOT EXISTS atc_cache(
   item_id TEXT PRIMARY KEY,
   work_url TEXT,
@@ -274,7 +307,8 @@ CREATE TABLE IF NOT EXISTS atc_jobs(
   purpose TEXT,
   task_id TEXT,
   status TEXT DEFAULT 'pending',
-  error TEXT, created INTEGER, updated INTEGER
+  error TEXT, created INTEGER, updated INTEGER,
+  lease_owner TEXT, lease_until INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_atc_jobs_status ON atc_jobs(status, id);
 """
@@ -395,7 +429,8 @@ with _db_lock:
 
     _ensure_columns("share_events", (
         ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER"),
-        ("next_src", "TEXT")))   # 该线路失败后，链上下一条将重试的线路（dy1/dy2/atc/proxy）
+        ("next_src", "TEXT"), ("event_key", "TEXT")))
+    _ensure_columns("users", (("api_trial_granted_cents", "INTEGER DEFAULT 0"),))
     _ensure_columns("api_keys", (
         ("reserved_cents", "INTEGER DEFAULT 0"), ("deleted_at", "INTEGER")))
     _ensure_columns("jobs", (
@@ -417,6 +452,8 @@ with _db_lock:
         ("assigned_origin", "TEXT"), ("updated", "INTEGER"),
         ("ready_at", "INTEGER")))
     _ensure_columns("atc_cache", (("work_url", "TEXT"),))
+    _ensure_columns("atc_jobs", (
+        ("lease_owner", "TEXT"), ("lease_until", "INTEGER")))
     _c.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idem ON jobs(key,request_id) "
         "WHERE request_id IS NOT NULL")
@@ -444,6 +481,21 @@ with _db_lock:
     _c.execute(
         "CREATE INDEX IF NOT EXISTS idx_shares_owner_parse "
         "ON shares(owner_scope,parse_status)")
+    _c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_share_events_dedupe "
+        "ON share_events(event_key) WHERE event_key IS NOT NULL")
+    _c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_atc_jobs_claim "
+        "ON atc_jobs(status,lease_until,id)")
+    # 老库中已有密钥的用户已经领取过开通余额；把这个事实固化到
+    # users，避免账本明细按保留期清理后又重新领取。
+    _c.execute(
+        "UPDATE users SET api_trial_granted_cents=? "
+        "WHERE COALESCE(api_trial_granted_cents,0)=0 AND EXISTS("
+        "SELECT 1 FROM api_keys WHERE api_keys.user_id=users.id)",
+        # 此处发生在运行时配置定义之前；只需持久化“已领取”
+        # 事实，不猜测历史赠送金额，也不受本次启动环境变量影响。
+        (1,))
     _migrate_privacy_data(_c)
     _privacy_vacuum_needed = not _c.execute(
         "SELECT 1 FROM app_settings WHERE k='privacy_v2_vacuumed'"
@@ -935,6 +987,8 @@ def verify_captcha(cid: str, x, trajectory, nonce: str, request: Request):
         x = float(x)
     except Exception:
         return False, "参数错误"
+    if not math.isfinite(x):
+        return False, "参数错误"
     if abs(x - gap_x) > 6:
         return False, "拼图未对齐，请重试"
     tr = trajectory or []
@@ -944,6 +998,10 @@ def verify_captcha(cid: str, x, trajectory, nonce: str, request: Request):
         ts = [float(p["t"]) for p in tr]
         xs = [float(p["x"]) for p in tr]
     except Exception:
+        return False, "轨迹异常"
+    if (not all(math.isfinite(value) for value in (*ts, *xs))
+            or any(ts[i + 1] < ts[i] for i in range(len(ts) - 1))
+            or any(abs(value) > 10000 for value in xs)):
         return False, "轨迹异常"
     dur = ts[-1] - ts[0]
     if dur < 260 or dur > 30000:
@@ -994,16 +1052,24 @@ def consume_pass(tok: str, request: Request) -> bool:
 # ---- 注册/登录按 IP 限频（防爆破）----
 _auth_hits: dict = {}          # ip -> [timestamps]
 _captcha_hits: dict = {}       # ip -> [timestamps]（验证码签发限频，防 CPU-DoS）
+_rate_lock = threading.RLock()
 AUTH_MAX_PER_HOUR = 20
 CAPTCHA_MAX_PER_MIN = 40
 
 
 def _rate_ok(store: dict, ip: str, window: float, cap: int) -> bool:
     now = time.time()
-    hits = [t for t in store.get(ip, []) if now - t < window]
-    hits.append(now)
-    store[ip] = hits
-    return len(hits) <= cap
+    cap = max(1, int(cap))
+    with _rate_lock:
+        hits = [t for t in store.get(ip, []) if 0 <= now - t < window]
+        if len(hits) >= cap:
+            # 被拒绝的流量不得继续扩大记录，否则限流器本身会变成
+            # 内存与 O(n) CPU 攻击面。
+            store[ip] = hits[-cap:]
+            return False
+        hits.append(now)
+        store[ip] = hits
+        return True
 
 
 def _auth_rate_ok(ip: str) -> bool:
@@ -1023,16 +1089,21 @@ _admin_fails: dict = {}           # ip -> [失败时间戳]
 
 def _admin_fail_count(ip: str) -> int:
     now = time.time()
-    fails = [t for t in _admin_fails.get(ip, []) if now - t < ADMIN_LOGIN_WINDOW]
-    if fails:
-        _admin_fails[ip] = fails
-    else:
-        _admin_fails.pop(ip, None)
-    return len(fails)
+    with _rate_lock:
+        fails = [t for t in _admin_fails.get(ip, [])
+                 if 0 <= now - t < ADMIN_LOGIN_WINDOW]
+        if fails:
+            _admin_fails[ip] = fails[-ADMIN_LOGIN_MAX_FAILS:]
+        else:
+            _admin_fails.pop(ip, None)
+        return len(fails)
 
 
 def _admin_record_fail(ip: str):
-    _admin_fails.setdefault(ip, []).append(time.time())
+    with _rate_lock:
+        fails = _admin_fails.setdefault(ip, [])
+        if len(fails) < ADMIN_LOGIN_MAX_FAILS:
+            fails.append(time.time())
 
 
 def _sweep_memory():
@@ -1047,15 +1118,23 @@ def _sweep_memory():
     for cid, v in list(_captchas.items()):
         if now - v[2] > 300:
             _captchas.pop(cid, None)
-    for store, win in ((_auth_hits, 3600), (_captcha_hits, 60), (_share_hits, 3600),
-                       (_admin_fails, ADMIN_LOGIN_WINDOW)):
-        for ip, hits in list(store.items()):
-            fresh = [t for t in hits if now - t < win]
-            if fresh:
-                store[ip] = fresh
-            else:
-                store.pop(ip, None)
+    stores = [(_auth_hits, 3600), (_captcha_hits, 60),
+              (globals().get("_share_hits", {}), 3600),
+              (globals().get("_share_event_hits", {}), 60),
+              (globals().get("_report_hits", {}), 3600),
+              (_admin_fails, ADMIN_LOGIN_WINDOW)]
+    with _rate_lock:
+        for store, win in stores:
+            for ip, hits in list(store.items()):
+                fresh = [t for t in hits if 0 <= now - t < win]
+                if fresh:
+                    store[ip] = fresh
+                else:
+                    store.pop(ip, None)
     _sweep_media_limits()
+    cleaner = globals().get("_sweep_douyin_memory")
+    if cleaner:
+        cleaner()
 
 
 _last_data_cleanup = 0.0
@@ -1815,7 +1894,9 @@ mihomo_mgr = MihomoManager()
 
 # ---------------------------------------------------------------- 应用设置 + 开放 API 计费
 
-NEW_KEY_BALANCE = int(os.environ.get("NEW_KEY_BALANCE", "100"))   # 新 Key 试用余额（分）
+NEW_KEY_BALANCE = _clamped_env_int(
+    "NEW_KEY_BALANCE", 100, 0, 1000000)   # 每个用户仅首次密钥赠送（分）
+USER_ACTIVE_KEY_LIMIT = 10
 
 
 def app_setting(key: str, default: str = "") -> str:
@@ -1842,15 +1923,36 @@ def create_api_key(user_id: Optional[int], name: str) -> dict:
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            opening_balance = NEW_KEY_BALANCE
+            if user_id is not None:
+                user = conn.execute(
+                    "SELECT api_trial_granted_cents FROM users WHERE id=? AND disabled=0",
+                    (user_id,)).fetchone()
+                if not user:
+                    raise ApiError(401, "用户不存在或已停用")
+                active = conn.execute(
+                    "SELECT COUNT(*) FROM api_keys WHERE user_id=? AND enabled=1 "
+                    "AND deleted_at IS NULL", (user_id,)).fetchone()[0]
+                if int(active or 0) >= USER_ACTIVE_KEY_LIMIT:
+                    raise ApiError(400, f"每个账号最多 {USER_ACTIVE_KEY_LIMIT} 个密钥")
+                already_granted = int(user[0] or 0)
+                opening_balance = NEW_KEY_BALANCE if already_granted <= 0 else 0
+                if opening_balance:
+                    conn.execute(
+                        "UPDATE users SET api_trial_granted_cents="
+                        "COALESCE(api_trial_granted_cents,0)+? WHERE id=?",
+                        (opening_balance, user_id))
             conn.execute(
                 "INSERT INTO api_keys("
                 "key,user_id,name,created,enabled,balance_cents,spent_cents,calls,reserved_cents"
                 ") VALUES(?,?,?,?,1,?,0,0,0)",
-                (key, user_id, (name or "未命名")[:60], now, NEW_KEY_BALANCE))
-            conn.execute(
-                "INSERT INTO api_ledger(ts,key,event,balance_delta,reason) "
-                "VALUES(?,?,?,?,?)",
-                (now, key, "opening", NEW_KEY_BALANCE, "new_key_balance"))
+                (key, user_id, (name or "未命名")[:60], now,
+                 opening_balance))
+            if opening_balance:
+                conn.execute(
+                    "INSERT INTO api_ledger(ts,key,event,balance_delta,reason) "
+                    "VALUES(?,?,?,?,?)",
+                    (now, key, "opening", opening_balance, "new_key_balance"))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1966,7 +2068,8 @@ def _raw_open(url: str, follow: bool, headers: dict, timeout: int, proxy: Option
 
 def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
              timeout: int = 30, retry_http_statuses: tuple = (),
-             ban_on_auth_error: bool = True):
+             ban_on_auth_error: bool = True,
+             proxy_override: Optional[dict] = None):
     """出站请求核心：一律经代理，失败自动转移。
 
     所有到抖音的服务器请求都走这里 —— **绝不服务器直连**，避免暴露服务器 IP。
@@ -1977,8 +2080,13 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
     if headers:
         hdrs.update(headers)
 
-    cands = proxy_mgr.candidates()
+    # A signed Douyin CDN URL can be bound to the IP that created it.  Internal
+    # callers may pin this request to the browser's proxy; request parameters
+    # never reach this argument.
+    cands = ([proxy_override] if proxy_override else proxy_mgr.candidates())
     if not cands:                                   # 无可用代理
+        if proxy_override:
+            raise ApiError(502, "指定代理暂时不可用，请稍后重试")
         if proxy_mgr.force_proxy:
             raise ApiError(503, "没有可用代理，且已开启「禁止服务器直连」——为避免暴露服务器 IP，"
                                 "不会直连抖音。请在管理后台添加并启用代理。")
@@ -1997,6 +2105,12 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
             return r, p
         except urlerr.HTTPError as e:
+            # NoRedirect 将短链的 30x 作为 HTTPError 返回；调用方需要读取
+            # Location/正文来解析官方短链，而不是把一次正常跳转误报成失败。
+            # 这条分支仅在 follow=False 时生效，普通出站请求仍按原语义抛错。
+            if (not follow) and e.code in (301, 302, 303, 307, 308):
+                proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
+                return e, p
             if e.code in (403, 401):                # 抖音封禁该代理 IP → 落库+禁用+换代理
                 if ban_on_auth_error:
                     proxy_mgr.mark_banned(p, f"抖音返回 {e.code}，IP 被封禁")
@@ -2039,6 +2153,10 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
                     f"{_proxy_public_label(p)} → {type(e).__name__}: "
                     f"{_redact_proxy_error(e)}")
 
+    # Pinned requests must not silently fall back to the server's public IP;
+    # the caller will refresh the signed URL and choose another proxy.
+    if proxy_override:
+        raise ApiError(502, "指定代理暂时不可用，请稍后重试")
     # 所有代理都连不通
     if proxy_mgr.force_proxy:
         raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音。"
@@ -2053,15 +2171,29 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
 app = FastAPI(title="多平台无水印下载器", version=APP_VERSION)
 
 
-class _AsyncShareBodyLimitMiddleware:
-    """在 JSON/Pydantic 解析前限制异步创建接口，覆盖 Content-Length 与 chunked。"""
-    def __init__(self, app_, max_bytes: int):
+class _RequestBodyLimitMiddleware:
+    """在 JSON/Pydantic 解析前限制 API 请求体，覆盖 Content-Length 与 chunked。"""
+    def __init__(self, app_, limits: Optional[dict] = None,
+                 default_max_bytes: int = 0):
         self.app = app_
-        self.max_bytes = max_bytes
+        self.limits = dict(limits or {})
+        self.default_max_bytes = max(0, int(default_max_bytes or 0))
+
+    def _limit(self, scope) -> int:
+        path = str(scope.get("path") or "")
+        if path in self.limits:
+            return int(self.limits[path])
+        if re.fullmatch(r"/api/share/[A-Za-z0-9_-]{1,64}/event", path):
+            return 8192
+        if path.startswith("/api/"):
+            return self.default_max_bytes
+        return 0
 
     async def __call__(self, scope, receive, send):
-        if (scope.get("type") != "http" or scope.get("method") != "POST"
-                or scope.get("path") != "/api/shares"):
+        max_bytes = self._limit(scope)
+        if (scope.get("type") != "http"
+                or scope.get("method") not in ("POST", "PUT", "PATCH")
+                or max_bytes <= 0):
             await self.app(scope, receive, send)
             return
         headers = {k.lower(): v for k, v in scope.get("headers", [])}
@@ -2069,7 +2201,7 @@ class _AsyncShareBodyLimitMiddleware:
             declared = int(headers.get(b"content-length", b"0") or 0)
         except ValueError:
             declared = 0
-        if declared > self.max_bytes:
+        if declared < 0 or declared > max_bytes:
             response = JSONResponse(
                 status_code=413,
                 content={"error": "payload_too_large: 请求体超过上限"},
@@ -2088,7 +2220,7 @@ class _AsyncShareBodyLimitMiddleware:
             if message.get("type") != "http.request":
                 break
             received += len(message.get("body") or b"")
-            if received > self.max_bytes:
+            if received > max_bytes:
                 response = JSONResponse(
                     status_code=413,
                     content={"error": "payload_too_large: 请求体超过上限"},
@@ -2112,8 +2244,24 @@ class _AsyncShareBodyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
 
-app.add_middleware(_AsyncShareBodyLimitMiddleware,
-                   max_bytes=ASYNC_SHARE_BODY_MAX)
+class _AsyncShareBodyLimitMiddleware(_RequestBodyLimitMiddleware):
+    """旧测试/外部引用的兼容包装：只限制 ``POST /api/shares``。"""
+    def __init__(self, app_, max_bytes: int):
+        super().__init__(app_, {"/api/shares": max_bytes})
+
+
+app.add_middleware(
+    _RequestBodyLimitMiddleware,
+    limits={
+        "/api/shares": ASYNC_SHARE_BODY_MAX,
+        "/api/share": PARSE_TEXT_MAX + 4096,
+        "/api/parse": PARSE_TEXT_MAX + 2048,
+        "/api/parse/batch": BATCH_TEXT_MAX + 2048,
+        "/api/v1/jobs": API_JOB_BODY_MAX,
+        "/api/export/xlsx": EXPORT_BODY_MAX,
+        "/api/report": 8192,
+    },
+    default_max_bytes=1048576)
 
 
 @app.middleware("http")
@@ -2126,9 +2274,20 @@ async def _private_api_responses(request: Request, call_next):
     return response
 
 
+def _public_error(message, fallback: str = "服务暂时不可用，请稍后重试") -> str:
+    """公开错误只保留可操作说明，拦截服务商、凭据和上游连接细节。"""
+    text = str(message or "").strip()
+    if not text or re.search(
+            r"any[\W_]*(?:to|two|2)[\W_]*copy|\batc\b|https?://|"
+            r"api[_ -]?(?:key|secret)\s*[:=]|Traceback|urlopen error",
+            text, re.I):
+        return fallback
+    return text[:300]
+
+
 class ApiError(Exception):
     def __init__(self, status: int, message: str, headers: Optional[dict] = None):
-        self.status, self.message = status, message
+        self.status, self.message = status, _public_error(message)
         self.headers = headers or {}
 
 
@@ -2195,17 +2354,44 @@ def _video_proxy_url(vid: str) -> str:
     return f"/api/video/{vid}?" + urlparse.urlencode({"exp": exp, "sig": sig})
 
 
+def _douyin_video_proxy_url(item_id: str) -> str:
+    """抖音官方签名媒体的同源播放地址（按作品 ID 惰性刷新）。"""
+    exp, sig = _media_token("douyin_direct", item_id)
+    return f"/api/douyin/video/{item_id}?" + urlparse.urlencode({
+        "exp": exp, "sig": sig})
+
+
+def _douyin_video_download_url(item_id: str,
+                               filename: str = "video.mp4") -> str:
+    exp, sig = _media_token("douyin_direct", item_id)
+    return f"/api/douyin/video/{item_id}?" + urlparse.urlencode({
+        "exp": exp, "sig": sig, "dl": "1",
+        "name": filename or "video.mp4",
+    })
+
+
+def _douyin_image_proxy_url(item_id: str, index: int,
+                            filename: str = "image.jpeg",
+                            download: bool = False) -> str:
+    resource = f"{item_id}:{int(index)}"
+    exp, sig = _media_token("douyin_image", resource)
+    params = {"exp": exp, "sig": sig}
+    if download:
+        params.update({"dl": "1", "name": filename or "image.jpeg"})
+    return f"/api/douyin/image/{item_id}/{int(index)}?" + urlparse.urlencode(params)
+
+
 def _atc_video_proxy_url(item_id: str) -> str:
     """ATC 解析结果的同源播放地址；URL 只能从服务端缓存取得。"""
     exp, sig = _media_token("atc_video", item_id)
-    return f"/api/atc/video/{item_id}?" + urlparse.urlencode({
+    return f"/api/media/video/{item_id}?" + urlparse.urlencode({
         "exp": exp, "sig": sig})
 
 
 def _atc_video_download_url(item_id: str,
                             filename: str = "video.mp4") -> str:
     exp, sig = _media_token("atc_video", item_id)
-    return f"/api/atc/video/{item_id}?" + urlparse.urlencode({
+    return f"/api/media/video/{item_id}?" + urlparse.urlencode({
         "exp": exp, "sig": sig, "dl": "1",
         "name": filename or "video.mp4",
     })
@@ -2477,13 +2663,14 @@ class _MediaLease:
         self.released = False
 
 
-def _media_lease(request: Request) -> _MediaLease:
+def _media_lease(request: Request,
+                 requests_per_min: int = MEDIA_REQUESTS_PER_MIN) -> _MediaLease:
     """为一次媒体流申请 IP 级请求/并发租约；仅在流关闭时释放并发计数。"""
     key = _client_ip(request)
     now = time.time()
     with _media_limit_lock:
         hits = [t for t in _media_hits.get(key, []) if now - t < 60]
-        if len(hits) >= MEDIA_REQUESTS_PER_MIN:
+        if len(hits) >= max(1, int(requests_per_min)):
             raise ApiError(429, "媒体请求过于频繁，请稍后再试",
                            {"Retry-After": "60"})
         if _media_active.get(key, 0) >= MEDIA_MAX_CONCURRENT:
@@ -2560,8 +2747,9 @@ def _sweep_media_limits() -> None:
                 _media_hits.pop(key, None)
 
 
-# 媒体转发流量统计（后台「转发流量统计」）：统计经 /api/video 与
-# /api/atc/video 同源转发的字节；浏览器直连媒体的流量不经过本服务器。
+# 媒体转发流量统计（后台「转发流量统计」）：统计经 /api/video、
+# /api/douyin/video 与 /api/atc/video 同源转发的字节；浏览器直连媒体的流量
+# 不经过本服务器。
 # 内存累加 + 定期落库（media_traffic 按天/用途聚合，无任何个人标识）——
 # 不能在流结束回调里直接写 SQLite：finalize 可能跑在事件循环线程。
 _traffic_lock = threading.Lock()
@@ -2632,11 +2820,32 @@ def _content_disposition(name: str) -> str:
 # ---------------------------------------------------------------- 核心解析
 
 _cache: dict = {}
+_cache_lock = threading.RLock()
 _author_cache: dict = {}          # item_id -> (ts, 作者结构化详情)
 CDN_HEADERS = {
     "Referer": "https://www.douyin.com/",
     "Accept-Encoding": "identity",
 }
+
+
+def _cache_get(key: str):
+    with _cache_lock:
+        return _cache.get(key)
+
+
+def _cache_put(key: str, value: dict, now: Optional[float] = None) -> None:
+    now = time.time() if now is None else float(now)
+    with _cache_lock:
+        _cache[str(key)] = (now, value)
+        if len(_cache) <= 500:
+            return
+        for cache_key, (ts, _) in list(_cache.items()):
+            if now - ts > CACHE_TTL:
+                _cache.pop(cache_key, None)
+        if len(_cache) > 500:
+            oldest = sorted(_cache.items(), key=lambda item: item[1][0])
+            for cache_key, _ in oldest[:len(_cache) - 500]:
+                _cache.pop(cache_key, None)
 
 
 def _play_api(vid: str) -> str:
@@ -2715,8 +2924,1331 @@ ATC_PLATFORM_HOSTS = {
 }
 
 
+# ---------------------------------------------------------------- 抖音官方解析
+#
+# 抖音网页目前不再把作品数据塞进分享页 HTML，而是在浏览器运行官方网页
+# JavaScript 后请求 ``/aweme/v1/web/aweme/detail/``。该请求包含由抖音
+# webmssdk 在浏览器上下文生成的动态签名，服务端用 urllib 直接拼 URL 会得到
+# 空响应或风控页。主解析缺失信息或失败时，使用以下官方补充链路：
+#
+#   短链 → 官方作品页（受控 Chromium，捕获 detail JSON）→ 原生字段归一化
+#   → 短时 CDN 地址（仅内存缓存）→ 同源 Range 流（播放/下载兜底）
+#
+# 不依赖第三方解析 API，也不伪造 ``a_bogus``/``x-secsdk`` 签名。没有浏览器
+# 的部署仍会尝试解析官方 SSR/JSON-LD 元数据；若官方没有返回媒体地址，会给出
+# 可重试的 503，而不会把“只有标题”的结果冒充成可下载视频。
+
+DOUYIN_WORK_HOST_SUFFIXES = ("douyin.com", "iesdouyin.com")
+DOUYIN_MEDIA_CACHE_TTL = _clamped_env_int(
+    "DOUYIN_MEDIA_CACHE_TTL", 300, 30, 1800)
+DOUYIN_BROWSER_TIMEOUT = _clamped_env_int(
+    "DOUYIN_BROWSER_TIMEOUT", 35, 8, 90)
+DOUYIN_BROWSER_START_TIMEOUT = _clamped_env_int(
+    "DOUYIN_BROWSER_START_TIMEOUT", 8, 3, 30)
+_douyin_media_cache: dict = {}       # item_id -> {url, urls, fetched_at, expires_at}
+_douyin_note_media_cache: dict = {}  # item_id -> {urls, fetched_at, expires_at}
+_douyin_result_cache: dict = {}      # item_id -> (timestamp, normalized result)
+_douyin_media_lock = threading.RLock()
+_douyin_item_locks: dict = {}
+_douyin_item_locks_guard = threading.Lock()
+_douyin_browser_lock = threading.Lock()
+_douyin_browser_proxy_cache: dict = {}
+_douyin_browser_proxy_lock = threading.RLock()
+
+
+@contextmanager
+def _douyin_item_lock(item_id: str):
+    """按作品 ID 串行刷新；引用计数防止锁尚未 acquire 就被淘汰。"""
+    item_id = str(item_id)
+    with _douyin_item_locks_guard:
+        entry = _douyin_item_locks.get(item_id)
+        if entry is None:
+            entry = {"lock": threading.Lock(), "refs": 0, "last": time.time()}
+            _douyin_item_locks[item_id] = entry
+        entry["refs"] += 1
+        entry["last"] = time.time()
+        lock = entry["lock"]
+    try:
+        with lock:
+            yield
+    finally:
+        with _douyin_item_locks_guard:
+            current = _douyin_item_locks.get(item_id)
+            if current is entry:
+                entry["refs"] = max(0, int(entry["refs"]) - 1)
+                entry["last"] = time.time()
+            if len(_douyin_item_locks) > 2048:
+                idle = sorted(
+                    ((key, value) for key, value in _douyin_item_locks.items()
+                     if int(value.get("refs") or 0) == 0
+                     and not value["lock"].locked()),
+                    key=lambda pair: float(pair[1].get("last") or 0))
+                for key, _ in idle[:max(0, len(_douyin_item_locks) - 1536)]:
+                    _douyin_item_locks.pop(key, None)
+
+
+def _douyin_work_host(value: str) -> str:
+    try:
+        parsed = urlparse.urlsplit(str(value or "").strip())
+        if (parsed.scheme.lower() != "https" or parsed.username
+                or parsed.password or parsed.port not in (None, 443)):
+            return ""
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except (TypeError, ValueError):
+        return ""
+    if any(host == suffix or host.endswith("." + suffix)
+           for suffix in DOUYIN_WORK_HOST_SUFFIXES):
+        return host
+    return ""
+
+
+def _is_douyin_work_url(value: str) -> bool:
+    return bool(_douyin_work_host(value))
+
+
+def _douyin_item_from_url(value: str) -> tuple[str, str]:
+    """从官方作品/分享 URL 提取 (kind, aweme_id)，不跟随外站跳转。"""
+    try:
+        parsed = urlparse.urlsplit(str(value or "").strip())
+    except (TypeError, ValueError):
+        return "", ""
+    if not _douyin_work_host(value):
+        return "", ""
+    path = urlparse.unquote(parsed.path or "")
+    patterns = (
+        r"/(?:share/)?(video|note|slides)/(\d{8,30})(?:/|$)",
+        r"/(video|note|slides)/(\d{8,30})(?:/|$)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, path, re.I)
+        if match:
+            kind = "note" if match.group(1).lower() in ("note", "slides") else "video"
+            return kind, match.group(2)
+    query = urlparse.parse_qs(parsed.query or "")
+    for key in ("aweme_id", "awemeId", "item_id", "itemId", "modal_id"):
+        candidate = (query.get(key) or [""])[0]
+        if re.fullmatch(r"\d{8,30}", str(candidate)):
+            return ("note" if "note" in path.lower() else "video", str(candidate))
+    return "", ""
+
+
+def _douyin_work_url(kind: str, item_id: str) -> str:
+    kind = "note" if str(kind or "").lower() in ("note", "slides") else "video"
+    return f"https://www.douyin.com/{kind}/{item_id}/"
+
+
+def _douyin_response_location(resp) -> str:
+    """读取重定向位置而不把可能含分享参数的 URL 写入日志。"""
+    headers = getattr(resp, "headers", None)
+    if headers:
+        return str(headers.get("Location") or headers.get("location") or "")
+    return ""
+
+
+def _douyin_resolve_share_url(short_url: str) -> tuple[str, str, str]:
+    """只跟随抖音官方跳转，返回 ``(kind, item_id, canonical_url)``。"""
+    if not _is_douyin_work_url(short_url):
+        raise ApiError(400, "不是有效的抖音作品链接")
+    current = str(short_url).strip()
+    visited = set()
+    for _ in range(6):
+        if current in visited:
+            raise ApiError(502, "抖音官方链接出现循环跳转，请稍后重试")
+        visited.add(current)
+        kind, item_id = _douyin_item_from_url(current)
+        if item_id:
+            return kind, item_id, _douyin_work_url(kind, item_id)
+        resp = None
+        try:
+            resp, _ = open_url(
+                current, follow=False,
+                headers={"Accept": "text/html,application/xhtml+xml",
+                         "Referer": "https://www.douyin.com/"},
+                timeout=20)
+            location = _douyin_response_location(resp)
+            if not location:
+                geturl = getattr(resp, "geturl", None)
+                candidate = geturl() if callable(geturl) else ""
+                # urllib 在未跳转的 200 响应上也会返回原 URL。
+                # 将它当 Location 会在下一轮命中 visited，从而误报循环，
+                # 并且永远不会解析页面内的 canonical 链接。
+                if candidate:
+                    resolved = urlparse.urljoin(current, str(candidate))
+                    if resolved.rstrip("/") != current.rstrip("/"):
+                        location = candidate
+            if location:
+                target = urlparse.urljoin(current, str(location))
+                if not _is_douyin_work_url(target):
+                    raise ApiError(400, "抖音官方短链跳转目标无效")
+                current = target
+                continue
+            if hasattr(resp, "read"):
+                try:
+                    body = resp.read(256 * 1024)
+                except TypeError:
+                    body = resp.read()
+            else:
+                body = b""
+            text = (body.decode("utf-8", "ignore")
+                    if isinstance(body, bytes) else str(body)).replace("\\/", "/")
+            for candidate in re.findall(r"https://[^\"'<>\s]+", text, re.I):
+                if not _is_douyin_work_url(candidate):
+                    continue
+                kind, item_id = _douyin_item_from_url(candidate)
+                if item_id:
+                    return kind, item_id, _douyin_work_url(kind, item_id)
+            break
+        except ApiError:
+            raise
+        except urlerr.HTTPError as exc:
+            if exc.code in (404, 410):
+                raise ApiError(404, "抖音作品链接已失效或不存在")
+            raise ApiError(502, "抖音官方链接暂时无法访问，请稍后重试")
+        except (urlerr.URLError, TimeoutError, OSError):
+            raise ApiError(502, "抖音官方链接暂时无法访问，请稍后重试")
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+    raise ApiError(404, "未能从抖音短链得到作品 ID，请确认链接未过期")
+
+
+class _CDPConnection:
+    """极小的 Chrome DevTools Protocol WebSocket 客户端（仅标准库）。
+
+    生产镜像不必安装 websocket/Playwright 依赖；协议只用到文本帧、ping/pong
+    和关闭帧。连接生命周期严格限制在一次解析内，浏览器 profile 也会被删除。
+    """
+
+    def __init__(self, ws_url: str, timeout: float = 10):
+        parsed = urlparse.urlsplit(ws_url)
+        if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
+            raise ValueError("invalid CDP websocket URL")
+        if parsed.scheme == "wss":
+            raise ValueError("wss CDP endpoints are not supported")
+        self.sock = socket.create_connection(
+            (parsed.hostname, parsed.port or 80), timeout=timeout)
+        self.sock.settimeout(timeout)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {parsed.path or '/'}{('?' + parsed.query) if parsed.query else ''} HTTP/1.1\r\n"
+            f"Host: {parsed.hostname}:{parsed.port or 80}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
+        self.sock.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response and len(response) < 65536:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        if not response.startswith(b"HTTP/1.1 101"):
+            self.close()
+            raise OSError("CDP websocket handshake failed")
+        self._next_id = 0
+        self._pending_messages = []
+
+    def _read_exact(self, size: int) -> bytes:
+        out = bytearray()
+        while len(out) < size:
+            chunk = self.sock.recv(size - len(out))
+            if not chunk:
+                raise EOFError("CDP websocket closed")
+            out.extend(chunk)
+        return bytes(out)
+
+    def _send_frame(self, opcode: int, payload: bytes = b"") -> None:
+        length = len(payload)
+        if length < 126:
+            header = bytes((0x80 | opcode, 0x80 | length))
+        elif length < (1 << 16):
+            header = bytes((0x80 | opcode, 0x80 | 126)) + struct.pack(">H", length)
+        else:
+            header = bytes((0x80 | opcode, 0x80 | 127)) + struct.pack(">Q", length)
+        mask = os.urandom(4)
+        masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def send_json(self, value: dict) -> None:
+        self._send_frame(0x1, json.dumps(value, separators=(",", ":")).encode("utf-8"))
+
+    def recv_json(self, use_pending: bool = True) -> dict:
+        """读取一条 CDP 消息。
+
+        ``command`` 发送请求后必须绕过旧事件队列直接读 socket；否则在页面
+        导航期间积压的大量 Network 事件会把刚返回的 command response 挡在
+        队列末尾，表现为 Target.attach/Network.getResponseBody 超时。
+        """
+        if use_pending and self._pending_messages:
+            return self._pending_messages.pop(0)
+        fragments = []
+        while True:
+            first, second = self._read_exact(2)
+            opcode = first & 0x0F
+            fin = bool(first & 0x80)
+            masked = bool(second & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = struct.unpack(">H", self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack(">Q", self._read_exact(8))[0]
+            mask = self._read_exact(4) if masked else b""
+            payload = self._read_exact(length) if length else b""
+            if masked:
+                payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
+            if opcode == 0x8:
+                raise EOFError("CDP websocket closed")
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode in (0x1, 0x0):
+                fragments.append(payload)
+                if fin:
+                    return json.loads(b"".join(fragments).decode("utf-8"))
+            elif opcode == 0xA:
+                continue
+
+    def command(self, method: str, params: Optional[dict] = None,
+                session_id: str = "", timeout: float = 10) -> dict:
+        self._next_id += 1
+        ident = self._next_id
+        message = {"id": ident, "method": method}
+        if params is not None:
+            message["params"] = params
+        if session_id:
+            message["sessionId"] = session_id
+        self.send_json(message)
+        # 先检查此前暂存的事件中是否已经有本次响应（例如上一个 command
+        # 读取过头）；正常情况下响应会直接从 socket 到达。
+        for index, queued in enumerate(self._pending_messages):
+            if queued.get("id") == ident:
+                self._pending_messages.pop(index)
+                if "error" in queued:
+                    raise RuntimeError(str(queued["error"]))
+                return queued.get("result") or {}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # 不经过 pending FIFO，避免事件洪峰饿死 command response。
+            message = self.recv_json(use_pending=False)
+            if message.get("id") == ident:
+                if "error" in message:
+                    raise RuntimeError(str(message["error"]))
+                return message.get("result") or {}
+            if len(self._pending_messages) < 2048:
+                self._pending_messages.append(message)
+        raise TimeoutError("CDP command timed out")
+
+    def close(self) -> None:
+        try:
+            self._send_frame(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def _douyin_browser_binary() -> str:
+    configured = (os.environ.get("DOUYIN_BROWSER_BIN") or "").strip()
+    candidates = [configured] if configured else []
+    candidates.extend([
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
+        "/usr/bin/chromium", "/usr/bin/chromium-browser",
+    ])
+    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+
+def _douyin_browser_enabled() -> bool:
+    value = (os.environ.get("DOUYIN_BROWSER_ENABLED", "auto") or "auto").strip().lower()
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return bool(_douyin_browser_binary())
+
+
+def _free_local_port() -> int:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+    finally:
+        sock.close()
+
+
+def _douyin_browser_proxy_candidate(proxy: dict):
+    """把一条代理转成 Chromium 参数；不支持的记录返回 None。"""
+    try:
+        parsed = urlparse.urlsplit(str(proxy.get("url") or ""))
+        if not parsed.hostname or parsed.port is None:
+            return None
+        scheme = (parsed.scheme or "http").lower()
+        scheme = {"socks5h": "socks5", "socks4a": "socks4"}.get(scheme, scheme)
+        if scheme not in ("http", "https", "socks4", "socks5"):
+            return None
+        # Chromium supports HTTP(S) proxy authentication through Fetch events.
+        # A managed mihomo mixed-port accepts both protocols, so use HTTP for
+        # the browser while retaining the original URL for urllib media fetches.
+        browser_scheme = "http" if proxy.get("managed") and scheme.startswith("socks") else scheme
+        if ((parsed.username or parsed.password)
+                and browser_scheme not in ("http", "https")):
+            return None
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        return proxy, f"{browser_scheme}://{host}:{int(parsed.port)}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _douyin_browser_proxy_choices() -> list:
+    """按代理池策略返回有界的 Chromium 出口候选。"""
+    choices = []
+    for proxy in proxy_mgr.candidates()[:max(1, proxy_mgr.retries)]:
+        candidate = _douyin_browser_proxy_candidate(proxy)
+        if candidate:
+            choices.append(candidate)
+    if not proxy_mgr.force_proxy:
+        choices.append(None)  # 管理员显式允许时，所有代理失败后才直连。
+    return choices or [False]
+
+
+def _douyin_browser_proxy():
+    """兼容旧调用；完整解析链会迭代 ``_douyin_browser_proxy_choices``。"""
+    return _douyin_browser_proxy_choices()[0]
+
+
+def _douyin_browser_credentials(proxy: Optional[dict], proxy_arg: str):
+    """Extract bounded proxy credentials for CDP, never for process arguments."""
+    if not proxy or not proxy_arg:
+        return None
+    try:
+        parsed = urlparse.urlsplit(str(proxy.get("url") or ""))
+        scheme = urlparse.urlsplit(proxy_arg).scheme.lower()
+        if scheme not in ("http", "https") or not parsed.username:
+            return None
+        user = urlparse.unquote(parsed.username)
+        password = urlparse.unquote(parsed.password or "")
+        if (not user or len(user) > 256 or len(password) > 256
+                or any(ch in user or ch in password for ch in "\r\n")):
+            return None
+        return user, password
+    except (TypeError, ValueError):
+        return None
+
+
+def _douyin_browser_proxy_for_item(item_id: str) -> Optional[dict]:
+    with _douyin_browser_proxy_lock:
+        record = _douyin_browser_proxy_cache.get(str(item_id))
+        if not isinstance(record, dict):
+            return None
+        if float(record.get("expires_at") or 0) <= time.time():
+            _douyin_browser_proxy_cache.pop(str(item_id), None)
+            return None
+        value = record.get("proxy")
+        if not isinstance(value, dict):
+            return None
+        # 后台停用/删除代理后，不得继续将媒体请求钉在旧出口。
+        url = str(value.get("url") or "")
+        active = any(p.get("enabled") and str(p.get("url") or "") == url
+                     for p in list(proxy_mgr.proxies))
+        if not active:
+            _douyin_browser_proxy_cache.pop(str(item_id), None)
+            return None
+        return dict(value)
+
+
+def _remember_douyin_browser_proxy(item_id: str, proxy: Optional[dict]) -> None:
+    with _douyin_browser_proxy_lock:
+        if proxy:
+            _douyin_browser_proxy_cache[str(item_id)] = {
+                "proxy": dict(proxy),
+                "expires_at": time.time() + max(DOUYIN_MEDIA_CACHE_TTL, 300),
+            }
+            if len(_douyin_browser_proxy_cache) > 2048:
+                oldest = sorted(
+                    _douyin_browser_proxy_cache.items(),
+                    key=lambda pair: float(pair[1].get("expires_at") or 0))
+                for key, _ in oldest[:len(_douyin_browser_proxy_cache) - 1536]:
+                    _douyin_browser_proxy_cache.pop(key, None)
+        else:
+            _douyin_browser_proxy_cache.pop(str(item_id), None)
+
+
+def _douyin_browser_extract_once(item_id: str, kind: str,
+                                 proxy_choice) -> Optional[dict]:
+    """使用一个已验证出口启动隔离 Chromium 并捕获 detail JSON。"""
+    browser_proxy, proxy_arg = proxy_choice or (None, "")
+    browser_credentials = _douyin_browser_credentials(browser_proxy, proxy_arg)
+    # A malformed/unsafe credential must never turn into an unauthenticated
+    # request when the deployment requires a proxy.  In non-forced mode the
+    # caller may still use the direct official page path.
+    if browser_proxy and (browser_proxy.get("url") or "").find("@") >= 0 \
+            and not browser_credentials and proxy_mgr.force_proxy:
+        return None
+    if not _douyin_browser_lock.acquire(timeout=max(1, DOUYIN_BROWSER_TIMEOUT)):
+        return None
+    profile = None
+    process = None
+    conn = None
+    try:
+        binary = _douyin_browser_binary()
+        if not binary:
+            return None
+        profile = tempfile.mkdtemp(prefix="douyin-browser-")
+        port = _free_local_port()
+        command = [
+            binary, "--headless=new", "--disable-gpu", "--no-sandbox",
+            "--disable-dev-shm-usage", "--disable-extensions", "--disable-sync",
+            "--disable-background-networking", "--disable-blink-features=AutomationControlled",
+            "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}",
+            "--proxy-bypass-list=<-loopback>;127.0.0.1;localhost",
+            f"--user-data-dir={profile}",
+        ]
+        if proxy_arg:
+            command.append(f"--proxy-server={proxy_arg}")
+        command.append("about:blank")
+        process = subprocess.Popen(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        version = None
+        start_deadline = time.monotonic() + DOUYIN_BROWSER_START_TIMEOUT
+        while time.monotonic() < start_deadline and process.poll() is None:
+            try:
+                with urlreq.urlopen(
+                        f"http://127.0.0.1:{port}/json/version", timeout=0.5) as response:
+                    version = json.loads(response.read().decode("utf-8", "ignore"))
+                break
+            except Exception:
+                time.sleep(0.08)
+        if not isinstance(version, dict) or not version.get("webSocketDebuggerUrl"):
+            return None
+        conn = _CDPConnection(version["webSocketDebuggerUrl"], timeout=5)
+        target_id = conn.command("Target.createTarget", {"url": "about:blank"}).get("targetId")
+        if not target_id:
+            return None
+        attached = conn.command("Target.attachToTarget",
+                                {"targetId": target_id, "flatten": True})
+        session_id = attached.get("sessionId") or ""
+        if not session_id:
+            return None
+        conn.command("Network.enable", {}, session_id)
+        conn.command("Page.enable", {}, session_id)
+        if browser_credentials:
+            # Fetch is enabled only for authenticated proxy sessions.  Every
+            # paused request is immediately continued below; auth challenges
+            # receive credentials in the CDP channel, never in a URL/header.
+            conn.command("Fetch.enable", {
+                "handleAuthRequests": True,
+                "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
+            }, session_id)
+        try:
+            conn.command("Network.setCacheDisabled", {"cacheDisabled": True}, session_id)
+            conn.command("Network.setBlockedURLs", {"urls": [
+                "*://*.douyinvod.com/*", "*://*.douyincdn.com/*",
+                "*://*.ibytedtos.com/*",
+            ]}, session_id)
+        except Exception:
+            pass
+        conn.command("Page.navigate", {"url": _douyin_work_url(kind, item_id)},
+                     session_id, timeout=15)
+        pending = {}
+        deadline = time.monotonic() + DOUYIN_BROWSER_TIMEOUT
+
+        def decode_response(request_id: str):
+            for _ in range(2):
+                try:
+                    body_result = conn.command(
+                        "Network.getResponseBody", {"requestId": request_id},
+                        session_id, timeout=8)
+                    body = body_result.get("body") or ""
+                    if body_result.get("base64Encoded"):
+                        body = base64.b64decode(body).decode("utf-8", "replace")
+                    if not body or len(body) > 8 * 1024 * 1024:
+                        return None
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        return None
+                    detail = payload.get("aweme_detail")
+                    return detail if isinstance(detail, dict) else payload
+                except Exception:
+                    time.sleep(0.05)
+            return None
+
+        while time.monotonic() < deadline:
+            try:
+                message = conn.recv_json()
+            except socket.timeout:
+                # CDP socket has a short read timeout so a quiet page does not
+                # block shutdown forever; a slow official response may still
+                # arrive before the overall browser deadline.
+                continue
+            if message.get("sessionId") != session_id:
+                continue
+            method = message.get("method")
+            params = message.get("params") or {}
+            if method == "Fetch.authRequired":
+                request_id = str(params.get("requestId") or "")
+                challenge = params.get("authChallenge") or {}
+                if request_id:
+                    source = str(challenge.get("source") or "").lower()
+                    auth_response = "Default"
+                    auth_params = {"response": auth_response}
+                    if source == "proxy" and browser_credentials:
+                        auth_params = {
+                            "response": "ProvideCredentials",
+                            "username": browser_credentials[0],
+                            "password": browser_credentials[1],
+                        }
+                    try:
+                        # CDP names this field authChallengeResponse (not
+                        # authChallenge); the latter is the challenge received
+                        # in the event and makes authenticated proxies hang.
+                        conn.command("Fetch.continueWithAuth", {
+                            "requestId": request_id,
+                            "authChallengeResponse": auth_params,
+                        }, session_id, timeout=5)
+                    except Exception:
+                        pass
+                continue
+            if method == "Fetch.requestPaused":
+                request_id = str(params.get("requestId") or "")
+                if request_id:
+                    try:
+                        conn.command("Fetch.continueRequest",
+                                     {"requestId": request_id},
+                                     session_id, timeout=5)
+                    except Exception:
+                        pass
+                continue
+            if method == "Network.responseReceived":
+                response = params.get("response") or {}
+                response_url = str(response.get("url") or "")
+                try:
+                    parsed_url = urlparse.urlsplit(response_url)
+                    host = (parsed_url.hostname or "").lower().rstrip(".")
+                    path = parsed_url.path.lower()
+                except Exception:
+                    host, path = "", ""
+                official_host = any(
+                    host == suffix or host.endswith("." + suffix)
+                    for suffix in ("douyin.com", "iesdouyin.com", "snssdk.com"))
+                if (not official_host
+                        or ("/aweme/v1/web/aweme/detail" not in path
+                            and "/aweme/v1/aweme/detail" not in path)
+                        or int(response.get("status") or 0) != 200):
+                    continue
+                request_id = params.get("requestId")
+                if request_id:
+                    pending[str(request_id)] = True
+            elif method == "Network.loadingFinished":
+                request_id = str(params.get("requestId") or "")
+                if request_id not in pending:
+                    continue
+                pending.pop(request_id, None)
+                payload = decode_response(request_id)
+                if payload is not None:
+                    _remember_douyin_browser_proxy(item_id, browser_proxy)
+                    return payload
+        for request_id in list(pending)[:4]:
+            payload = decode_response(request_id)
+            if payload is not None:
+                _remember_douyin_browser_proxy(item_id, browser_proxy)
+                return payload
+        return None
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if process is not None:
+            try:
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except Exception:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+            try:
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+        if profile:
+            shutil.rmtree(profile, ignore_errors=True)
+        _douyin_browser_lock.release()
+
+
+def _douyin_browser_extract(item_id: str, kind: str = "video") -> Optional[dict]:
+    """迭代代理池候选；单个坏代理不再让整次官方解析失败。"""
+    if (not re.fullmatch(r"\d{8,30}", str(item_id or ""))
+            or not _douyin_browser_enabled()):
+        return None
+    for index, proxy_choice in enumerate(_douyin_browser_proxy_choices()):
+        if proxy_choice is False:
+            continue
+        if index:
+            proxy_mgr.note_retry()
+        payload = _douyin_browser_extract_once(item_id, kind, proxy_choice)
+        if payload is not None:
+            return payload
+    return None
+
+def _douyin_extract_json_after(text: str, marker: str):
+    """从脚本标记后提取一个平衡的 JSON 对象/数组。"""
+    start_at = text.find(marker)
+    if start_at < 0:
+        return None
+    start = start_at + len(marker)
+    while start < len(text) and text[start] not in "[{":
+        start += 1
+    if start >= len(text):
+        return None
+    opening = text[start]
+    closing = "}" if opening == "{" else "]"
+    depth = 0
+    quoted = False
+    escaped = False
+    for index in range(start, min(len(text), start + 8 * 1024 * 1024)):
+        char = text[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:index + 1])
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def _douyin_html_payloads(text: str) -> list:
+    payloads = []
+    for marker in ("window._ROUTER_DATA", "window.__ROUTER_DATA",
+                   "window._SSR_DATA", "window.__SSR_DATA"):
+        value = _douyin_extract_json_after(text, marker)
+        if value is not None:
+            payloads.append(value)
+    for match in re.finditer(
+            r"<script[^>]*type=[\"']application/ld\+json[\"'][^>]*>(.*?)</script>",
+            text, re.I | re.S):
+        try:
+            value = json.loads(match.group(1).strip())
+            if value:
+                payloads.append(value)
+        except (TypeError, ValueError):
+            pass
+    return payloads
+
+
+def _douyin_fetch_html(kind: str, item_id: str) -> tuple[str, list]:
+    url = _douyin_work_url(kind, item_id)
+    response = None
+    try:
+        response, used_proxy = open_url(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+                "Referer": "https://www.douyin.com/",
+            },
+            timeout=20)
+        if used_proxy:
+            # SSR/JSON-LD 里的签名媒体也可能绑定抓取时出口；
+            # 与 Chromium 链路一样固定后续图片/视频请求。
+            _remember_douyin_browser_proxy(item_id, used_proxy)
+        try:
+            raw = response.read(4 * 1024 * 1024)
+        except TypeError:
+            raw = response.read()
+        if (response.headers.get("Content-Encoding") or "").lower() == "gzip":
+            raw = gzip.decompress(raw)
+        text = raw.decode("utf-8", "replace")
+        return text, _douyin_html_payloads(text)
+    finally:
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+
+def _douyin_first(mapping, *keys, default=None):
+    if not isinstance(mapping, dict):
+        return default
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return default
+
+
+def _douyin_url_values(value, limit: int = 32) -> list[str]:
+    """从 url_list/url/uri 结构收集字符串，保留顺序并限制规模。"""
+    out, seen = [], set()
+    def visit(node):
+        if len(out) >= limit:
+            return
+        if isinstance(node, str):
+            value = node.strip()
+            if value and value not in seen:
+                seen.add(value)
+                out.append(value)
+            return
+        if isinstance(node, dict):
+            for key in ("url_list", "urlList", "url", "src", "download_url",
+                        "downloadUrl", "play_url", "playUrl", "image_url",
+                        "imageUrl", "uri"):
+                if key in node:
+                    visit(node[key])
+                    if len(out) >= limit:
+                        return
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+                if len(out) >= limit:
+                    return
+    visit(value)
+    return out
+
+
+def _douyin_public_url(value: str) -> str:
+    value = str(value or "").strip()
+    if not value or len(value) > 4096:
+        return ""
+    try:
+        parsed = urlparse.urlsplit(value)
+        if (parsed.scheme.lower() != "https" or parsed.username or parsed.password
+                or parsed.port not in (None, 443) or not parsed.hostname
+                or not _host_allowed(value)):
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    # CDN 签名覆盖路径本身；不能把 /playwm/ 擅自改成 /play/。
+    return value
+
+
+def _douyin_public_urls(value) -> list[str]:
+    return list(dict.fromkeys(
+        url for url in (_douyin_public_url(x) for x in _douyin_url_values(value))
+        if url))
+
+
+def _douyin_number(value):
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+        return number
+    except (TypeError, ValueError, OverflowError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _douyin_find_item(payload, _depth: int = 0):
+    """从官方响应/SSR 任意嵌套层找作品对象。"""
+    if _depth > 16:
+        return None
+    if isinstance(payload, dict):
+        # 先取明确的容器，避免把 author/statistics 子对象当作品。
+        for key in ("aweme_detail", "item", "aweme", "post", "data"):
+            value = payload.get(key)
+            if isinstance(value, dict):
+                found = _douyin_find_item(value, _depth + 1)
+                if found:
+                    return found
+            elif isinstance(value, list):
+                found = _douyin_find_item(value, _depth + 1)
+                if found:
+                    return found
+        for key in ("item_list", "aweme_list", "items", "list"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                for entry in value:
+                    found = _douyin_find_item(entry, _depth + 1)
+                    if found:
+                        return found
+        if (any(key in payload for key in ("aweme_id", "awemeId", "item_id"))
+                and any(key in payload for key in ("video", "images", "statistics", "author", "desc"))):
+            return payload
+        if payload.get("@type") in ("VideoObject", "ImageObject"):
+            return payload
+        for value in payload.values():
+            found = _douyin_find_item(value, _depth + 1)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = _douyin_find_item(value, _depth + 1)
+            if found:
+                return found
+    return None
+
+
+def _douyin_extract_video_id(urls, video_obj: dict) -> str:
+    for url in urls:
+        try:
+            query = urlparse.parse_qs(urlparse.urlsplit(url).query)
+        except Exception:
+            query = {}
+        for key in ("video_id", "videoId", "vid", "file_id", "fileId"):
+            candidate = (query.get(key) or [""])[0]
+            if re.fullmatch(r"[\w-]{8,120}", str(candidate)):
+                return str(candidate)
+    for key in ("video_id", "videoId", "vid", "file_id", "fileId", "uri"):
+        candidate = str(video_obj.get(key) or "").strip()
+        if re.fullmatch(r"[\w-]{8,120}", candidate):
+            return candidate
+    return ""
+
+
+def _douyin_urls_expiry(urls: list[str], now: Optional[float] = None) -> float:
+    now = time.time() if now is None else float(now)
+    expires = now + DOUYIN_MEDIA_CACHE_TTL
+    # 只要 URL 明确声明了过期时间，就必须尊重它，包括已过期值。
+    # 不能将已死链接回退为默认 TTL，也不能强行延长临近过期链接。
+    for url in urls:
+        try:
+            query = urlparse.parse_qs(urlparse.urlsplit(url).query)
+            for key in ("x-expires", "expires", "expire"):
+                raw = (query.get(key) or [""])[0]
+                if str(raw).isdigit():
+                    expires = min(expires, float(raw))
+        except Exception:
+            pass
+    return expires
+
+
+def _douyin_cache_media(item_id: str, urls: list[str],
+                        proxy: Optional[dict] = None) -> dict:
+    urls = list(dict.fromkeys(url for url in urls if _douyin_public_url(url)))
+    if not urls:
+        return {}
+    now = time.time()
+    record = {"url": urls[0], "urls": urls, "fetched_at": now,
+              "expires_at": _douyin_urls_expiry(urls, now)}
+    if proxy:
+        record["proxy"] = dict(proxy)
+    with _douyin_media_lock:
+        _douyin_media_cache[str(item_id)] = record
+    return record
+
+
+def _douyin_cache_note_media(item_id: str, urls: list[str]) -> dict:
+    urls = list(dict.fromkeys(url for url in urls if _douyin_public_url(url)))[:100]
+    if not urls:
+        return {}
+    now = time.time()
+    record = {"urls": urls, "fetched_at": now,
+              "expires_at": _douyin_urls_expiry(urls, now)}
+    with _douyin_media_lock:
+        _douyin_note_media_cache[str(item_id)] = record
+    return record
+
+
+def _douyin_cached_note_media(item_id: str,
+                              allow_stale: bool = False) -> Optional[dict]:
+    with _douyin_media_lock:
+        record = _douyin_note_media_cache.get(str(item_id))
+        if not record:
+            return None
+        if not allow_stale and float(record.get("expires_at") or 0) <= time.time() + 10:
+            return None
+        return {**record, "urls": list(record.get("urls") or [])}
+
+
+def _douyin_note_result_with_media(result: dict,
+                                   item_id: str) -> Optional[dict]:
+    """给图集快照注入当前有效的 CDN 与同源刷新端点。
+
+    数据库/结果缓存只保留文件名等稳定元数据；原始签名
+    URL 只住在短时内存缓存里，避免分享页长期下发死链。
+    """
+    record = _douyin_cached_note_media(item_id)
+    if not record:
+        return None
+    urls = list(record.get("urls") or [])
+    if not urls:
+        return None
+    cloned = json.loads(json.dumps(result or {}, ensure_ascii=False))
+    old_images = cloned.get("images") if isinstance(cloned.get("images"), list) else []
+    base = _safe_name(str(cloned.get("title") or ""), item_id)
+    images = []
+    for index, direct in enumerate(urls, 1):
+        old = old_images[index - 1] if index <= len(old_images) else {}
+        old = old if isinstance(old, dict) else {}
+        filename = str(old.get("filename") or f"{base}_{index:02d}.jpeg")[:180]
+        images.append({
+            "index": index,
+            "filename": filename,
+            "url": direct,
+            "proxy_url": _douyin_image_proxy_url(item_id, index, filename),
+            "download_url": _douyin_image_proxy_url(
+                item_id, index, filename, download=True),
+        })
+    cloned["images"] = images
+    cloned["media_available"] = bool(images)
+    return cloned
+
+
+def _douyin_cached_media(item_id: str, allow_stale: bool = False) -> Optional[dict]:
+    with _douyin_media_lock:
+        record = _douyin_media_cache.get(str(item_id))
+        if not record:
+            return None
+        if not allow_stale and float(record.get("expires_at") or 0) <= time.time() + 10:
+            return None
+        return dict(record)
+
+
+def _sweep_douyin_memory() -> None:
+    """清理短时官方媒体/结果缓存，避免长时间运行进程无界增长。"""
+    now = time.time()
+    with _douyin_media_lock:
+        for item_id, record in list(_douyin_media_cache.items()):
+            if float(record.get("expires_at") or 0) <= now:
+                _douyin_media_cache.pop(item_id, None)
+        for item_id, record in list(_douyin_note_media_cache.items()):
+            if float(record.get("expires_at") or 0) <= now:
+                _douyin_note_media_cache.pop(item_id, None)
+        for item_id, (ts, _) in list(_douyin_result_cache.items()):
+            if now - ts > CACHE_TTL:
+                _douyin_result_cache.pop(item_id, None)
+        for cache in (_douyin_media_cache, _douyin_note_media_cache,
+                      _douyin_result_cache):
+            if len(cache) > 2048:
+                for key in list(cache)[:len(cache) - 1536]:
+                    cache.pop(key, None)
+    with _douyin_browser_proxy_lock:
+        for item_id, record in list(_douyin_browser_proxy_cache.items()):
+            if float(record.get("expires_at") or 0) <= now:
+                _douyin_browser_proxy_cache.pop(item_id, None)
+    # 作者浮层只是短时富化缓存，不得随作品数无界增长。
+    for item_id, (ts, _) in list(_author_cache.items()):
+        if now - ts > 3600:
+            _author_cache.pop(item_id, None)
+    if len(_author_cache) > 2048:
+        oldest = sorted(_author_cache.items(), key=lambda pair: pair[1][0])
+        for item_id, _ in oldest[:len(_author_cache) - 1536]:
+            _author_cache.pop(item_id, None)
+
+
+def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
+                          kind_hint: str = "") -> Optional[dict]:
+    """把 detail/SSR/JSON-LD 归一化成首页、分享页和 API 共用的结果契约。"""
+    item = _douyin_find_item(payload)
+    if not isinstance(item, dict):
+        return None
+    item_id = str(_douyin_first(
+        item, "aweme_id", "awemeId", "item_id", "itemId", default=item_id_hint) or "").strip()
+    expected_item_id = str(item_id_hint or "").strip()
+    if (re.fullmatch(r"\d{8,30}", expected_item_id)
+            and re.fullmatch(r"\d{8,30}", item_id)
+            and item_id != expected_item_id):
+        # CDP 页面可能同时发起推荐作品请求；不能把 B 的响应
+        # 以 A 的缓存键保存，否则会返回错作品。
+        return None
+    if not re.fullmatch(r"\d{8,30}", item_id):
+        item_id = str(item_id_hint or "").strip()
+    if not re.fullmatch(r"\d{8,30}", item_id):
+        return None
+
+    author_data = _douyin_first(item, "author", "creator", default={})
+    # Schema.org VideoObject 常用 creator/name，而官方 detail 使用 author。
+    if not author_data:
+        author_data = _douyin_first(item, "copyright_holder", default={})
+    if not isinstance(author_data, dict):
+        author_data = {"nickname": str(author_data or "")}
+    author = str(_douyin_first(
+        author_data, "nickname", "name", "display_name", default=
+        _douyin_first(item, "author_name", "authorName", "nickname", default="")) or "")[:100]
+    sec_uid = str(_douyin_first(author_data, "sec_uid", "secUid", default="") or "")[:200]
+    unique_id = str(_douyin_first(
+        author_data, "unique_id", "uniqueId", "short_id", "shortId", default="") or "")[:100]
+    avatar_candidates = []
+    for key in ("avatar_larger", "avatar_thumb", "avatar_medium", "avatar", "avatarUrl"):
+        avatar_candidates.extend(_douyin_url_values(author_data.get(key)))
+    avatar_candidates.extend(_douyin_url_values(
+        _douyin_first(item, "avatar", "avatar_url", "avatarUrl", default="")))
+    avatar = next(iter(dict.fromkeys(
+        x for x in (_douyin_public_url(v) for v in avatar_candidates) if x)), "")
+    author_url = next(iter(dict.fromkeys(
+        x for x in (_douyin_public_url(v) for v in _douyin_url_values(
+            _douyin_first(author_data, "url", "homepage", "profile_url", default=""))) if x)), "")
+    if not author_url and sec_uid:
+        author_url = f"https://www.douyin.com/user/{urlparse.quote(sec_uid, safe='')}"
+
+    stats_data = _douyin_first(item, "statistics", "stats", "interaction", default={})
+    if not isinstance(stats_data, dict):
+        stats_data = {}
+    # JSON-LD 的 interactionStatistic 是数组，不同站点会把名称写成
+    # LikeAction/CommentAction/ShareAction 或 interactionType。
+    interactions = item.get("interactionStatistic") or item.get("interaction_statistic") or []
+    if isinstance(interactions, dict):
+        interactions = [interactions]
+    if isinstance(interactions, list):
+        for interaction in interactions:
+            if not isinstance(interaction, dict):
+                continue
+            name = str(_douyin_first(interaction, "interactionType", "name", default="") or "").lower()
+            count = _douyin_first(interaction, "userInteractionCount", "count", "value", default=None)
+            if count is None:
+                continue
+            if "like" in name or "digg" in name:
+                stats_data.setdefault("digg_count", count)
+            elif "comment" in name:
+                stats_data.setdefault("comment_count", count)
+            elif "share" in name:
+                stats_data.setdefault("share_count", count)
+            elif "collect" in name or "favorite" in name:
+                stats_data.setdefault("collect_count", count)
+    stats = {
+        "digg": _douyin_number(_douyin_first(
+            stats_data, "digg_count", "digg", "like_count", "likeCount",
+            default=_douyin_first(item, "digg_count", "diggCount", "like_count", default=None))),
+        "comment": _douyin_number(_douyin_first(
+            stats_data, "comment_count", "comment", "commentCount",
+            default=_douyin_first(item, "comment_count", "commentCount", default=None))),
+        "collect": _douyin_number(_douyin_first(
+            stats_data, "collect_count", "collect", "collectCount", "favorite_count",
+            default=_douyin_first(item, "collect_count", "collectCount", default=None))),
+        "share": _douyin_number(_douyin_first(
+            stats_data, "share_count", "share", "shareCount",
+            default=_douyin_first(item, "share_count", "shareCount", default=None))),
+    }
+
+    title = str(_douyin_first(
+        item, "desc", "title", "name", "preview_title", "item_title",
+        "description", default="（无标题）") or "（无标题）").strip()
+    title = title[:1000] or "（无标题）"
+    content = str(_douyin_first(item, "desc", "description", "content", default=title) or title)
+    tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
+    for extra in item.get("text_extra") or item.get("textExtra") or []:
+        if isinstance(extra, dict):
+            name = str(_douyin_first(extra, "hashtag_name", "hashtagName", default="") or "").strip()
+            if name and name not in tags:
+                tags.append(name)
+    tags = tags[:50]
+
+    video_data = _douyin_first(item, "video", "video_info", "videoInfo", default={})
+    if not isinstance(video_data, dict):
+        video_data = {}
+    play_values = _douyin_public_urls(_douyin_first(video_data, "play_addr", "playAddr", default={}))
+    download_values = _douyin_public_urls(_douyin_first(video_data, "download_addr", "downloadAddr", default={}))
+    # VideoObject fallback: contentUrl/url 就是可播放地址（仍经过域名白名单）。
+    play_values += _douyin_public_urls(
+        _douyin_first(item, "contentUrl", "content_url", "videoUrl", default=""))
+    all_video_urls = list(dict.fromkeys(play_values + download_values))
+    direct_url = all_video_urls[0] if all_video_urls else ""
+    video_id = _douyin_extract_video_id(all_video_urls, video_data)
+
+    cover_candidates = []
+    for key in ("origin_cover", "cover", "dynamic_cover", "originCover", "coverUrl"):
+        cover_candidates.extend(_douyin_url_values(video_data.get(key)))
+    cover_candidates.extend(_douyin_url_values(_douyin_first(
+        item, "cover", "cover_url", "thumbnailUrl", "thumbnail_url", default="")))
+    cover = next(iter(dict.fromkeys(
+        x for x in (_douyin_public_url(v) for v in cover_candidates) if x)), "")
+
+    image_values = []
+    raw_images = _douyin_first(item, "images", "image_list", "imageList", "original_images", default=[])
+    if isinstance(raw_images, dict):
+        raw_images = [raw_images]
+    for image in (raw_images or []):
+        # 每个 image 对象里的 url_list 是同一张图的多域名备选，
+        # 不是多张图；只取首个可用候选，避免图集重复。
+        candidates = _douyin_public_urls(image)
+        if candidates:
+            image_values.append(candidates[0])
+    image_values = list(dict.fromkeys(image_values))
+    work_type = str(_douyin_first(item, "work_type", "workType", default="") or "").lower()
+    is_note = bool(image_values and not direct_url) or work_type in ("image", "images", "note", "slides")
+    kind = "note" if is_note else "video"
+    if kind_hint == "note" and not direct_url:
+        kind = "note"
+    base = _safe_name(title, item_id)
+
+    author_detail = {
+        "item_id": item_id, "nickname": author, "author": author,
+        "avatar": avatar, "author_url": author_url, "sec_uid": sec_uid,
+        "unique_id": unique_id,
+        "short_id": str(_douyin_first(author_data, "short_id", "shortId", default="") or "")[:100],
+        "signature": str(_douyin_first(author_data, "signature", default="") or "")[:500],
+        "follower_count": _douyin_number(_douyin_first(author_data, "follower_count", "followerCount", default=None)),
+        "total_favorited": _douyin_number(_douyin_first(author_data, "total_favorited", "totalFavorited", default=None)),
+        "following_count": _douyin_number(_douyin_first(author_data, "following_count", "followingCount", default=None)),
+        "aweme_count": _douyin_number(_douyin_first(author_data, "aweme_count", "awemeCount", default=None)),
+        "enriched": False,
+    }
+    # 即使没有 sec_uid 也缓存基础作者信息，/api/author 不再因普通详情而 404。
+    _author_cache[item_id] = (time.time(), author_detail)
+
+    result = {
+        "kind": kind, "item_id": item_id, "source": "douyin_direct",
+        "metadata_source": "douyin_web", "title": title, "platform": "douyin",
+        "share_supported": True, "author": author, "avatar": avatar,
+        "author_url": author_url, "create_time": _douyin_number(
+            _douyin_first(item, "create_time", "createTime", default=None)),
+        "stats": stats, "tags": tags, "music": None, "location": None,
+        "base": base, "cover": cover, "_link": work_url,
+    }
+    music = _douyin_first(item, "music", default={})
+    if isinstance(music, dict):
+        result["music"] = {
+            "title": str(_douyin_first(music, "title", "name", default="") or "")[:200],
+            "author": str(_douyin_first(music, "author", "artist", default="") or "")[:100],
+        }
+    location = _douyin_first(item, "poi_info", "location", "address", default="")
+    if isinstance(location, dict):
+        location = _douyin_first(location, "poi_name", "name", "address", default="")
+    result["location"] = str(location or "")[:200] or None
+
+    if kind == "note":
+        if not image_values:
+            return None
+        _douyin_cache_note_media(item_id, image_values)
+        result["images"] = [
+            {"index": index, "filename": f"{base}_{index:02d}.jpeg"}
+            for index, _ in enumerate(image_values, 1)]
+        return _douyin_note_result_with_media(result, item_id)
+
+    # 官方 video.duration 明确为毫秒；JSON-LD/item.duration 通常为 ISO-8601
+    # 或秒。依据字段语义区分，避免把 1000 秒以上的长视频误当毫秒。
+    explicit_ms = _douyin_first(
+        video_data, "duration_ms", "durationMs", default=None)
+    if explicit_ms is not None:
+        duration_raw, duration_is_ms = explicit_ms, True
+    elif video_data.get("duration") is not None:
+        duration_raw, duration_is_ms = video_data.get("duration"), True
+    else:
+        item_ms = _douyin_first(item, "duration_ms", "durationMs", default=None)
+        duration_raw = item_ms if item_ms is not None else item.get("duration", 0)
+        duration_is_ms = item_ms is not None
+    duration_ms = _atc_duration_ms(duration_raw, assume_ms=duration_is_ms)
+    filename = f"{base}.mp4"
+    video = {
+        "source": "douyin_direct", "url": direct_url,
+        "direct_url": direct_url, "alt_url": _play_api_alt(video_id) if video_id else "",
+        "filename": filename, "width": _douyin_first(video_data, "width", default=None),
+        "height": _douyin_first(video_data, "height", default=None),
+        "video_id": video_id, "media_available": bool(direct_url),
+    }
+    if direct_url:
+        _douyin_cache_media(
+            item_id, all_video_urls,
+            proxy=_douyin_browser_proxy_for_item(item_id))
+    # 即使当前响应没有 URL，也提供受签名保护的刷新端点；端点会重新走官方网页。
+    video["proxy_url"] = _douyin_video_proxy_url(item_id)
+    video["download_url"] = _douyin_video_download_url(item_id, filename)
+    result["video"] = video
+    result["duration_ms"] = duration_ms
+    return result
+
+
+def _parse_douyin_item_direct(kind: str, item_id: str,
+                              work_url: str = "", *, allow_metadata: bool = False) -> dict:
+    if not re.fullmatch(r"\d{8,30}", str(item_id or "")):
+        raise ApiError(400, "非法的抖音作品 ID")
+    lock = _douyin_item_lock(item_id)
+    with lock:
+        cached = _douyin_result_cache.get(item_id)
+        if cached and time.time() - cached[0] < CACHE_TTL:
+            result = cached[1]
+            if result.get("kind") == "note":
+                fresh_note = _douyin_note_result_with_media(result, item_id)
+                if fresh_note:
+                    return fresh_note
+                # 图集 CDN 签名已过期，继续重抓官方页刷新。
+                result = None
+            media = _douyin_cached_media(item_id)
+            if result is not None and media:
+                result = json.loads(json.dumps(result, ensure_ascii=False))
+                result.setdefault("video", {})["url"] = media["url"]
+                result["video"]["direct_url"] = media["url"]
+                result["video"]["media_available"] = True
+                return result
+            # 视频/图集 CDN 签名已过期：不能把 result cache 中的旧 URL
+            # 重新缓存，继续向下走官方网页捕获新签名。
+
+        payload = _douyin_browser_extract(item_id, kind)
+        result = _douyin_native_result(
+            payload, work_url or _douyin_work_url(kind, item_id), item_id, kind) if payload else None
+        if result and (result.get("kind") == "note"
+                       or (result.get("video") or {}).get("media_available")):
+            _douyin_result_cache[item_id] = (time.time(), result)
+            return result
+
+        # 没有 Chromium 时仍解析官方页面中的 SSR/JSON-LD；这些字段足够展示
+        # 标题、作者、封面和统计，但不把缺媒体结果标成“可下载”。
+        try:
+            _, payloads = _douyin_fetch_html(kind, item_id)
+        except ApiError:
+            raise
+        except Exception:
+            payloads = []
+        for candidate in payloads:
+            normalized = _douyin_native_result(
+                candidate, work_url or _douyin_work_url(kind, item_id), item_id, kind)
+            if normalized and (normalized.get("kind") == "note"
+                               or (normalized.get("video") or {}).get("media_available")):
+                _douyin_result_cache[item_id] = (time.time(), normalized)
+                return normalized
+            if normalized and result is None:
+                result = normalized
+        if result:
+            # 官方 HTML 可能只有元数据；允许调用方看到作者/点赞，但明确媒体不可用。
+            result["metadata_only"] = True
+            result.setdefault("video", {}).setdefault("media_available", False)
+            if allow_metadata:
+                return result
+            raise ApiError(503, "抖音官方暂未返回视频地址，请稍后重试")
+        raise ApiError(503, "抖音官方内容暂时无法获取，请稍后重试")
+
+
+def _parse_douyin_share_direct(work_url: str) -> dict:
+    kind, item_id, canonical = _douyin_resolve_share_url(work_url)
+    if not item_id:
+        raise ApiError(404, "未能识别抖音作品 ID")
+    return _parse_douyin_item_direct(kind, item_id, canonical)
+
+
 def _atc_platform_for_url(value: str) -> str:
-    """识别 AnyToCopy 官方列出的常用平台；仅接受公开 HTTPS 作品链接。"""
+    """识别常用内容平台；仅接受公开 HTTPS 作品链接。"""
     try:
         parsed = urlparse.urlsplit(str(value or "").strip())
         if (parsed.scheme != "https" or parsed.username or parsed.password
@@ -2742,7 +4274,7 @@ _RESERVED_WORK_SUFFIXES = (
 
 
 def _atc_work_url_allowed(value: str) -> bool:
-    """Accept public HTTPS work URLs; AnyToCopy remains the support authority."""
+    """仅接受公开 HTTPS 作品链接，具体平台支持由主服务决定。"""
     try:
         parsed = urlparse.urlsplit(str(value or "").strip())
         if (parsed.scheme.lower() != "https" or parsed.username or parsed.password
@@ -2769,7 +4301,7 @@ def _extract_supported_work_urls(text: str, limit: int = 50) -> list[str]:
     found, seen = [], set()
     for raw in re.findall(
             r"https://[^\s<>'\"。，、；！）】》\]}]+", raw_text, re.I):
-        candidate = raw.rstrip("。，、；！）】》]}>,.!;")
+        candidate = raw.rstrip("。，、；！）】》]}>,.!;)")
         if len(candidate) > 4096:
             continue
         try:
@@ -2792,7 +4324,7 @@ def _extract_supported_work_urls(text: str, limit: int = 50) -> list[str]:
 
 
 def _parse_share(text: str) -> dict:
-    """从分享文案取出首条受支持链接，作品数据统一交给 AnyToCopy。"""
+    """所有平台优先主解析服务；抖音缺失信息由官方链路补全。"""
     links = _extract_supported_work_urls(text, 1)
     if not links:
         raise ApiError(400, "未找到受支持的平台链接，请粘贴公开作品分享链接")
@@ -2800,12 +4332,17 @@ def _parse_share(text: str) -> dict:
 
 
 def _parse_item(kind: str, item_id: str) -> dict:
-    """按 item_id 刷新 ATC 临时媒体地址；不再抓取抖音 H5 分享页。"""
+    """按真实来源刷新：主服务优先，抖音缺失信息走官方补充。"""
     cached = _atc_cache_get(item_id)
     work_url = (cached or {}).get("work_url") or ""
-    if not work_url and re.fullmatch(r"\d{8,30}", item_id or ""):
-        path = "note" if kind == "note" else "video"
-        work_url = f"https://www.douyin.com/{path}/{item_id}"
+    numeric_item = bool(re.fullmatch(r"\d{8,30}", item_id or ""))
+    # 有明确来源链接时以来源为准：其他平台也可能使用纯数字作品 ID，
+    # 不能因为 ID 看起来像 aweme_id 就把它误送到抖音官方页。旧版本没有
+    # 来源链接的数字快照才按抖音 aweme_id 兼容处理，且仍不会进入 ATC。
+    if _is_douyin_work_url(work_url) or (numeric_item and not work_url):
+        official_url = (work_url if _is_douyin_work_url(work_url)
+                        else _douyin_work_url(kind, item_id))
+        return _atc_parse_work_url(official_url, item_id_hint=item_id, kind_hint=kind)
     if not work_url:
         raise ApiError(404, "解析来源已过期，请重新粘贴原平台分享链接")
     return _atc_parse_work_url(work_url, item_id_hint=item_id, kind_hint=kind)
@@ -2813,27 +4350,86 @@ def _parse_item(kind: str, item_id: str) -> dict:
 
 def _parse_cached(text: str) -> dict:
     key = text.strip()
+    if not key:
+        raise ApiError(400, "请粘贴公开作品分享链接")
+    if len(key) > BATCH_TEXT_MAX:
+        raise ApiError(413, "payload_too_large: 解析文本超过上限")
     now = time.time()
-    hit = _cache.get(key)
+    hit = _cache_get(key)
     if hit and now - hit[0] < CACHE_TTL:
-        return hit[1]
+        cached_data = hit[1]
+        cached_video = (cached_data.get("video")
+                        if isinstance(cached_data, dict) else {})
+        cached_source = str((cached_data or {}).get("source") or "").lower()
+        cached_video_source = str((cached_video or {}).get("source") or "").lower()
+        if (cached_source in ("atc", "parser") and cached_data.get("kind") != "note"
+                and not _atc_url_fresh(_atc_cache_get(cached_data.get("item_id")),
+                                       _atc_cfg()["url_ttl"])):
+            hit = None
+        else:
+            direct_cached = (
+                cached_source in ("douyin_direct", "douyin_web")
+                or cached_video_source in ("douyin_direct", "douyin_web"))
+            item_id = str(cached_data.get("item_id") or "")
+            note = cached_data.get("kind") == "note"
+            has_fresh_media = (
+                bool(_douyin_cached_note_media(item_id)) if note
+                else bool(_douyin_cached_media(item_id)))
+            # 直连结果的短时媒体地址过期时，惰性刷新官方 detail。
+            if direct_cached and not has_fresh_media:
+                try:
+                    refreshed = _atc_parse_work_url(
+                        cached_data.get("_link") or _douyin_work_url(
+                            cached_data.get("kind") or "video", item_id),
+                        item_id_hint=item_id,
+                        kind_hint=cached_data.get("kind") or "video",
+                    )
+                    _cache_put(key, refreshed, now)
+                    _cache_put(refreshed.get("item_id", key), refreshed, now)
+                    return refreshed
+                except Exception:
+                    # 刷新失败时只返回元数据和可再刷新的同源端点，
+                    # 不能回退为结果缓存里已过期的 CDN 签名 URL。
+                    safe = json.loads(json.dumps(cached_data, ensure_ascii=False))
+                    if note:
+                        for index, image in enumerate(safe.get("images") or [], 1):
+                            if not isinstance(image, dict):
+                                continue
+                            for field in ("url", "direct_url", "proxy_url",
+                                          "download_url"):
+                                image.pop(field, None)
+                            filename = image.get("filename") or f"image_{index:02d}.jpeg"
+                            if re.fullmatch(r"\d{8,30}", item_id):
+                                image["proxy_url"] = _douyin_image_proxy_url(
+                                    item_id, index, filename)
+                                image["download_url"] = _douyin_image_proxy_url(
+                                    item_id, index, filename, download=True)
+                        safe["media_available"] = bool(safe.get("images"))
+                    else:
+                        safe_video = safe.setdefault("video", {})
+                        for field in ("url", "direct_url", "atc_url"):
+                            safe_video.pop(field, None)
+                        safe_video["media_available"] = False
+                        if re.fullmatch(r"\d{8,30}", item_id):
+                            filename = safe_video.get("filename") or "video.mp4"
+                            safe_video["proxy_url"] = _douyin_video_proxy_url(item_id)
+                            safe_video["download_url"] = _douyin_video_download_url(
+                                item_id, filename)
+                    return safe
+            return cached_data
     data = _parse_share(text)
-    _cache[key] = (now, data)
-    _cache[data["item_id"]] = (now, data)
-    if len(_cache) > 500:
-        for k, (ts, _) in list(_cache.items()):
-            if now - ts > CACHE_TTL:
-                _cache.pop(k, None)
+    _cache_put(key, data, now)
+    _cache_put(data["item_id"], data, now)
     return data
 
 
 # ---------------------------------------------------------------- 分享页
 #
 # 目标：抖音链接发到微信打不开 —— 生成一个「微信里点开就能看」的作品页。
-# 原则（与全站一致）：只存元数据快照 + video_id，**不落地任何媒体字节**。
-#   · 视频：每次渲染用 _play_api(vid) 重拼播放地址（该地址无签名/无时效，天然长期有效）
-#   · 图集：CDN 直链会过期 → 超过 SHARE_REFRESH_TTL 或前端上报失败时按 item_id 惰性重解析
-#   · 源作品被删 → 刷新失败 → status='dead'，页面展示"已被原作者删除"并保留署名
+# 原则（与全站一致）：只存净化后的元数据快照 + item_id，**不落地任何媒体字节**。
+#   · 抖音视频：短时官方签名地址只在内存缓存中保存，过期后由同源 Range 端点按 item_id 刷新
+#   · 兼容平台视频/图集：短时地址保存在服务端缓存，过期时由后台任务惰性刷新
+#   · 源作品被删：刷新失败后按稳定错误状态展示，并保留必要署名
 
 SHARE_TTL_ANON = int(os.environ.get("SHARE_TTL_ANON_DAYS", "7")) * 86400
 SHARE_TTL_USER = int(os.environ.get("SHARE_TTL_USER_DAYS", "30")) * 86400
@@ -2851,6 +4447,8 @@ SHARE_PARSE_DEADLINE_SECONDS = _clamped_env_int(
     "SHARE_PARSE_DEADLINE_SECONDS", 900, 120, 3600)
 SHARE_PARSE_QUEUE_MAX = _clamped_env_int(
     "SHARE_PARSE_QUEUE_MAX", 200, 10, 5000)
+SHARE_PARSE_SHUTDOWN_TIMEOUT = _clamped_env_int(
+    "SHARE_PARSE_SHUTDOWN_TIMEOUT", 35, 5, 120)
 SHARE_PARSE_GLOBAL_PER_MINUTE = _clamped_env_int(
     "SHARE_PARSE_GLOBAL_PER_MINUTE", 120, 10, 10000)
 SHARE_PARSE_GLOBAL_PER_HOUR = _clamped_env_int(
@@ -2866,6 +4464,12 @@ SHARE_PARSE_USER_INFLIGHT = _clamped_env_int(
 SHARE_PARSE_IP_INFLIGHT = _clamped_env_int(
     "SHARE_PARSE_IP_INFLIGHT", 10, 2, 100)
 _share_hits: dict = {}
+_share_event_hits: dict = {}
+_report_hits: dict = {}
+SHARE_EVENT_MAX_PER_MIN = _clamped_env_int(
+    "SHARE_EVENT_MAX_PER_MIN", 120, 10, 1000)
+REPORT_MAX_PER_HOUR = _clamped_env_int(
+    "REPORT_MAX_PER_HOUR", 5, 1, 100)
 
 # ---- 分享域名池 ----
 # 微信封"下载/侵权类"域名是常态而非意外，因此分享链接与主站域名物理隔离，并可轮换。
@@ -2956,10 +4560,6 @@ def _is_wechat(request: Request) -> bool:
     return "micromessenger" in (request.headers.get("user-agent") or "").lower()
 
 
-def _share_ttl(request: Request) -> int:
-    return SHARE_TTL_USER if current_user(request) else SHARE_TTL_ANON
-
-
 def _share_state(row: dict) -> str:
     """分享页公开状态；审核/过期优先于首次异步解析状态。"""
     if row["status"] in ("dead", "takedown"):
@@ -2972,8 +4572,24 @@ def _share_state(row: dict) -> str:
     return "ok"
 
 
+_LEGACY_DIRECT_SOURCES = frozenset(("douyin_direct", "douyin_web"))
+
+
+def _is_legacy_direct_data(data: dict) -> bool:
+    """识别旧版本抖音快照，访问时按官方链路刷新签名媒体地址。"""
+    if not isinstance(data, dict):
+        return False
+    video = data.get("video") if isinstance(data.get("video"), dict) else {}
+    return (str(data.get("source") or "").lower() in _LEGACY_DIRECT_SOURCES
+            or str(video.get("source") or "").lower() in _LEGACY_DIRECT_SOURCES)
+
+
+# 保留旧内部名称，避免第三方扩展导入时直接崩溃；它只做数据识别，不会触发直取。
+_is_douyin_direct_data = _is_legacy_direct_data
+
+
 def _refresh_share(row: dict) -> dict:
-    """临时媒体地址过期时按 item_id 重新调用 ATC 解析。"""
+    """临时媒体地址过期时按 item_id 重新走对应的官方/兼容解析链路。"""
     try:
         data = _parse_item(row["kind"], row["item_id"])
     except ApiError as exc:
@@ -3007,6 +4623,7 @@ def _refresh_share(row: dict) -> dict:
         match = re.search(r"[?&]video_id=([\w-]+)", play_url)
         if match:
             vid = match.group(1)
+    data = _share_storage_payload(data)
     now = int(time.time())
     kind, item_id = _share_item_key(data)
     with _db_lock:
@@ -3035,7 +4652,7 @@ def _refresh_share(row: dict) -> dict:
                     "UPDATE shares SET payload=?,cover=?,vid=?,refreshed_at=?,updated=? "
                     "WHERE id=? AND status='ok' "
                     "AND COALESCE(parse_status,'ready')='ready'",
-                    (json.dumps(data, ensure_ascii=False), data.get("cover", ""),
+                    (json.dumps(_share_storage_payload(data), ensure_ascii=False), data.get("cover", ""),
                      vid, now, now, row["id"]))
             latest = conn.execute(
                 "SELECT * FROM shares WHERE id=?", (row["id"],)).fetchone()
@@ -3055,26 +4672,143 @@ def _share_view(row: dict, origin: str = "") -> dict:
     cfg = _atc_cfg() if state == "ok" else {
         "enabled": False, "play_enhance": False,
         "url_ttl": 0, "play_priority": ["atc", "proxy", "dy1", "dy2"]}
-    video = data.setdefault("video", {}) if row["kind"] != "note" else None
-    is_atc = bool(video and video.get("source") == "atc")
-    if state == "ok" and is_atc:
+    is_note = row["kind"] == "note"
+    video = data.setdefault("video", {}) if not is_note else None
+    is_douyin_direct = bool(
+        (not is_note and video and
+         (video.get("source") in ("douyin_direct", "douyin_web")
+          or data.get("source") in ("douyin_direct", "douyin_web")))
+        or (is_note and data.get("source") in ("douyin_direct", "douyin_web")))
+    is_atc = bool(video and (
+        video.get("source") in ("atc", "parser") or data.get("source") in ("atc", "parser")))
+    # v1.20 之前的分享快照可能把抖音数字作品保存成 ``douyin`` 或
+    # ``atc``。只要能确认来源是抖音且 ID 是标准 aweme_id，就在内存中
+    # 迁移到官方链路；这样存量链接不会再次进入第三方播放任务。
+    legacy_source = str(
+        data.get("source") or ((video or {}).get("source")) or "").lower()
+    source_link = str(data.get("_link") or data.get("work_url") or "")
+    legacy_douyin = (
+        _is_douyin_work_url(source_link)
+        or legacy_source in ("douyin", "douyin_direct", "douyin_web"))
+    if (not is_douyin_direct and not is_atc and legacy_douyin
+            and re.fullmatch(r"\d{8,30}", str(row["item_id"] or ""))):
+        data["source"] = "douyin_direct"
+        if video is not None:
+            video["source"] = "douyin_direct"
+        is_douyin_direct = True
+        is_atc = False
+    if state == "ok" and is_note:
+        raw_images = data.get("images") if isinstance(data.get("images"), list) else []
+        if is_douyin_direct and re.fullmatch(
+                r"\d{8,30}", str(row["item_id"] or "")):
+            cached_note = _douyin_cached_note_media(row["item_id"])
+            direct_urls = list((cached_note or {}).get("urls") or [])
+            count = max(len(raw_images), len(direct_urls))
+            base = _safe_name(row.get("title") or data.get("title") or "",
+                              row["item_id"])
+            images = []
+            for index in range(1, min(100, count) + 1):
+                old = raw_images[index - 1] if index <= len(raw_images) else {}
+                old = old if isinstance(old, dict) else {}
+                filename = str(
+                    old.get("filename") or f"{base}_{index:02d}.jpeg")[:180]
+                image = {
+                    "index": index,
+                    "filename": filename,
+                    "proxy_url": _douyin_image_proxy_url(
+                        row["item_id"], index, filename),
+                    "download_url": _douyin_image_proxy_url(
+                        row["item_id"], index, filename, download=True),
+                }
+                if index <= len(direct_urls):
+                    image["url"] = direct_urls[index - 1]
+                images.append(image)
+            data["images"] = images
+            data["media_available"] = bool(images)
+        else:
+            # 兼容服务图集没有可按 item_id 安全刷新的服务端
+            # 媒体缓存；新建分享已在入口拒绝，旧快照也不再下发
+            # 已过期的签名地址。
+            if legacy_source in ("atc", "parser"):
+                for image in raw_images:
+                    if isinstance(image, dict):
+                        for field in ("url", "direct_url", "proxy_url",
+                                      "download_url"):
+                            image.pop(field, None)
+                data["media_available"] = False
+            else:
+                data["media_available"] = any(
+                    isinstance(image, dict)
+                    and bool(_atc_public_url(image.get("url")))
+                    for image in raw_images)
+    elif state == "ok" and is_douyin_direct:
+        filename = video.get("filename") or (
+            _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
+        video["filename"] = filename
+        cached = _douyin_cached_media(row["item_id"])
+        direct = ((cached or {}).get("url") or video.get("direct_url")
+                  or video.get("url") or "")
+        # 没有内存缓存时，只继续下发刚刷新且仍有效的地址；过期地址交给
+        # 同源端点按 item_id 惰性刷新，避免微信拿到必定 403 的签名 URL。
+        fresh_payload = bool(
+            direct and (cached or
+                        (row.get("refreshed_at") and
+                         time.time() - row["refreshed_at"] < DOUYIN_MEDIA_CACHE_TTL)))
+        if direct and fresh_payload and _douyin_public_url(direct):
+            video["url"] = direct
+            video["direct_url"] = direct
+            video["media_available"] = True
+        else:
+            for key in ("url", "direct_url"):
+                video.pop(key, None)
+            video["media_available"] = False
+        # 同源端点只接受合法的数字作品 ID 和 HMAC；旧快照可能使用了
+        # 短/非数字占位 ID，这类记录只能显示元数据，不能生成一个必然 400
+        # 的播放或下载按钮。
+        if re.fullmatch(r"\d{8,30}", str(row["item_id"] or "")):
+            video["proxy_url"] = _douyin_video_proxy_url(row["item_id"])
+            video["download_url"] = _douyin_video_download_url(
+                row["item_id"], filename)
+        else:
+            video.pop("proxy_url", None)
+            video.pop("download_url", None)
+    elif state == "ok" and is_atc:
         filename = video.get("filename") or (
             _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
         video["filename"] = filename
         cached = _atc_cache_get(row["item_id"])
+        # Legacy snapshots may still contain a signed URL or a proxy token.
+        # Remove those fields before deciding whether the cache is usable so an
+        # expired/missing cache can never make the page advertise a dead link.
+        for key in ("url", "direct_url", "atc_url", "proxy_url", "download_url"):
+            video.pop(key, None)
+        video["media_available"] = False
         if _atc_url_fresh(cached, cfg["url_ttl"]):
             direct = cached["video_url"]
             video["url"] = direct
-            video["atc_url"] = direct
+            video["direct_url"] = direct
             if _host_allowed(direct):
                 video["proxy_url"] = _atc_video_proxy_url(row["item_id"])
                 video["download_url"] = _atc_video_download_url(
                     row["item_id"], filename)
-        elif cached:
-            # 签名直链过期后不继续下发死链，由队列惰性刷新。
-            for key in ("url", "atc_url", "proxy_url", "download_url"):
-                video.pop(key, None)
-            _atc_enqueue(row["item_id"], purpose="play")
+                video["media_available"] = True
+        else:
+            # 缓存缺失和缓存过期都走同一条惰性刷新路径。优先使用分享
+            # 快照中的原始链接，避免旧数据只能拿 item_id 时无法入队。
+            # 旧同步分享快照把原始链接保存在 shares.source_url，而新快照
+            # 可能暂存于 payload._link；两者都只用于后台入队，绝不公开。
+            source_link = (data.get("_link") or data.get("work_url")
+                           or row.get("source_url") or "")
+            if source_link:
+                _atc_enqueue(row["item_id"], work_url=source_link, purpose="play")
+            else:
+                _atc_enqueue(row["item_id"], purpose="play")
+            # 主媒体缓存缺失时，抖音仍可通过同源端点按真实来源进行补充。
+            fallback_link = source_link or (cached or {}).get("work_url") or ""
+            if (_is_douyin_work_url(fallback_link)
+                    or (not fallback_link and re.fullmatch(r"\d{8,30}", row["item_id"]))):
+                video["proxy_url"] = _atc_video_proxy_url(row["item_id"])
+                video["download_url"] = _atc_video_download_url(row["item_id"], filename)
     elif state == "ok" and row["kind"] != "note" and row["vid"]:
         data.setdefault("video", {})
         data["video"]["url"] = _play_api(row["vid"])          # 每次重拼，保持新鲜
@@ -3092,9 +4826,17 @@ def _share_view(row: dict, origin: str = "") -> dict:
                 data["video"]["atc_url"] = cached["video_url"]
             elif cached:
                 _atc_enqueue(row["item_id"], purpose="play")
-    # 播放线路优先级（ATC 新数据优先，旧分享页仍可用抖音备线）
+    # 官方签名地址由服务端出口生成，微信/访客优先走同源代理。
     if state == "ok":
-        data["play_priority"] = cfg["play_priority"]
+        data["play_priority"] = (["proxy", "dy1", "dy2"]
+                                  if is_douyin_direct else cfg["play_priority"])
+    # 分享页只公开展示字段和服务端生成的相对端点。内部来源链接、兼容
+    # 服务工作 URL 等可能含有追踪参数或凭据，不能随 payload 回传给访客。
+    for private_key in ("_link", "work_url", "source_url"):
+        data.pop(private_key, None)
+    if isinstance(video, dict):
+        for private_key in ("work_url", "source_url"):
+            video.pop(private_key, None)
     view = {
         "sid": row["id"],
         "kind": row["kind"],
@@ -3115,6 +4857,21 @@ def _share_view(row: dict, origin: str = "") -> dict:
         "views": row["views"], "plays": row["plays"], "downloads": row["downloads"],
         "data": data,
     }
+    if is_note:
+        media_available = bool(data.get("media_available") and data.get("images"))
+    else:
+        current_video = data.get("video") if isinstance(data.get("video"), dict) else {}
+        media_available = bool(
+            current_video.get("media_available")
+            or current_video.get("url") or current_video.get("proxy_url"))
+    media_pending = bool(
+        state in ("pending", "processing")
+        or (state == "ok" and not media_available and is_atc))
+    view.update({
+        "media_available": media_available,
+        "media_pending": media_pending,
+        "media_poll_after_ms": 2000 if media_pending else 0,
+    })
     if state in ("pending", "processing"):
         view["poll_after_ms"] = _share_poll_after_ms(row, state)
     elif state == "failed":
@@ -3132,12 +4889,17 @@ def _share_view(row: dict, origin: str = "") -> dict:
 
 def _share_create(request: Request, data: dict, custom_title: str = "",
                   reservation: Optional[dict] = None) -> dict:
+    if data.get("share_supported") is False:
+        raise ApiError(400, "该平台暂不支持生成公开分享页")
     u = current_user(request)
+    # 先在锁外确定有效期；current_user() 可能读取数据库，不能放进事务锁。
+    share_ttl = SHARE_TTL_USER if u else SHARE_TTL_ANON
     sid = _new_sid()
     now = int(time.time())
     item_id = str(data.get("item_id") or "")
     kind = str(data.get("kind") or "video")
     reservation_id = (reservation or {}).get("id") or None
+    stored_data = _share_storage_payload(data)
     vid = ""
     if data.get("video", {}).get("url"):
         vm = re.search(r"video_id=([\w-]+)", data["video"]["url"])
@@ -3158,8 +4920,8 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
                 (sid, item_id, kind, vid, u["id"] if u else None, "", "",
                  (data.get("title") or "")[:300], (data.get("author") or "")[:100],
                  data.get("avatar", ""), data.get("cover", ""),
-                 json.dumps(data, ensure_ascii=False), (custom_title or "")[:300],
-                 "link", now + _share_ttl(request), now, "ok", now,
+                 json.dumps(stored_data, ensure_ascii=False), (custom_title or "")[:300],
+                 "link", now + share_ttl, now, "ok", now,
                  reservation_id))
             if reservation_id:
                 committed = _settle_quota_in_conn(conn, reservation_id, 1)
@@ -3173,8 +4935,9 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
             raise
         finally:
             conn.close()
-    # 兼容旧调用方：若结果缓存缺失，后台补一次 ATC 媒体地址。
-    if data.get("kind") != "note" and data.get("item_id"):
+    # 视频地址只从 ATC 缓存按需补充；创建事务本身不阻塞等待上游。
+    if (data.get("kind") != "note" and data.get("item_id")
+            and data.get("source") in ("atc", "parser")):
         try:
             _atc_enqueue(data["item_id"], purpose="play")
         except Exception:
@@ -3188,19 +4951,54 @@ def _share_event(request: Request, sid: str, kind: str, source: str = "",
     """记录分享页埋点。播放类事件额外带 source/stage/detail/ms/next_src，用于诊断
     「微信里哪些视频能播、走的哪条线路、失败在哪一步、失败后接着重试哪条」。
     注意：只记线路名，不记带签名的完整媒体地址（隐私红线）。"""
+    if (not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", str(sid or ""))
+            or kind not in SHARE_EVENT_KINDS):
+        return "missing"
+    ip = _client_ip(request)
+    if not _rate_ok(
+            _share_event_hits, ip, 60, SHARE_EVENT_MAX_PER_MIN):
+        return "limited"
+    now = int(time.time())
     col = {"view": "views", "play": "plays",
            "download": "downloads", "cta": "cta_clicks"}.get(kind)
+    # 同 IP/链接/类型在一分钟内只记一次；诊断事件额外带线路和阶段，
+    # 保留真实的 fallback 链，同时防止简单重放污染统计。
+    discriminator = (f"{source[:24]}:{stage[:24]}:{next_src[:24]}"
+                     if kind.startswith("play_") or kind == "fallback" else "")
+    event_key = hmac.new(
+        APP_SECRET,
+        f"share-event:v1:{ip}:{sid}:{kind}:{discriminator}:{now // 60}".encode(),
+        hashlib.sha256).hexdigest()
     try:
-        if col:
-            db_exec(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
-        db_exec("INSERT INTO share_events(ts,sid,kind,ip,ua,referer,wechat,fp,"
-                "source,stage,detail,ms,next_src) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (int(time.time()), sid, kind, "", _coarse_ua(request), "",
-                 1 if _is_wechat(request) else 0, "",
-                 source[:24], stage[:24], detail[:120], int(ms or 0),
-                 next_src[:24]))
+        with _db_lock:
+            conn = _db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT status,expires_at FROM shares WHERE id=?", (sid,)).fetchone()
+                if (not row or row["status"] in ("dead", "takedown")
+                        or (row["expires_at"] and int(row["expires_at"]) <= now)):
+                    conn.rollback()
+                    return "missing"
+                inserted = conn.execute(
+                    "INSERT OR IGNORE INTO share_events("
+                    "ts,sid,kind,ip,ua,referer,wechat,fp,source,stage,detail,ms,"
+                    "next_src,event_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (now, sid, kind, "", _coarse_ua(request), "",
+                     1 if _is_wechat(request) else 0, "", source[:24], stage[:24],
+                     detail[:120], max(0, min(300000, int(ms or 0))),
+                     next_src[:24], event_key)).rowcount
+                if inserted and col:
+                    conn.execute(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
+                conn.commit()
+                return "inserted" if inserted else "duplicate"
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
     except Exception:
-        pass
+        return "error"
 
 
 _SHARE_SHORT_PATH = re.compile(r"/[A-Za-z0-9_-]{3,64}/?")
@@ -3219,7 +5017,7 @@ def _normalize_share_short_link(text: str) -> str:
     saw_douyin = False
     for raw in urls:
         # 只去掉普通文案会紧跟在 URL 后的句末符号；不去 ?/#，避免接受 query/fragment。
-        candidate = raw.rstrip("。，、；！）】》]}!,;")
+        candidate = raw.rstrip("。，、；！）】》]}!,;)")
         try:
             parsed = urlparse.urlsplit(candidate)
             host = (parsed.hostname or "").lower().rstrip(".")
@@ -3237,7 +5035,7 @@ def _normalize_share_short_link(text: str) -> str:
     if len(valid) > 1:
         raise ApiError(422, "multiple_links: 每次只能提交一个抖音分享链接")
     if not valid:
-        detail = "链接必须是不带参数的 https://v.douyin.com/<短码>/"
+        detail = "请粘贴不带参数的抖音短链（v.douyin.com）"
         if not saw_douyin:
             detail = "未找到 v.douyin.com 抖音短链"
         raise ApiError(422, f"invalid_douyin_link: {detail}")
@@ -3263,6 +5061,40 @@ def _share_source_hash(source_url: str) -> str:
 
 def _share_item_key(data: dict) -> tuple[str, str]:
     return (str(data.get("kind") or "video"), str(data.get("item_id") or ""))
+
+
+def _share_storage_payload(data: dict) -> dict:
+    """保存分享快照前移除短时媒体地址。
+
+    解析链路返回的媒体地址可能过期；分享页只保留元数据和作品 ID，访问时
+    按抖音官方内存缓存或兼容平台缓存重新注入地址，避免数据库泄露签名。
+    """
+    try:
+        stored = json.loads(json.dumps(data or {}, ensure_ascii=False))
+    except (TypeError, ValueError):
+        stored = dict(data or {}) if isinstance(data, dict) else {}
+    video = stored.get("video")
+    source = str(
+        stored.get("source")
+        or (video.get("source") if isinstance(video, dict) else "") or "").lower()
+    if source in _LEGACY_DIRECT_SOURCES or source in ("atc", "parser"):
+        images = stored.get("images")
+        if isinstance(images, list):
+            for index, image in enumerate(images, 1):
+                if not isinstance(image, dict):
+                    continue
+                for key in ("url", "proxy_url", "download_url", "direct_url"):
+                    image.pop(key, None)
+                image["index"] = index
+        stored["media_available"] = False
+    if not isinstance(video, dict):
+        return stored
+    if source in _LEGACY_DIRECT_SOURCES or source in ("atc", "parser"):
+        for key in ("url", "atc_url", "direct_url", "proxy_url",
+                    "download_url", "alt_url"):
+            video.pop(key, None)
+        video["media_available"] = False
+    return stored
 
 
 def _require_share_item_allowed(data: dict) -> None:
@@ -3312,10 +5144,14 @@ def _share_async_payload(row: dict, origin: str) -> dict:
         "poll_after_ms": _share_poll_after_ms(row, state),
     }
     if state == "ok":
+        view = _share_view(row, origin)
         data.update({
             "kind": row["kind"], "item_id": row["item_id"],
             "title": row["custom_title"] or row["title"] or "（无标题）",
             "author": row["author"] or "", "cover": row["cover"] or "",
+            "media_available": bool(view.get("media_available")),
+            "media_pending": bool(view.get("media_pending")),
+            "media_poll_after_ms": int(view.get("media_poll_after_ms") or 0),
             # 微信若曾抓取过 pending OG，完成后复制带版本的 URL 可降低命中旧卡片的概率。
             "share_url_versioned": f"{share_url}?v={int(row.get('ready_at') or 1)}",
         })
@@ -3327,14 +5163,14 @@ def _share_async_payload(row: dict, origin: str) -> dict:
 
 
 class ShareBody(BaseModel):
-    text: str = ""
-    item_id: str = ""
-    title: str = ""
+    text: str = Field(default="", max_length=PARSE_TEXT_MAX)
+    item_id: str = Field(default="", max_length=64)
+    title: str = Field(default="", max_length=300)
 
 
 class AsyncShareBody(BaseModel):
-    text: str = ""
-    title: str = ""
+    text: str = Field(default="", max_length=4096)
+    title: str = Field(default="", max_length=300)
 
     class Config:
         extra = "forbid"
@@ -3504,7 +5340,7 @@ def api_share_create(body: ShareBody, request: Request):
     data = None
     reservation = None
     if body.item_id:
-        hit = _cache.get(body.item_id.strip())
+        hit = _cache_get(body.item_id.strip())
         if hit and time.time() - hit[0] < CACHE_TTL:
             data = hit[1]
         else:
@@ -3670,11 +5506,12 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
     if kind not in ("video", "note"):
         raise ApiError(400, "不支持的作品类型")
     vid = ""
-    play_url = ((data.get("video") or {}).get("url") or "")
+    video_payload = data.get("video") or {}
+    play_url = (video_payload.get("url") or video_payload.get("direct_url") or "")
     match = re.search(r"[?&]video_id=([\w-]+)", play_url)
     if match:
         vid = match.group(1)
-    if kind == "video" and not play_url:
+    if kind == "video" and not play_url and not video_payload.get("proxy_url"):
         raise ApiError(502, "视频播放地址缺失")
     if kind == "note" and not (data.get("images") or []):
         raise ApiError(502, "图集内容缺失")
@@ -3728,7 +5565,8 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
                 "WHERE id=? AND status='ok' AND parse_status='processing' AND lease_owner=?",
                 (item_id, kind, vid, (data.get("title") or "")[:300],
                  (data.get("author") or "")[:100], data.get("avatar", ""),
-                 data.get("cover", ""), json.dumps(data, ensure_ascii=False),
+                 data.get("cover", ""),
+                 json.dumps(_share_storage_payload(data), ensure_ascii=False),
                  now + ttl, now, now, now, item["id"], item["lease_owner"])
             ).rowcount
             if changed != 1:
@@ -3948,19 +5786,25 @@ def _stop_share_parse_workers() -> None:
     with _share_parse_workers_guard:
         _share_parse_stop.set()
         _wake_share_parse_workers()
-        for thread in list(_share_parse_threads):
-            thread.join(timeout=min(SHARE_PARSE_LEASE_SECONDS + 5, 35))
+        threads = list(_share_parse_threads)
+    deadline = time.monotonic() + SHARE_PARSE_SHUTDOWN_TIMEOUT
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+    with _share_parse_workers_guard:
         _share_parse_threads[:] = [
             t for t in _share_parse_threads if t.is_alive()]
 
 
 class ShareEventBody(BaseModel):
-    kind: str
-    source: str = ""            # 播放线路：atc(新解析直连) / proxy(同源流) / dy1、dy2(旧数据兼容)
-    stage: str = ""             # 该线路的结果：start / ok / error / timeout / giveup
-    detail: str = ""            # 失败细节（media error code、readyState 等）
+    kind: str = Field(max_length=24)
+    source: str = Field(default="", max_length=24)   # 播放线路
+    stage: str = Field(default="", max_length=24)    # start / ok / error / timeout / giveup
+    detail: str = Field(default="", max_length=120)  # media error code、readyState 等
     ms: int = 0                 # 从该线路开始到出结果的耗时
-    next: str = ""              # 失败后链上下一条将重试的线路名（无则空 = 已是最后一条）
+    next: str = Field(default="", max_length=24)
 
 
 # 播放诊断事件：play_try/play_ok/play_fail 只写 share_events，不累加 shares 计数，
@@ -3971,10 +5815,18 @@ SHARE_EVENT_KINDS = ("view", "play", "download", "cta", "fallback",
 
 @app.post("/api/share/{sid}/event")
 def api_share_event(sid: str, body: ShareEventBody, request: Request):
-    if body.kind in SHARE_EVENT_KINDS:
-        _share_event(request, sid, body.kind, body.source, body.stage,
-                     body.detail, body.ms, body.next)
-    return {"ok": True}
+    if body.kind not in SHARE_EVENT_KINDS:
+        raise ApiError(422, "不支持的事件类型")
+    outcome = _share_event(request, sid, body.kind, body.source, body.stage,
+                           body.detail, body.ms, body.next)
+    if outcome == "missing":
+        raise ApiError(404, "分享页不存在或已失效")
+    if outcome == "limited":
+        raise ApiError(429, "事件上报过于频繁，请稍后再试",
+                       {"Retry-After": "60"})
+    if outcome == "error":
+        raise ApiError(503, "事件暂时无法记录，请稍后重试")
+    return {"ok": True, "duplicate": outcome == "duplicate"}
 
 
 def _qr_bytes(sid: str, request: Request, kind: str, scale: int):
@@ -4048,19 +5900,49 @@ def api_share_delete(sid: str, request: Request):
 
 
 class ReportBody(BaseModel):
-    sid: str
-    reason: str
-    contact: str = ""
+    sid: str = Field(min_length=3, max_length=32)
+    reason: str = Field(min_length=1, max_length=1000)
+    contact: str = Field(default="", max_length=200)
 
 
 @app.post("/api/report")
 def api_report(body: ReportBody, request: Request):
     """侵权/违规投诉入口（无需登录）。管理员在后台处理后可下架。"""
-    if not body.reason.strip():
+    sid = body.sid.strip()
+    reason = body.reason.strip()
+    contact = body.contact.strip()
+    if not reason:
         raise ApiError(400, "请填写投诉理由")
-    db_exec("INSERT INTO reports(ts,sid,reason,contact,ip) VALUES(?,?,?,?,?)",
-            (int(time.time()), body.sid[:32], body.reason[:1000],
-             body.contact[:200], ""))
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,32}", sid):
+        raise ApiError(404, "分享页不存在或已失效")
+    ip = _client_ip(request)
+    if not _rate_ok(_report_hits, ip, 3600, REPORT_MAX_PER_HOUR):
+        raise ApiError(429, "投诉提交过于频繁，请稍后再试",
+                       {"Retry-After": "3600"})
+    now = int(time.time())
+    stored_ip = _privacy_hash("report-ip", ip)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            share = conn.execute(
+                "SELECT status,expires_at FROM shares WHERE id=?", (sid,)).fetchone()
+            if (not share or share["status"] in ("dead", "takedown")
+                    or (share["expires_at"] and int(share["expires_at"]) <= now)):
+                raise ApiError(404, "分享页不存在或已失效")
+            duplicate = conn.execute(
+                "SELECT 1 FROM reports WHERE sid=? AND ip=? AND reason=? AND ts>=?",
+                (sid, stored_ip, reason, now - 3600)).fetchone()
+            if not duplicate:
+                conn.execute(
+                    "INSERT INTO reports(ts,sid,reason,contact,ip) VALUES(?,?,?,?,?)",
+                    (now, sid, reason, contact, stored_ip))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return {"ok": True, "message": "已收到，我们会尽快处理"}
 
 
@@ -4140,9 +6022,9 @@ def wx_jssdk(request: Request, url: str = ""):
             "signature": hashlib.sha1(raw.encode()).hexdigest()}
 
 
-# ---------------------------------------------------------------- AnyToCopy 统一解析（ATC）
+# ---------------------------------------------------------------- 主解析服务（保留内部配置名称兼容）
 #
-# 主解析服务：网页、批量 API 与分享页 worker 都通过 /video/extract 取数。
+# 网页、批量 API 与分享 worker 优先通过主服务取数；抖音缺失信息由官方接口补全。
 # 硬约束：
 #   · 普通解析只传 workUrl，默认不传 taskType，不发起语音转文字
 #   · 只有用户主动使用文案提取时才传 taskType=TEXT，并走 atc_jobs 持久队列
@@ -4155,9 +6037,17 @@ ATC_POLL_INTERVAL = 4          # 官方建议 3-5 秒
 ATC_JOB_TIMEOUT = 300          # 单任务最长 5 分钟
 ATC_INFLIGHT_MAX = 2           # 同时在轮询的任务数（对方并发上限 5，留余量给其网页端）
 ATC_PRIMARY_INFLIGHT_MAX = 3   # 主解析占 3 席，与后台队列合计不超过 5
+ATC_WORKERS = _clamped_env_int("ATC_WORKERS", 1, 1, ATC_INFLIGHT_MAX)
+ATC_SUBMIT_LEASE_SECONDS = 60
+ATC_POLL_LEASE_SECONDS = 45
+ATC_SHUTDOWN_TIMEOUT = 35
 ATC_WORK_URL = "https://www.douyin.com/video/{item_id}"   # 由 item_id 还原作品链接
 SHARE_PLAY_SOURCES = ("atc", "proxy", "dy1", "dy2")
 _atc_primary_slots = threading.BoundedSemaphore(ATC_PRIMARY_INFLIGHT_MAX)
+_atc_stop = threading.Event()
+_atc_threads: list[threading.Thread] = []
+_atc_workers_guard = threading.Lock()
+_atc_instance = "atc_" + secrets.token_urlsafe(9)
 
 
 def _atc_cfg() -> dict:
@@ -4204,28 +6094,19 @@ def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
         with urlreq.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8", "replace")
     except urlerr.HTTPError as exc:
-        try:
-            raw = exc.read().decode("utf-8", "replace")[:1000]
-        except Exception:
-            raw = ""
-        try:
-            detail = json.loads(raw).get("msg") or ""
-        except (ValueError, AttributeError):
-            detail = ""
         if exc.code in (401, 403):
-            raise ApiError(503, "AnyToCopy API 鉴权失败，请在管理后台更新密钥")
+            raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
         if exc.code == 429:
-            raise ApiError(503, "AnyToCopy API 请求过于频繁，请稍后重试")
-        suffix = f"：{detail[:120]}" if detail else ""
-        raise ApiError(502, f"AnyToCopy API 返回 HTTP {exc.code}{suffix}")
+            raise ApiError(503, "视频解析请求较多，请稍后重试")
+        raise ApiError(502, "视频解析服务连接异常，请稍后重试")
     except (urlerr.URLError, TimeoutError, OSError):
-        raise ApiError(502, "AnyToCopy API 连接失败，请稍后重试")
+        raise ApiError(502, "视频解析服务连接异常，请稍后重试")
     try:
         payload = json.loads(raw)
     except ValueError:
-        raise ApiError(502, "AnyToCopy API 返回了无效响应")
+        raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
     if not isinstance(payload, dict):
-        raise ApiError(502, "AnyToCopy API 返回了无效响应")
+        raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
     return payload
 
 
@@ -4235,20 +6116,20 @@ def _atc_rejected(resp: dict, action: str = "任务") -> ApiError:
     lowered = msg.lower()
     if code in ("401", "403") or any(
             token in lowered for token in ("api key", "secret", "验证失败", "鉴权")):
-        return ApiError(503, "AnyToCopy API 鉴权失败，请在管理后台更新密钥")
+        return ApiError(503, "视频解析服务暂时不可用，请稍后重试")
     if "并发" in msg or "上限" in msg:
-        return ApiError(503, "AnyToCopy API 当前任务较多，请稍后重试",
+        return ApiError(503, "视频解析请求较多，请稍后重试",
                         {"Retry-After": "5"})
-    return ApiError(502, f"AnyToCopy {action}失败" + (f"：{msg}" if msg else ""))
+    return ApiError(502, f"视频解析{action}失败，请稍后重试")
 
 
 def _atc_extract(work_url: str, include_text: bool = False) -> dict:
     """提交并轮询一个 ATC 任务。普通解析不传 taskType。"""
     cfg = _atc_cfg()
     if not (cfg["key"] and cfg["secret"]):
-        raise ApiError(503, "视频解析 API 尚未配置，请先在管理后台填写 AnyToCopy 密钥")
+        raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
     if not cfg["enabled"]:
-        raise ApiError(503, "视频解析服务已在管理后台停用")
+        raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
     if not _atc_primary_slots.acquire(timeout=10):
         raise ApiError(503, "视频解析任务较多，请稍后重试",
                        {"Retry-After": "5"})
@@ -4261,14 +6142,14 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
             raise _atc_rejected(submitted, "任务提交")
         created = submitted["data"]
         if isinstance(created, dict):
-            if created.get("status") == "SUCCESS" or (
+            if _atc_status_value(created) in ("SUCCESS", "SUCCEEDED", "DONE") or (
                     not include_text and _atc_basic_result_ready(created)):
                 return created
-            task_id = str(created.get("taskId") or "")
+            task_id = _atc_task_id(created)
         else:
             task_id = str(created)
         if not task_id:
-            raise ApiError(502, "AnyToCopy 任务响应缺少 taskId")
+            raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
 
         deadline = time.monotonic() + ATC_JOB_TIMEOUT
         while time.monotonic() < deadline:
@@ -4279,24 +6160,302 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
                 raise _atc_rejected(queried, "任务查询")
             data = queried.get("data") or {}
             if not isinstance(data, dict):
-                raise ApiError(502, "AnyToCopy 任务结果格式无效")
-            status = str(data.get("status") or "").upper()
-            if status in ("FAILED", "FAILURE"):
+                raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
+            status = _atc_status_value(data)
+            if status in ("FAILED", "FAILURE", "ERROR"):
                 message = str(data.get("errorMessage") or "任务执行失败")[:160]
                 raise ApiError(404 if any(x in message for x in (
                     "不存在", "删除", "私密")) else 502,
-                    f"AnyToCopy 解析失败：{message}")
-            if status == "SUCCESS" or (
+                    "作品无法解析，可能已失效、删除或设为私密"
+                    if any(x in message for x in ("不存在", "删除", "私密"))
+                    else "视频解析失败，请稍后重试")
+            if status in ("SUCCESS", "SUCCEEDED", "DONE") or (
                     not include_text and _atc_basic_result_ready(data)):
                 return data
-        raise ApiError(504, "AnyToCopy 解析超时，请稍后重试")
+        raise ApiError(504, "视频解析超时，请稍后重试")
     finally:
         _atc_primary_slots.release()
 
 
 def _atc_basic_result_ready(data: dict) -> bool:
-    return bool(data.get("videoUrl") or data.get("videoUrlList")
-                or data.get("imageUrlList"))
+    """Return whether a compatibility response contains actual media.
+
+    Providers have returned the same fields both at the top level and inside
+    ``data/result/video`` wrappers.  A profile URL, cover image, or author
+    object is metadata and must not make a task look complete; only a media
+    URL/list (or an image list for notes) qualifies.
+    """
+    media_keys = {
+        "videourl", "video_url", "videourllist", "video_url_list",
+        "videourls", "video_urls", "imageurllist", "image_url_list",
+        "imageurls", "image_urls", "downloadurl", "download_url",
+    }
+    nested_media_keys = {
+        "url", "url_list", "urllist", "play_addr", "playaddr",
+        "download_url", "downloadurl", "playurl", "play_url",
+    }
+    ignored = {
+        "author", "user", "creator", "profile", "avatar", "cover",
+        "coverurl", "cover_url", "thumbnail", "poster", "music",
+    }
+
+    def has_value(value):
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set)):
+            return any(has_value(item) for item in value)
+        return bool(value) if not isinstance(value, dict) else False
+
+    def walk(node, depth=0):
+        if depth > 12:
+            return False
+        if isinstance(node, dict):
+            for key, value in node.items():
+                normalized = str(key).replace("-", "_").lower()
+                compact = normalized.replace("_", "")
+                if normalized in media_keys or compact in media_keys:
+                    if has_value(value):
+                        return True
+                if normalized not in ignored and isinstance(value, dict):
+                    # Inside a video object, a plain ``url`` is media.  The
+                    # same field under author/profile/cover was excluded above.
+                    if (normalized in ("video", "media", "file", "result", "data",
+                                       "payload", "item", "aweme", "aweme_detail")
+                            and any(
+                                has_value(value.get(k)) for k in nested_media_keys
+                                if k in value)):
+                        return True
+                    if walk(value, depth + 1):
+                        return True
+                elif normalized not in ignored and isinstance(value, list):
+                    if walk(value, depth + 1):
+                        return True
+        elif isinstance(node, (list, tuple)):
+            return any(walk(value, depth + 1) for value in node)
+        return False
+
+    return walk(data)
+
+
+_ATC_RESULT_WRAPPERS = (
+    "data", "result", "payload", "item", "aweme", "aweme_detail")
+
+
+def _atc_result_data(payload) -> dict:
+    """将 ATC 历史上的多种响应包装归一为业务字段。
+
+    只展开已知的 envelope，不展开 ``video``/``author`` 等业务
+    对象，避免同名字段串线。内层结果覆盖外层运输元数据。
+    """
+    def normalize(node, depth=0):
+        if depth > 12 or not isinstance(node, dict):
+            return {}
+        out = {
+            str(key): value for key, value in node.items()
+            if key not in _ATC_RESULT_WRAPPERS
+        }
+        for key in _ATC_RESULT_WRAPPERS:
+            nested = node.get(key)
+            if isinstance(nested, dict):
+                out.update(normalize(nested, depth + 1))
+            elif isinstance(nested, (list, tuple)):
+                for entry in nested:
+                    if isinstance(entry, dict):
+                        candidate = normalize(entry, depth + 1)
+                        if candidate:
+                            out.update(candidate)
+                            break
+        return out
+
+    return normalize(payload)
+
+
+def _atc_task_id(payload) -> str:
+    """Extract a task identifier from common nested provider envelopes."""
+    keys = ("taskId", "taskID", "task_id", "taskid", "jobId", "job_id")
+
+    def scalar(value):
+        if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+            return ""
+        text = str(value).strip()
+        return text[:256] if text else ""
+
+    def walk_explicit(node, depth=0):
+        if depth > 12:
+            return ""
+        if isinstance(node, dict):
+            for key in keys:
+                if key in node:
+                    found = scalar(node.get(key))
+                    if found:
+                        return found
+            for value in node.values():
+                found = walk_explicit(value, depth + 1)
+                if found:
+                    return found
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                found = walk_explicit(value, depth + 1)
+                if found:
+                    return found
+        return ""
+
+    found = walk_explicit(payload)
+    if found:
+        return found
+    # 一些旧版本直接返回 {"data":"task-id"}。只允许根值或
+    # 已知 envelope 的标量作为兼容回退，不能把 code/message/status
+    # 等任意叶子误当 taskId。
+    if not isinstance(payload, (dict, list, tuple, set)):
+        return scalar(payload)
+    if isinstance(payload, dict):
+        for key in _ATC_RESULT_WRAPPERS:
+            value = payload.get(key)
+            found = scalar(value)
+            if found:
+                return found
+    return ""
+
+
+def _atc_status_value(payload) -> str:
+    """Extract and normalize a task status from nested provider envelopes."""
+    keys = ("status", "taskStatus", "task_status", "state")
+
+    def scalar(value):
+        if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+            return ""
+        text = str(value).strip()
+        return text.upper()[:64] if text else ""
+
+    def walk(node, depth=0):
+        if depth > 12:
+            return ""
+        if isinstance(node, dict):
+            for key in keys:
+                if key in node:
+                    found = scalar(node.get(key))
+                    if found:
+                        return found
+            for value in node.values():
+                found = walk(value, depth + 1)
+                if found:
+                    return found
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                found = walk(value, depth + 1)
+                if found:
+                    return found
+        return ""
+
+    found = walk(payload)
+    if found:
+        return found
+    if not isinstance(payload, (dict, list, tuple, set)):
+        return scalar(payload)
+    return ""
+
+
+_MAX_MEDIA_DURATION_MS = 24 * 60 * 60 * 1000
+
+
+def _atc_duration_ms(value, assume_ms: bool = False) -> int:
+    """Normalize duration values returned by compatibility providers.
+
+    Providers have historically returned seconds, milliseconds, ``MM:SS`` /
+    ``HH:MM:SS`` strings, and ISO-8601 durations.  Keep this conversion in one
+    place so malformed values cannot become a misleading ``0:00`` or an
+    absurdly long media element.
+    """
+    if value is None or isinstance(value, bool) or isinstance(value, dict):
+        return 0
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return 0
+        iso = re.fullmatch(
+            r"P(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?"
+            r"(?:(\d+(?:\.\d+)?)S)?)", raw.upper())
+        if iso and any(iso.groups()):
+            seconds = (float(iso.group(1) or 0) * 3600
+                       + float(iso.group(2) or 0) * 60
+                       + float(iso.group(3) or 0))
+            return _atc_duration_ms(seconds)
+        clock = re.fullmatch(r"(?:(\d+):)?(\d{1,3}):(\d{2})(?:\.(\d+))?", raw)
+        if clock:
+            hours = int(clock.group(1) or 0)
+            minutes = int(clock.group(2) or 0)
+            seconds = int(clock.group(3) or 0)
+            if minutes >= 60 or seconds >= 60:
+                return 0
+            fraction = float(f"0.{clock.group(4)}") if clock.group(4) else 0.0
+            return _atc_duration_ms(hours * 3600 + minutes * 60
+                                    + seconds + fraction)
+        suffix = re.fullmatch(
+            r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(ms|s|m|h)?", raw, re.I)
+        if not suffix:
+            return 0
+        number = float(suffix.group(1))
+        unit = (suffix.group(2) or "").lower()
+        if unit == "ms":
+            assume_ms = True
+        elif unit == "s":
+            assume_ms = False
+        elif unit == "m":
+            number *= 60
+            assume_ms = False
+        elif unit == "h":
+            number *= 3600
+            assume_ms = False
+        value = number
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not math.isfinite(number) or number <= 0:
+        return 0
+    milliseconds = number if assume_ms or number >= 100000 else number * 1000
+    if not math.isfinite(milliseconds) or milliseconds <= 0:
+        return 0
+    return min(_MAX_MEDIA_DURATION_MS, int(round(milliseconds)))
+
+
+def _atc_payload_duration_ms(payload) -> int:
+    """Find a duration in a nested provider response, preferring explicit units."""
+    if not isinstance(payload, (dict, list, tuple)):
+        return 0
+    explicit_keys = {
+        "durationms", "duration_ms", "durationmilliseconds", "duration_milliseconds",
+    }
+    generic_keys = {"duration", "length", "video_duration", "videoduration"}
+
+    def walk(node, depth=0):
+        if depth > 12:
+            return 0
+        if isinstance(node, dict):
+            for key, value in node.items():
+                normalized = str(key).replace("-", "_").lower()
+                if normalized in explicit_keys:
+                    parsed = _atc_duration_ms(value, assume_ms=True)
+                    if parsed:
+                        return parsed
+            for key, value in node.items():
+                normalized = str(key).replace("-", "_").lower()
+                if normalized in generic_keys:
+                    parsed = _atc_duration_ms(value)
+                    if parsed:
+                        return parsed
+            for value in node.values():
+                parsed = walk(value, depth + 1)
+                if parsed:
+                    return parsed
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                parsed = walk(value, depth + 1)
+                if parsed:
+                    return parsed
+        return 0
+
+    return walk(payload)
 
 
 def _atc_public_url(value) -> str:
@@ -4316,32 +6475,75 @@ def _atc_public_url(value) -> str:
 
 def _atc_public_urls(value) -> list[str]:
     """兼容开放 API 把 URL 集合返回为数组或单个字符串。"""
-    values = value if isinstance(value, (list, tuple)) else [value]
-    urls = [_atc_public_url(item) for item in values]
-    return [item for item in urls if item]
+    out, seen = [], set()
+    def visit(node):
+        if len(out) >= 100:
+            return
+        if isinstance(node, str):
+            url = _atc_public_url(node)
+            if url and url not in seen:
+                seen.add(url)
+                out.append(url)
+        elif isinstance(node, dict):
+            for key in ("url_list", "url", "src", "download_url", "play_url",
+                        "image_url", "imageUrl", "uri"):
+                if key in node:
+                    visit(node[key])
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                visit(item)
+                if len(out) >= 100:
+                    break
+    visit(value)
+    return out
 
 
 def _atc_item_id(work_url: str, data: dict) -> str:
-    for key in ("workId", "itemId", "awemeId", "aweme_id"):
-        candidate = str(data.get(key) or "").strip()
-        if re.fullmatch(r"[\w-]{8,40}", candidate):
-            return candidate
-    for value in (str(data.get("workUrl") or ""), work_url):
+    sources = [data]
+    nested = _douyin_find_item(data)
+    if isinstance(nested, dict) and nested is not data:
+        sources.append(nested)
+    for source in sources:
+        for key in ("workId", "itemId", "awemeId", "aweme_id"):
+            candidate = str(source.get(key) or "").strip()
+            if re.fullmatch(r"[\w-]{8,40}", candidate):
+                return candidate
+    for value in (str(data.get("workUrl") or ""), str(nested.get("share_url") or "")
+                  if isinstance(nested, dict) else "", work_url):
         match = re.search(r"/(?:video|note|slides|share/(?:video|note|slides))/(\d{8,30})",
                           value)
         if match:
             return match.group(1)
     # 短码不含作品 ID，用不可逆稳定标识做缓存/分享页主键。
-    return "atc_" + hashlib.sha256(work_url.encode()).hexdigest()[:24]
+    return "item_" + hashlib.sha256(work_url.encode()).hexdigest()[:24]
 
 
 def _atc_result_to_parse(work_url: str, data: dict,
-                         item_id_hint: str = "", kind_hint: str = "") -> dict:
+                         item_id_hint: str = "", kind_hint: str = "",
+                         *, allow_partial: bool = False) -> dict:
+    data = _atc_result_data(data if isinstance(data, dict) else {})
     platform_id = _atc_platform_for_url(work_url) or "other"
-    work_type = str(data.get("workType") or kind_hint or "video").lower()
-    image_urls = _atc_public_urls(data.get("imageUrlList"))
+    native_item = _douyin_find_item(data) if isinstance(data, dict) else None
+    native_item = native_item if isinstance(native_item, dict) else {}
+    work_type = str(data.get("workType") or native_item.get("work_type")
+                    or native_item.get("aweme_type") or kind_hint or "video").lower()
+    image_urls = (_atc_public_urls(data.get("imageUrlList"))
+                  + _atc_public_urls(data.get("images"))
+                  + _atc_public_urls(data.get("image_urls")))
+    video_obj = data.get("video") if isinstance(data.get("video"), dict) else {}
+    if not video_obj and isinstance(native_item.get("video"), dict):
+        video_obj = native_item.get("video")
+    image_urls += _atc_public_urls(
+        video_obj.get("imageUrlList") if isinstance(video_obj, dict) else None)
     video_urls = (_atc_public_urls(data.get("videoUrl"))
-                  + _atc_public_urls(data.get("videoUrlList")))
+                  + _atc_public_urls(data.get("videoUrlList"))
+                  + _atc_public_urls(video_obj.get("url"))
+                  + _atc_public_urls(video_obj.get("play_addr"))
+                  + _atc_public_urls(video_obj.get("download_addr"))
+                  + _atc_public_urls(native_item.get("videoUrl"))
+                  + _atc_public_urls(native_item.get("videoUrlList")))
+    image_urls = list(dict.fromkeys(image_urls))
+    video_urls = list(dict.fromkeys(video_urls))
     video_url = next(iter(dict.fromkeys(video_urls)), "")
     kind = "note" if work_type in ("image", "images", "note", "slides") else "video"
     if image_urls and not video_url:
@@ -4357,66 +6559,128 @@ def _atc_result_to_parse(work_url: str, data: dict,
             host = (urlparse.urlsplit(work_url).hostname or "site").lower()
             namespace = "web" + hashlib.sha256(host.encode()).hexdigest()[:8]
         item_id = f"{namespace}_{raw_item_id}"[:40]
-    title = str(data.get("title") or data.get("content") or "（无标题）").strip()
+    title = str(data.get("title") or data.get("content")
+                or native_item.get("desc") or native_item.get("title")
+                or "（无标题）").strip()
     title = title[:1000] or "（无标题）"
     base = _safe_name(title, item_id)
 
-    author_data = data.get("author") or {}
+    author_data = data.get("author") or data.get("creator") or native_item.get("author") or {}
     if isinstance(author_data, dict):
-        author = str(author_data.get("nickname") or author_data.get("name") or "")
-        avatar = _atc_public_url(author_data.get("avatar") or author_data.get("avatarUrl"))
-        author_url = _atc_public_url(author_data.get("url") or author_data.get("homepage"))
+        author = str(author_data.get("nickname") or author_data.get("name")
+                     or author_data.get("display_name") or "")
+        avatar = _atc_public_url(
+            author_data.get("avatar") or author_data.get("avatarUrl")
+            or next(iter(_atc_public_urls(author_data.get("avatar_larger")
+                                         or author_data.get("avatar_thumb"))), ""))
+        author_url = _atc_public_url(author_data.get("url")
+                                     or author_data.get("homepage")
+                                     or author_data.get("profile_url"))
     else:
         author, avatar, author_url = str(author_data or ""), "", ""
-    author = str(data.get("authorName") or data.get("nickname") or author)[:100]
+    author = str(data.get("authorName") or data.get("nickname")
+                 or native_item.get("author_name") or author)[:100]
     avatar = _atc_public_url(data.get("avatar") or data.get("avatarUrl")) or avatar
     author_url = _atc_public_url(data.get("authorUrl")) or author_url
 
     raw_stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+    if not raw_stats and isinstance(data.get("statistics"), dict):
+        raw_stats = data["statistics"]
+    if not raw_stats and isinstance(native_item.get("statistics"), dict):
+        raw_stats = native_item["statistics"]
+    def stat_value(*keys):
+        for key in keys:
+            if key in raw_stats and raw_stats[key] is not None:
+                return raw_stats[key]
+            if key in data and data[key] is not None:
+                return data[key]
+            if key in native_item and native_item[key] is not None:
+                return native_item[key]
+        return None
     stats = {
-        "digg": raw_stats.get("digg") or data.get("diggCount"),
-        "comment": raw_stats.get("comment") or data.get("commentCount"),
-        "collect": raw_stats.get("collect") or data.get("collectCount"),
-        "share": raw_stats.get("share") or data.get("shareCount"),
+        # 显式判断 None，不能用 ``or`` 否则合法的 0 会被吞掉。
+        "digg": stat_value("digg", "digg_count", "diggCount", "like_count", "likeCount"),
+        "comment": stat_value("comment", "comment_count", "commentCount"),
+        "collect": stat_value("collect", "collect_count", "collectCount", "favorite_count"),
+        "share": stat_value("share", "share_count", "shareCount"),
     }
+    stats = {key: _douyin_number(value) for key, value in stats.items()}
     content = str(data.get("content") or title)
     tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
     result = {
-        "kind": kind, "item_id": item_id, "source": "atc", "title": title,
+        "kind": kind, "item_id": item_id, "source": "parser", "title": title,
         "platform": platform_id,
         "share_supported": platform_id == "douyin",
         "author": author, "avatar": avatar, "author_url": author_url,
         "create_time": None, "stats": stats, "tags": tags,
-        "music": None, "location": None, "base": base,
-        "cover": _atc_public_url(data.get("cover")),
+        "music": None, "location": None, "base": base, "_link": work_url,
+        "cover": _atc_public_url(
+            data.get("cover") or data.get("coverUrl")
+            or video_obj.get("cover") or video_obj.get("origin_cover")),
     }
 
     if kind == "note":
-        if not image_urls:
-            raise ApiError(404, "AnyToCopy 未返回图集地址")
+        if not image_urls and not allow_partial:
+            raise ApiError(404, "暂未获取到可用的图集地址")
         result["images"] = [
             {"url": url, "filename": f"{base}_{index:02d}.jpeg"}
             for index, url in enumerate(image_urls, 1)]
     else:
-        if not video_url:
-            raise ApiError(404, "AnyToCopy 未返回无水印视频地址")
-        try:
-            duration = float(data.get("duration") or 0)
-        except (TypeError, ValueError):
-            duration = 0
-        result["duration_ms"] = int(duration if duration > 100000 else duration * 1000)
+        if not video_url and not allow_partial:
+            raise ApiError(404, "暂未获取到可用的无水印视频地址")
+        duration_value = (data.get("duration") if data.get("duration") is not None
+                          else video_obj.get("duration")
+                          if video_obj.get("duration") is not None
+                          else native_item.get("duration"))
+        result["duration_ms"] = (
+            _atc_duration_ms(duration_value)
+            or _atc_payload_duration_ms(data))
         filename = f"{base}.mp4"
         video = {
-            "source": "atc", "url": video_url, "atc_url": video_url,
-            "alt_url": "", "filename": filename,
-            "width": data.get("width") or data.get("videoWidth"),
-            "height": data.get("height") or data.get("videoHeight"),
+            "source": "parser", "url": video_url, "direct_url": video_url,
+            "alt_url": "", "filename": filename, "media_available": bool(video_url),
+            "width": (data.get("width") if data.get("width") is not None else
+                      data.get("videoWidth") if data.get("videoWidth") is not None else
+                      video_obj.get("width") if video_obj.get("width") is not None else
+                      native_item.get("width")),
+            "height": (data.get("height") if data.get("height") is not None else
+                       data.get("videoHeight") if data.get("videoHeight") is not None else
+                       video_obj.get("height") if video_obj.get("height") is not None else
+                       native_item.get("height")),
         }
         # 同源流不接受客户端 URL；仅对缓存中的抖音白名单 CDN 开放。
         if _host_allowed(video_url):
             video["proxy_url"] = _atc_video_proxy_url(item_id)
             video["download_url"] = _atc_video_download_url(item_id, filename)
         result["video"] = video
+
+    # ATC 返回的 author/statistics 在不同版本有多种嵌套形式；写入同一作者缓存，
+    # 使 /api/author 与抖音官方路径保持一致。缓存只保留展示和富化所需字段。
+    author_sec = ""
+    author_unique = ""
+    author_signature = ""
+    author_followers = author_likes = author_following = author_count = None
+    if isinstance(author_data, dict):
+        author_sec = str(author_data.get("sec_uid") or author_data.get("secUid") or "")[:200]
+        author_unique = str(author_data.get("unique_id") or author_data.get("uniqueId")
+                            or author_data.get("short_id") or author_data.get("shortId") or "")[:100]
+        author_signature = str(author_data.get("signature") or "")[:500]
+        author_followers = author_data.get("follower_count")
+        author_likes = author_data.get("total_favorited")
+        author_following = author_data.get("following_count")
+        author_count = author_data.get("aweme_count")
+    author_detail = {
+        "item_id": item_id, "nickname": author, "author": author,
+        "avatar": avatar, "author_url": author_url, "sec_uid": author_sec,
+        "unique_id": author_unique, "signature": author_signature,
+        "follower_count": _douyin_number(author_followers), "total_favorited": _douyin_number(author_likes),
+        "following_count": _douyin_number(author_following), "aweme_count": _douyin_number(author_count),
+        "enriched": False,
+    }
+    if not author_url and author_sec:
+        author_url = f"https://www.douyin.com/user/{urlparse.quote(author_sec, safe='')}"
+        result["author_url"] = author_detail["author_url"] = author_url
+    _author_cache[item_id] = (time.time(), author_detail)
 
     # 即便上游在基础模式意外附带了转录字段，也不在普通解析路径保存。
     cache_data = dict(data)
@@ -4426,10 +6690,116 @@ def _atc_result_to_parse(work_url: str, data: dict,
     return result
 
 
+def _merge_missing_fields(primary: dict, extra: dict) -> dict:
+    """只补空字段；0 是合法统计值，已有有效信息不可被低精度接口覆盖。"""
+    merged = dict(primary)
+    for key, value in extra.items():
+        old = merged.get(key)
+        if isinstance(old, dict) and isinstance(value, dict):
+            merged[key] = _merge_missing_fields(old, value)
+        elif old is None or old == "" or old == "（无标题）":
+            merged[key] = value
+    return merged
+
+
+def _result_has_media(result: dict) -> bool:
+    if result.get("kind") == "note":
+        return any(isinstance(image, dict) and (image.get("url") or image.get("proxy_url"))
+                   for image in result.get("images") or [])
+    video = result.get("video") or {}
+    return bool(video.get("url") or video.get("direct_url"))
+
+
+def _douyin_needs_supplement(result: dict) -> bool:
+    if not _result_has_media(result):
+        return True
+    if any(not result.get(key) or result.get(key) == "（无标题）"
+           for key in ("title", "author", "avatar", "author_url", "cover")):
+        return True
+    if any((result.get("stats") or {}).get(key) is None
+           for key in ("digg", "comment", "collect", "share")):
+        return True
+    author = (_author_cache.get(result.get("item_id")) or (0, {}))[1]
+    if not author.get("sec_uid") or not author.get("unique_id"):
+        return True
+    if result.get("kind") == "video":
+        video = result.get("video") or {}
+        return any(not (_douyin_number(value) or 0) for value in (
+            result.get("duration_ms"), video.get("width"), video.get("height")))
+    return False
+
+
+def _complete_douyin_result(work_url: str, primary: dict) -> dict:
+    """服务器端按需补作品详情；失败时已有媒体仍可用，禁止合并错作品。"""
+    old_id = str(primary.get("item_id") or "")
+    primary_author = dict((_author_cache.get(old_id) or (0, {}))[1])
+    needs_detail = _douyin_needs_supplement(primary)
+    # 图集需要真实作品 ID 才能生成受签名保护、可惰性刷新的图片端点。
+    if not needs_detail and primary.get("kind") != "note":
+        return primary
+    try:
+        kind, item_id, canonical = _douyin_resolve_share_url(work_url)
+        if re.fullmatch(r"\d{8,30}", old_id) and old_id != item_id:
+            # 主服务返回了另一作品，不能把它的媒体、标题或作者混进当前结果。
+            primary, primary_author = {}, {}
+            return _parse_douyin_item_direct(kind, item_id, canonical)
+        if primary.get("kind") == "note" and _result_has_media(primary):
+            urls = [image["url"] for image in primary["images"] if image.get("url")]
+            if urls and all(_douyin_public_url(url) for url in urls):
+                _douyin_cache_note_media(item_id, urls)
+                primary = dict(primary, item_id=item_id, source="douyin_direct", _link=canonical)
+                primary = _douyin_note_result_with_media(primary, item_id)
+        if needs_detail:
+            extra = _parse_douyin_item_direct(kind, item_id, canonical, allow_metadata=True)
+            extra_author = dict((_author_cache.get(item_id) or (0, {}))[1])
+            merged = _merge_missing_fields(primary, extra)
+            if _result_has_media(primary):
+                # 媒体地址与缓存/下载端点必须来自同一路径，不能递归混合两套媒体。
+                if primary.get("kind") == "video":
+                    video = dict(primary["video"])
+                    for key in ("width", "height"):
+                        if not (_douyin_number(video.get(key)) or 0):
+                            video[key] = (extra.get("video") or {}).get(key)
+                    merged["video"] = video
+                    if not (_douyin_number(primary.get("duration_ms")) or 0):
+                        merged["duration_ms"] = extra.get("duration_ms")
+                else:
+                    merged["images"] = primary["images"]
+                merged["source"] = primary["source"]
+            else:
+                merged.update({key: extra[key] for key in
+                               ("kind", "item_id", "source", "video", "images", "duration_ms")
+                               if key in extra})
+                merged.pop("metadata_only", None)
+            merged["_link"] = canonical
+            primary = merged
+            primary_author = _merge_missing_fields(primary_author, extra_author)
+        primary_author["item_id"] = primary["item_id"]
+        _author_cache[primary["item_id"]] = (time.time(), primary_author)
+    except Exception:
+        # 补充接口受网络/风控影响时不丢弃主服务已成功的结果。
+        if primary_author and old_id:
+            _author_cache[old_id] = (time.time(), primary_author)
+        if not _result_has_media(primary):
+            raise ApiError(503, "暂未获取到作品内容，请稍后重试") from None
+    if not _result_has_media(primary):
+        raise ApiError(503, "暂未获取到可用的媒体地址，请稍后重试")
+    return primary
+
+
 def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
                         kind_hint: str = "") -> dict:
-    data = _atc_extract(work_url, include_text=False)
-    return _atc_result_to_parse(work_url, data, item_id_hint, kind_hint)
+    """统一优先级入口；仅抖音可使用当前服务器的官方补充接口。"""
+    douyin = _is_douyin_work_url(work_url)
+    try:
+        data = _atc_extract(work_url, include_text=False)
+        primary = _atc_result_to_parse(
+            work_url, data, item_id_hint, kind_hint, allow_partial=douyin)
+    except ApiError:
+        if not douyin:
+            raise
+        return _parse_douyin_share_direct(work_url)
+    return _complete_douyin_result(work_url, primary) if douyin else primary
 
 
 def _atc_cache_get(item_id: str) -> Optional[dict]:
@@ -4439,8 +6809,16 @@ def _atc_cache_get(item_id: str) -> Optional[dict]:
 
 def _atc_url_fresh(row: Optional[dict], ttl: int) -> bool:
     """缓存里的 API 播放地址是否仍在有效期内（签名链接会过期）。"""
-    return bool(row and row.get("video_url") and row.get("url_fetched_at")
-                and time.time() - row["url_fetched_at"] < ttl)
+    if not (row and row.get("video_url") and row.get("url_fetched_at")):
+        return False
+    try:
+        age = time.time() - float(row["url_fetched_at"])
+        lifetime = float(ttl)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # Future timestamps usually indicate a corrupt/clock-skewed cache.  Do not
+    # advertise a URL as fresh indefinitely when ``age`` is negative.
+    return 0 <= age < max(0.0, lifetime)
 
 
 def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> bool:
@@ -4455,38 +6833,76 @@ def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> boo
         return False
     if purpose == "transcript" and cached and cached.get("text_content"):
         return False
-    if db_exec("SELECT id FROM atc_jobs WHERE item_id=? AND purpose=? "
-               "AND status IN ('pending','submitted')",
-               (item_id, purpose), "one"):
-        return False
-    # 防任务空转：近期已跑完一轮但仍没有新鲜地址（对方也取不到）→ 冷却期内不再入队
-    cooldown = db_exec(
-        "SELECT updated FROM atc_jobs WHERE item_id=? AND purpose=? "
-        "AND status IN ('done','failed') ORDER BY updated DESC LIMIT 1",
-        (item_id, purpose), "one")
-    if cooldown and time.time() - cooldown[0] < cfg["url_ttl"]:
-        return False
     now = int(time.time())
     saved_work_url = (work_url or (cached or {}).get("work_url") or "")
     if not saved_work_url and re.fullmatch(r"\d{1,30}", item_id):
         saved_work_url = ATC_WORK_URL.format(item_id=item_id)
     if not saved_work_url:
         return False
-    db_exec("INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
-            "VALUES(?,?,?,'pending',?,?)",
-            (item_id, saved_work_url[:1000],
-             purpose, now, now))
-    return True
+    # 检查与 INSERT 必须处在同一个写事务中。此前两次 db_exec 之间存在
+    # 竞态：并发请求都能通过 pending 检查，重复创建任务并浪费 ATC 并发额度。
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT id FROM atc_jobs WHERE item_id=? AND purpose=? "
+                    "AND status IN ('pending','submitting','submitted')",
+                    (item_id, purpose)).fetchone():
+                conn.rollback()
+                return False
+            # 防任务空转：近期已跑完一轮但仍没有新鲜地址（对方也取不到）
+            # → 冷却期内不再入队。
+            cooldown = conn.execute(
+                "SELECT updated FROM atc_jobs WHERE item_id=? AND purpose=? "
+                "AND status IN ('done','failed') ORDER BY updated DESC LIMIT 1",
+                (item_id, purpose)).fetchone()
+            cooldown_age = (now - int(cooldown[0] or 0)) if cooldown else -1
+            if cooldown and 0 <= cooldown_age < cfg["url_ttl"]:
+                conn.rollback()
+                return False
+            conn.execute(
+                "INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
+                "VALUES(?,?,?,'pending',?,?)",
+                (item_id, saved_work_url[:1000], purpose, now, now))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
-def _atc_save_result(item_id: str, data: dict, work_url: str = "") -> None:
-    """任务成功：upsert 缓存。只覆盖返回里实际带值的字段（转录任务不该清掉旧播放地址）。"""
+def _atc_save_result(item_id: str, data: dict, work_url: str = "",
+                     include_text: bool = False) -> None:
+    """任务成功：upsert 缓存。
+
+    普通播放任务只刷新媒体与基础元数据，即使上游意外附带 ``textContent`` 或
+    ``audioUrl`` 也不得把文案写入缓存；只有用户明确发起的文案任务才允许新增
+    这两个字段。已有文案在播放刷新时保留，避免被意外清空。
+    """
+    data = _atc_result_data(data if isinstance(data, dict) else {})
     now = int(time.time())
     old = _atc_cache_get(item_id) or {}
+    incoming_text = str(
+        data.get("textContent") or data.get("text_content") or ""
+    ) if include_text else ""
+    incoming_audio = next(iter(_atc_public_urls(
+        data.get("audioUrl") or data.get("audio_url"))), "") if include_text else ""
+    text_content = (incoming_text or str(old.get("text_content") or ""))[:20000]
+    audio_url = (incoming_audio or str(old.get("audio_url") or ""))[:4096]
     saved_work_url = (work_url or data.get("workUrl")
                       or old.get("work_url") or "")[:1000]
-    video_urls = (_atc_public_urls(data.get("videoUrl"))
-                  + _atc_public_urls(data.get("videoUrlList")))
+    video_obj = data.get("video") if isinstance(data.get("video"), dict) else {}
+    video_urls = (
+        _atc_public_urls(data.get("videoUrl"))
+        + _atc_public_urls(data.get("videoUrlList"))
+        + _atc_public_urls(data.get("video_url"))
+        + _atc_public_urls(data.get("video_urls"))
+        + _atc_public_urls(video_obj.get("play_addr"))
+        + _atc_public_urls(video_obj.get("download_addr"))
+        + _atc_public_urls(video_obj.get("url")))
     fresh_video_url = next(iter(dict.fromkeys(video_urls)), "")
     video_url = fresh_video_url or old.get("video_url") or ""
     fetched = now if fresh_video_url else (old.get("url_fetched_at") or 0)
@@ -4496,113 +6912,295 @@ def _atc_save_result(item_id: str, data: dict, work_url: str = "") -> None:
         "ON CONFLICT(item_id) DO UPDATE SET work_url=?,video_url=?,url_fetched_at=?,"
         "content=?,text_content=?,audio_url=?,duration=?,updated=?",
         (item_id, saved_work_url, video_url, fetched,
-         (data.get("content") or old.get("content") or "")[:2000],
-         (data.get("textContent") or old.get("text_content") or ""),
-         (data.get("audioUrl") or old.get("audio_url") or ""),
-         data.get("duration") or old.get("duration"),
+         str(data.get("content") or data.get("title")
+             or old.get("content") or "")[:2000],
+         text_content,
+         audio_url,
+         (data.get("duration") if data.get("duration") is not None
+          else video_obj.get("duration") if video_obj.get("duration") is not None
+          else old.get("duration")),
          old.get("created") or now, now,
          saved_work_url, video_url, fetched,
-         (data.get("content") or old.get("content") or "")[:2000],
-         (data.get("textContent") or old.get("text_content") or ""),
-         (data.get("audioUrl") or old.get("audio_url") or ""),
-         data.get("duration") or old.get("duration"), now))
+         str(data.get("content") or data.get("title")
+             or old.get("content") or "")[:2000],
+         text_content,
+         audio_url,
+         (data.get("duration") if data.get("duration") is not None
+          else video_obj.get("duration") if video_obj.get("duration") is not None
+          else old.get("duration")), now))
 
 
-def _atc_worker():
-    """守护线程（5s 一轮）：提交 pending 任务、轮询 submitted 任务、写缓存。
-    同时在途任务不超过 ATC_INFLIGHT_MAX；重启后 submitted 任务凭 task_id 直接续查。"""
-    while True:
-        time.sleep(5)
+def _atc_claim_pending(owner: str) -> Optional[dict]:
+    """原子领取一条待提交任务；租约过期可被其他进程接管。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE atc_jobs SET status='pending',lease_owner=NULL,"
+                "lease_until=NULL,error=COALESCE(error,'提交租约超时，已恢复') "
+                "WHERE status='submitting' AND COALESCE(lease_until,0)<?", (now,))
+            inflight = conn.execute(
+                "SELECT COUNT(*) FROM atc_jobs "
+                "WHERE status IN ('submitting','submitted')").fetchone()[0]
+            if int(inflight or 0) >= ATC_INFLIGHT_MAX:
+                conn.rollback()
+                return None
+            row = conn.execute(
+                "SELECT * FROM atc_jobs WHERE status='pending' "
+                "ORDER BY created,id LIMIT 1").fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            changed = conn.execute(
+                "UPDATE atc_jobs SET status='submitting',lease_owner=?,lease_until=?,"
+                "updated=? WHERE id=? AND status='pending'",
+                (owner, now + ATC_SUBMIT_LEASE_SECONDS, now, row["id"])).rowcount
+            if changed != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+            job = dict(row)
+            job.update({"status": "submitting", "lease_owner": owner,
+                        "lease_until": now + ATC_SUBMIT_LEASE_SECONDS})
+            return job
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _atc_claim_submitted(owner: str) -> Optional[dict]:
+    """原子领取一条到期的轮询任务，状态保持 submitted。"""
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM atc_jobs WHERE status='submitted' "
+                "AND COALESCE(updated,0)<=? AND COALESCE(lease_until,0)<? "
+                "ORDER BY updated,id LIMIT 1",
+                (now - ATC_POLL_INTERVAL, now)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            changed = conn.execute(
+                "UPDATE atc_jobs SET lease_owner=?,lease_until=? "
+                "WHERE id=? AND status='submitted' AND COALESCE(lease_until,0)<?",
+                (owner, now + ATC_POLL_LEASE_SECONDS, row["id"], now)).rowcount
+            if changed != 1:
+                conn.rollback()
+                return None
+            conn.commit()
+            job = dict(row)
+            job.update({"lease_owner": owner,
+                        "lease_until": now + ATC_POLL_LEASE_SECONDS})
+            return job
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _atc_claim_update(job: dict, status: str, *, task_id: str = "",
+                      error: Optional[str] = None) -> bool:
+    """只允许当前租约持有者推进任务，防止过期 worker 覆盖新结果。"""
+    fields = ["status=?", "updated=?", "lease_owner=NULL", "lease_until=NULL"]
+    values = [status, int(time.time())]
+    if task_id:
+        fields.append("task_id=?")
+        values.append(task_id[:256])
+    fields.append("error=?")
+    values.append(str(error)[:300] if error else None)
+    values.extend([job["id"], job["lease_owner"]])
+    return bool(db_exec(
+        f"UPDATE atc_jobs SET {','.join(fields)} WHERE id=? "
+        "AND status IN ('submitting','submitted') AND lease_owner=?",
+        tuple(values), "rowcount"))
+
+
+def _atc_store_job_result(job: dict, data: dict) -> None:
+    if job["purpose"] == "transcript":
+        _atc_save_result(job["item_id"], data, work_url=job["work_url"], include_text=True)
+        return
+    douyin = _is_douyin_work_url(job["work_url"])
+    result = _atc_result_to_parse(job["work_url"], data, job["item_id"], allow_partial=douyin)
+    if douyin:
+        _complete_douyin_result(job["work_url"], result)
+
+
+def _atc_try_job_fallback(job: dict) -> bool:
+    """后台主媒体失败时也补充；保留来源供同源端点读取官方内存缓存。"""
+    if job["purpose"] != "play" or not _is_douyin_work_url(job.get("work_url") or ""):
+        return False
+    try:
+        result = _parse_douyin_share_direct(job["work_url"])
+        if not _result_has_media(result):
+            return False
+        _atc_save_result(job["item_id"], {}, work_url=job["work_url"])
+        return True
+    except Exception:
+        return False
+
+
+def _atc_submit_claimed(job: dict, cfg: dict) -> None:
+    now = int(time.time())
+    completed_payload = False
+    try:
+        params = {"workUrl": job["work_url"]}
+        if job["purpose"] == "transcript":
+            params["taskType"] = "TEXT"
+        resp = _atc_request("POST", "/video/extract", params, cfg)
+        if resp.get("code") == 200 and resp.get("data"):
+            created = resp["data"]
+            status = _atc_status_value(created)
+            if (status in ("SUCCESS", "SUCCEEDED", "DONE")
+                    or (job["purpose"] != "transcript"
+                        and _atc_basic_result_ready(created))):
+                completed_payload = True
+                _atc_store_job_result(job, created)
+                _atc_claim_update(job, "done", error=None)
+                return
+            task_id = _atc_task_id(created)
+            if not task_id:
+                raise RuntimeError("任务响应缺少 taskId")
+            _atc_claim_update(job, "submitted", task_id=task_id, error=None)
+            return
+        if "并发" in str(resp.get("msg") or ""):
+            _atc_claim_update(job, "pending", error="对方并发已满，排队重试中")
+            return
+        raise _atc_rejected(resp, "任务提交")
+    except Exception as exc:
+        if not completed_payload and _atc_try_job_fallback(job):
+            _atc_claim_update(job, "done", error=None)
+            return
+        _atc_claim_update(
+            job, "failed",
+            error=exc.message if isinstance(exc, ApiError) else "任务提交失败，请稍后重试")
+
+
+def _atc_poll_claimed(job: dict, cfg: dict) -> None:
+    now = int(time.time())
+    completed_payload = False
+    if now - int(job.get("created") or now) > ATC_JOB_TIMEOUT:
+        _atc_claim_update(job, "failed", error="轮询超时")
+        return
+    try:
+        resp = _atc_request(
+            "GET", "/video/query", {"taskId": job["task_id"]}, cfg)
+        if resp.get("code") != 200:
+            raise _atc_rejected(resp, "任务查询")
+        raw_data = resp.get("data") or {}
+        if not isinstance(raw_data, dict):
+            raise RuntimeError("任务结果格式无效")
+        status = _atc_status_value(raw_data)
+        basic_ready = (job["purpose"] != "transcript"
+                       and _atc_basic_result_ready(raw_data))
+        if status in ("SUCCESS", "SUCCEEDED", "DONE") or basic_ready:
+            completed_payload = True
+            _atc_store_job_result(job, raw_data)
+            _atc_claim_update(job, "done", error=None)
+        elif status in ("FAILED", "FAILURE", "ERROR"):
+            if _atc_try_job_fallback(job):
+                _atc_claim_update(job, "done", error=None)
+                return
+            _atc_claim_update(
+                job, "failed",
+                error="任务处理失败，请稍后重试")
+        else:
+            _atc_claim_update(job, "submitted", error=None)
+    except Exception as exc:
+        if completed_payload:
+            _atc_claim_update(job, "failed", error="暂未获取到作品内容，请稍后重试")
+            return
+        # 单次轮询异常不判死；释放租约，超时由 created 兜底。
+        _atc_claim_update(
+            job, "submitted", error=f"轮询异常: {type(exc).__name__}"[:200])
+
+
+def _atc_worker_loop(worker_no: int) -> None:
+    owner = f"{_atc_instance}:{worker_no}"
+    while not _atc_stop.is_set():
         try:
             cfg = _atc_cfg()
             if not cfg["enabled"]:
+                _atc_stop.wait(1)
                 continue
-            now = int(time.time())
-            inflight = db_exec(
-                "SELECT COUNT(*) FROM atc_jobs WHERE status='submitted'", (), "one")[0]
-            if inflight < ATC_INFLIGHT_MAX:
-                job = db_exec(
-                    "SELECT * FROM atc_jobs WHERE status='pending' ORDER BY id LIMIT 1",
-                    (), "one")
-                if job:
-                    job = dict(job)
-                    try:
-                        params = {"workUrl": job["work_url"]}
-                        if job["purpose"] == "transcript":
-                            params["taskType"] = "TEXT"
-                        resp = _atc_request(
-                            "POST", "/video/extract", params, cfg)
-                        if resp.get("code") == 200 and resp.get("data"):
-                            created = resp["data"]
-                            if isinstance(created, dict) and (
-                                    str(created.get("status") or "").upper() == "SUCCESS"
-                                    or (job["purpose"] != "transcript"
-                                        and _atc_basic_result_ready(created))):
-                                _atc_save_result(
-                                    job["item_id"], created,
-                                    work_url=job["work_url"])
-                                db_exec(
-                                    "UPDATE atc_jobs SET status='done',updated=? WHERE id=?",
-                                    (now, job["id"]))
-                            else:
-                                task_id = (str(created.get("taskId") or "")
-                                           if isinstance(created, dict)
-                                           else str(created))
-                                if not task_id:
-                                    raise RuntimeError("任务响应缺少 taskId")
-                                db_exec(
-                                    "UPDATE atc_jobs SET status='submitted',task_id=?,"
-                                    "updated=? WHERE id=?",
-                                    (task_id, now, job["id"]))
-                        elif "并发" in str(resp.get("msg") or ""):
-                            # 对方并发已满：保持 pending 等下一轮，不判死
-                            db_exec("UPDATE atc_jobs SET updated=?,error=? WHERE id=?",
-                                    (now, "对方并发已满，排队重试中", job["id"]))
-                        else:
-                            raise RuntimeError(str(resp.get("msg") or resp)[:200])
-                    except Exception as e:
-                        db_exec("UPDATE atc_jobs SET status='failed',error=?,updated=? "
-                                "WHERE id=?",
-                                (f"提交失败: {type(e).__name__}: {e}"[:300], now, job["id"]))
-                    continue
-            job = db_exec(
-                "SELECT * FROM atc_jobs WHERE status='submitted' ORDER BY id LIMIT 1",
-                (), "one")
-            if not job:
+            job = _atc_claim_pending(owner)
+            if job:
+                _atc_submit_claimed(job, cfg)
                 continue
-            job = dict(job)
-            if now - (job["updated"] or now) < ATC_POLL_INTERVAL:
-                continue                       # 距上次轮询不足 4 秒
-            if now - job["created"] > ATC_JOB_TIMEOUT:
-                db_exec("UPDATE atc_jobs SET status='failed',error='轮询超时',updated=? "
-                        "WHERE id=?", (now, job["id"]))
+            job = _atc_claim_submitted(owner)
+            if job:
+                _atc_poll_claimed(job, cfg)
                 continue
-            try:
-                resp = _atc_request("GET", "/video/query", {"taskId": job["task_id"]}, cfg)
-                if resp.get("code") != 200:
-                    raise _atc_rejected(resp, "任务查询")
-                data = resp.get("data") or {}
-                if not isinstance(data, dict):
-                    raise RuntimeError("任务结果格式无效")
-                status = str(data.get("status") or "").upper()
-                basic_ready = (job["purpose"] != "transcript"
-                               and _atc_basic_result_ready(data))
-                if status == "SUCCESS" or basic_ready:
-                    _atc_save_result(
-                        job["item_id"], data, work_url=job["work_url"])
-                    db_exec("UPDATE atc_jobs SET status='done',updated=? WHERE id=?",
-                            (now, job["id"]))
-                elif status in ("FAILED", "FAILURE"):
-                    db_exec("UPDATE atc_jobs SET status='failed',error=?,updated=? WHERE id=?",
-                            ((data.get("errorMessage") or "任务失败")[:300], now, job["id"]))
-                else:
-                    db_exec("UPDATE atc_jobs SET updated=? WHERE id=?", (now, job["id"]))
-            except Exception as e:
-                # 单次轮询网络错误不判死，只刷新时间戳；超时由上面的 created 判定兜底
-                db_exec("UPDATE atc_jobs SET updated=?,error=? WHERE id=?",
-                        (now, f"轮询异常: {type(e).__name__}"[:200], job["id"]))
         except Exception:
             pass
+        _atc_stop.wait(1)
+
+
+def _atc_worker() -> None:
+    """保留旧内部入口；新启停逻辑由 start/stop 统一管理。"""
+    _atc_worker_loop(0)
+
+
+def _prepare_atc_jobs() -> None:
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE atc_jobs SET status='pending',lease_owner=NULL,lease_until=NULL "
+                "WHERE status='submitting' AND COALESCE(lease_until,0)<?", (now,))
+            conn.execute(
+                "UPDATE atc_jobs SET lease_owner=NULL,lease_until=NULL "
+                "WHERE status='submitted' AND COALESCE(lease_until,0)<?", (now,))
+            conn.execute(
+                "UPDATE atc_jobs SET status='failed',error='轮询超时',updated=?,"
+                "lease_owner=NULL,lease_until=NULL WHERE status IN "
+                "('pending','submitting','submitted') AND created<?",
+                (now, now - ATC_JOB_TIMEOUT))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+def _start_atc_workers(prepared: bool = False) -> None:
+    with _atc_workers_guard:
+        _atc_threads[:] = [thread for thread in _atc_threads if thread.is_alive()]
+        if _atc_threads:
+            return
+        if not prepared:
+            _prepare_atc_jobs()
+        _atc_stop.clear()
+        for index in range(ATC_WORKERS):
+            _atc_threads.append(threading.Thread(
+                target=_atc_worker_loop, args=(index,),
+                name=f"atc-worker-{index}", daemon=False))
+        for thread in _atc_threads:
+            thread.start()
+
+
+def _stop_atc_workers() -> None:
+    with _atc_workers_guard:
+        _atc_stop.set()
+        threads = list(_atc_threads)
+    deadline = time.monotonic() + ATC_SHUTDOWN_TIMEOUT
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+    with _atc_workers_guard:
+        _atc_threads[:] = [thread for thread in _atc_threads if thread.is_alive()]
 
 
 def _atc_cleanup() -> int:
@@ -4615,6 +7213,21 @@ def _atc_cleanup() -> int:
     return n
 
 
+def _public_parser_test_state() -> str:
+    """历史测试结果也经过公开边界，旧数据库中的上游错误不得直接展示。"""
+    try:
+        stored = json.loads(app_setting("atc_test_state", "") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(stored, dict) or not stored:
+        return ""
+    public = {key: stored[key] for key in
+              ("state", "ms", "duration", "has_video", "has_text") if key in stored}
+    if stored.get("error"):
+        public["error"] = _public_error(stored["error"], "测试失败，请稍后重试")
+    return json.dumps(public, ensure_ascii=False)
+
+
 def _atc_status() -> dict:
     """后台状态面板数据（不含密钥本体）。"""
     cfg = _atc_cfg()
@@ -4625,7 +7238,8 @@ def _atc_status() -> dict:
         "SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed "
         "FROM atc_jobs WHERE created>=?", (today0,), "one")
     pending = db_exec(
-        "SELECT COUNT(*) FROM atc_jobs WHERE status IN ('pending','submitted')", (), "one")[0]
+        "SELECT COUNT(*) FROM atc_jobs "
+        "WHERE status IN ('pending','submitting','submitted')", (), "one")[0]
     last_err = db_exec(
         "SELECT error FROM atc_jobs WHERE status='failed' AND error IS NOT NULL "
         "ORDER BY updated DESC LIMIT 1", (), "one")
@@ -4636,7 +7250,7 @@ def _atc_status() -> dict:
         "master_on": app_setting("atc_enabled", "1") == "1",
         "api_key": cfg["key"],
         "api_secret_masked": (secret[:3] + "****" + secret[-2:]) if len(secret) > 5 else "",
-        "base_url": cfg["base"],
+        "endpoint_managed": True,
         "play_enhance": cfg["play_enhance"],
         "transcript_enabled": cfg["transcript_enabled"],
         "transcript_daily": cfg["transcript_daily"],
@@ -4645,8 +7259,8 @@ def _atc_status() -> dict:
         "queue_pending": pending,
         "today_total": int(row[0] or 0), "today_done": int(row[1] or 0),
         "today_failed": int(row[2] or 0),
-        "last_error": (last_err[0] if last_err else "") or "",
-        "test": app_setting("atc_test_state", ""),
+        "last_error": _public_error(last_err[0]) if last_err and last_err[0] else "",
+        "test": _public_parser_test_state(),
     }
 
 
@@ -4702,10 +7316,11 @@ def _atc_transcript_reserve(user_id: int) -> dict:
 
 
 class AtcTranscriptBody(BaseModel):
-    item_id: str = ""
+    item_id: str = Field(default="", max_length=40)
 
 
-@app.post("/api/atc/transcript")
+@app.post("/api/atc/transcript", include_in_schema=False)
+@app.post("/api/transcript", name="submit_transcript")
 def api_atc_transcript(body: AtcTranscriptBody, request: Request):
     """提交文案提取。缓存命中秒回不扣次；否则扣一次额度并异步入队。"""
     cfg = _atc_cfg()
@@ -4729,16 +7344,30 @@ def api_atc_transcript(body: AtcTranscriptBody, request: Request):
     if not reservation["ok"]:
         raise ApiError(429, f"今日文案提取次数已用完（每天 {reservation['limit']} 次）")
     try:
-        _atc_enqueue(item_id, purpose="transcript")
+        enqueued = _atc_enqueue(item_id, purpose="transcript")
     except Exception:
         release_quota(reservation)
         raise
+    if not enqueued:
+        # 竞态下可能已有同一文案任务，或任务仍在冷却期。不能把本次预占
+        # 误结算成 processing，否则既没有新任务，额度也会永久扣除。
+        active = db_exec(
+            "SELECT id FROM atc_jobs WHERE item_id=? AND purpose='transcript' "
+            "AND status IN ('pending','submitting','submitted')",
+            (item_id,), "one")
+        release_quota(reservation)
+        if active:
+            limit, used, remaining = _atc_transcript_status(u["id"])
+            return {"state": "processing", "cached": False,
+                    "remaining": remaining, "daily": limit}
+        raise ApiError(503, "文案任务暂时无法提交，请稍后重试")
     settle_quota(reservation, 1)
     return {"state": "processing", "cached": False,
             "remaining": reservation["remaining"], "daily": reservation["limit"]}
 
 
-@app.get("/api/atc/transcript")
+@app.get("/api/atc/transcript", include_in_schema=False)
+@app.get("/api/transcript", name="get_transcript")
 def api_atc_transcript_get(item_id: str, request: Request):
     """轮询提取状态：ready / processing / none。"""
     cfg = _atc_cfg()
@@ -4756,7 +7385,8 @@ def api_atc_transcript_get(item_id: str, request: Request):
                 "duration": cached.get("duration"),
                 "remaining": remaining, "daily": limit}
     if item_id and db_exec(
-            "SELECT id FROM atc_jobs WHERE item_id=? AND status IN ('pending','submitted')",
+            "SELECT id FROM atc_jobs WHERE item_id=? AND purpose='transcript' "
+            "AND status IN ('pending','submitting','submitted')",
             (item_id,), "one"):
         return {"state": "processing", "remaining": remaining, "daily": limit}
     failed = db_exec(
@@ -4771,7 +7401,7 @@ def api_atc_transcript_get(item_id: str, request: Request):
 # ---------------------------------------------------------------- 公共 API
 
 class ParseBody(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=PARSE_TEXT_MAX)
 
 
 def _quota_error(limit: int):
@@ -4805,6 +7435,10 @@ API_JOB_LEASE_SECONDS = max(120, int(os.environ.get("API_JOB_LEASE_SECONDS", "60
 API_JOB_HEARTBEAT_SECONDS = max(
     10, min(API_JOB_LEASE_SECONDS // 3,
             int(os.environ.get("API_JOB_HEARTBEAT_SECONDS", "30"))))
+# 关闭服务不应把租约时长当作 join 超时；worker 会在下一次可中断等待时退出，
+# 即使上游请求卡住，也只给进程一个有界的收尾窗口。
+API_JOB_SHUTDOWN_TIMEOUT = _clamped_env_int(
+    "API_JOB_SHUTDOWN_TIMEOUT", 35, 5, 120)
 _JOB_TERMINAL = ("succeeded", "failed", "cancelled")
 _job_stop = threading.Event()
 _job_wakeup = queue.Queue(maxsize=1)
@@ -4840,11 +7474,11 @@ def _job_item_result(row) -> Optional[dict]:
             data = {}
         out = {"link": item.get("link") or "", "ok": True, "data": data}
         if item.get("error"):
-            out["warning"] = item["error"]
+            out["warning"] = _public_error(item["error"])
         return out
     if status in ("failed", "cancelled"):
         out = {"link": item.get("link") or "", "ok": False,
-               "error": item.get("error") or "解析失败"}
+               "error": _public_error(item.get("error"), "解析失败，请稍后重试")}
         if status == "cancelled":
             out["code"] = "cancelled"
         return out
@@ -4945,7 +7579,7 @@ def _finish_job_item(item: dict, ok: bool, data: Optional[dict] = None,
     now = int(time.time())
     terminal = "succeeded" if ok else "failed"
     result_json = json.dumps(data or {}, ensure_ascii=False) if ok else None
-    error_message = (error_message or "")[:300]
+    error_message = _public_error(error_message) if error_message else ""
     with _db_lock:
         conn = _db()
         try:
@@ -5019,7 +7653,7 @@ def _run_claimed_job_item(item: dict) -> None:
     except Exception as e:
         _finish_job_item(
             item, False,
-            error_message="内部解析错误：" + _redact_proxy_error(e))
+            error_message="解析暂时失败，请稍后重试")
     else:
         _finish_job_item(item, True, data=data)
 
@@ -5264,14 +7898,20 @@ def _stop_api_job_workers() -> None:
     with _job_workers_guard:
         _job_stop.set()
         _wake_job_workers()
-        for thread in list(_job_threads):
-            thread.join(timeout=API_JOB_LEASE_SECONDS + 5)
+        threads = list(_job_threads)
+    deadline = time.monotonic() + API_JOB_SHUTDOWN_TIMEOUT
+    for thread in threads:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        thread.join(timeout=remaining)
+    with _job_workers_guard:
         _job_threads[:] = [t for t in _job_threads if t.is_alive()]
 
 
 class JobBody(BaseModel):
-    links: list = []
-    text: str = ""
+    links: list[str] = Field(default_factory=list, max_length=100)
+    text: str = Field(default="", max_length=BATCH_TEXT_MAX)
 
 
 def _api_key_from(request: Request) -> str:
@@ -5406,6 +8046,11 @@ def api_v1_get_job(job_id: str, request: Request):
     else:                       # v1 已完成任务仍可按旧 results 快照查询
         done, ok_n, cost, status = j["done"], j["ok"], j["cost_cents"], j["status"]
         results = _json_list(j["results"])
+        for result in results:
+            if isinstance(result, dict):
+                for key in ("error", "warning"):
+                    if result.get(key):
+                        result[key] = _public_error(result[key])
     return {"code": 0, "message": "ok", "data": {
         "job_id": j["id"], "status": status, "total": j["total"],
         "done": done, "ok": ok_n, "cost_cents": cost,
@@ -5427,21 +8072,24 @@ def api_v1_balance(request: Request):
 
 def _fetch_user_info(sec_uid: str) -> dict:
     """经代理拉取作者主页统计（免签名 reflow 接口）：粉丝数、获赞数、作品数等。"""
-    url = f"https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid={sec_uid}"
+    safe_sec_uid = urlparse.quote(str(sec_uid or "")[:200], safe="")
+    url = f"https://www.iesdouyin.com/web/api/v2/user/info/?sec_uid={safe_sec_uid}"
     # 浏览器无法跨域取（抖音接口无 CORS），只能服务器代拉 —— 走代理，不暴露服务器 IP
-    resp, _ = open_url(url, headers={"Referer": "https://www.iesdouyin.com/"})
+    resp, _ = open_url(url, headers={"Referer": "https://www.iesdouyin.com/"}, timeout=10)
     try:
-        ui = (json.loads(resp.read().decode("utf-8", "ignore")) or {}).get("user_info") or {}
+        ui = (json.loads(resp.read(1024 * 1024).decode("utf-8", "ignore")) or {}).get("user_info") or {}
     finally:
         try:
             resp.close()
         except Exception:
             pass
+    if not isinstance(ui, dict) or not ui:
+        raise ApiError(503, "作者信息暂时无法补全，请稍后重试")
     return {
-        "follower_count": ui.get("mplatform_followers_count"),
-        "total_favorited": ui.get("total_favorited"),
-        "following_count": ui.get("following_count"),
-        "aweme_count": ui.get("aweme_count"),
+        "follower_count": _douyin_number(_douyin_first(ui, "follower_count", "mplatform_followers_count")),
+        "total_favorited": _douyin_number(ui.get("total_favorited")),
+        "following_count": _douyin_number(ui.get("following_count")),
+        "aweme_count": _douyin_number(ui.get("aweme_count")),
         "douyin_id": ui.get("unique_id") or "",
         "signature": (ui.get("signature") or "").strip(),
     }
@@ -5451,9 +8099,9 @@ def _fetch_user_info(sec_uid: str) -> dict:
 def api_author(item_id: str):
     """作者结构化详情（供前端悬停浮层）。
 
-    基础字段来自解析时缓存的分享页 author 对象；首次请求时再直连（不走代理）拉一次
+    基础字段来自解析时缓存的分享页 author 对象；首次请求时再经服务端出站策略拉一次
     user/info 富化粉丝数/获赞数（分享页不给这两项），结果服务端缓存 10 分钟。
-    注：抖音该接口无 CORS/JSONP，浏览器无法跨域直取，故由服务器直连（非代理）代拉。
+    注：抖音该接口无 CORS/JSONP，浏览器无法跨域直取，故由服务端代拉。
     """
     hit = _author_cache.get(item_id)
     if not hit:
@@ -5464,8 +8112,10 @@ def api_author(item_id: str):
     sec = detail.get("sec_uid")
     if sec:
         try:
-            merged = {**detail, **{k: v for k, v in _fetch_user_info(sec).items() if v is not None},
-                      "enriched": True}
+            merged = _merge_missing_fields(detail, _fetch_user_info(sec))
+            for key in ("follower_count", "total_favorited", "following_count", "aweme_count"):
+                merged[key] = _douyin_number(merged.get(key))
+            merged["enriched"] = True
             _author_cache[item_id] = (time.time(), merged)
             return merged
         except Exception:
@@ -5474,7 +8124,7 @@ def api_author(item_id: str):
 
 
 class BatchBody(BaseModel):
-    text: str
+    text: str = Field(min_length=1, max_length=BATCH_TEXT_MAX)
 
 
 @app.post("/api/parse/batch")
@@ -5515,7 +8165,24 @@ def api_parse_batch(body: BatchBody, request: Request):
 
 
 class ExportBody(BaseModel):
-    items: list          # 前端解析好的结果数组（仅元数据/文案，不含媒体字节）
+    items: list[dict] = Field(max_length=EXPORT_ITEMS_MAX)
+
+
+def _xlsx_safe_text(value, limit: int = 4096) -> str:
+    """把外部文本强制为 Excel 纯文本，防止 =/+/\-/@ 公式注入。"""
+    text = str(value or "").replace("\x00", "")[:max(0, int(limit))]
+    candidate = text.lstrip(" \t\r\n")
+    if candidate.startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r")):
+        return "'" + text
+    return text
+
+
+def _xlsx_safe_number(value):
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else ""
+    return _xlsx_safe_text(value, 64)
 
 
 @app.post("/api/export/xlsx")
@@ -5538,23 +8205,45 @@ def export_xlsx(body: ExportBody):
         c.alignment = Alignment(vertical="center")
 
     for i, d in enumerate(body.items or [], 1):
-        d = d or {}
+        d = d if isinstance(d, dict) else {}
         is_note = d.get("kind") == "note"
-        st = d.get("stats") or {}
-        v = d.get("video") or {}
+        st = d.get("stats") if isinstance(d.get("stats"), dict) else {}
+        v = d.get("video") if isinstance(d.get("video"), dict) else {}
         ct = d.get("create_time")
-        cts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ct)) if ct else ""
-        media = (" | ".join(im.get("url", "") for im in (d.get("images") or []))
+        try:
+            ct_value = int(ct or 0)
+            cts = time.strftime("%Y-%m-%d %H:%M", time.localtime(ct_value)) \
+                if ct_value > 0 else ""
+        except (TypeError, ValueError, OverflowError, OSError):
+            cts = ""
+        images = d.get("images") if isinstance(d.get("images"), list) else []
+        media = (" | ".join(
+            str(im.get("url") or "") for im in images if isinstance(im, dict))
                  if is_note else v.get("url", ""))
         res = f"{v.get('width')}×{v.get('height')}" if v.get("width") else ""
-        dur = round((d.get("duration_ms") or 0) / 1000, 1) if not is_note else ""
+        try:
+            duration = float(d.get("duration_ms") or 0)
+            dur = round(duration / 1000, 1) if math.isfinite(duration) and not is_note else ""
+        except (TypeError, ValueError, OverflowError):
+            dur = ""
+        tags = d.get("tags") if isinstance(d.get("tags"), list) else []
+        music = d.get("music") if isinstance(d.get("music"), dict) else {}
         ws.append([
-            i, "图集" if is_note else "视频", d.get("title", ""), d.get("author", ""),
-            d.get("item_id", ""), dur, res,
-            st.get("digg"), st.get("comment"), st.get("collect"), st.get("share"),
-            cts, " ".join("#" + t for t in (d.get("tags") or [])),
-            (d.get("music") or {}).get("title") or "", d.get("location") or "",
-            media, d.get("author_url", ""), d.get("_link", ""),
+            i, "图集" if is_note else "视频",
+            _xlsx_safe_text(d.get("title", "")),
+            _xlsx_safe_text(d.get("author", ""), 500),
+            _xlsx_safe_text(d.get("item_id", ""), 128), dur,
+            _xlsx_safe_text(res, 64),
+            _xlsx_safe_number(st.get("digg")),
+            _xlsx_safe_number(st.get("comment")),
+            _xlsx_safe_number(st.get("collect")),
+            _xlsx_safe_number(st.get("share")),
+            cts, _xlsx_safe_text(" ".join("#" + str(t) for t in tags)),
+            _xlsx_safe_text(music.get("title") or "", 500),
+            _xlsx_safe_text(d.get("location") or "", 500),
+            _xlsx_safe_text(media),
+            _xlsx_safe_text(d.get("author_url", "")),
+            _xlsx_safe_text(d.get("_link", "")),
         ])
 
     widths = [5, 6, 40, 14, 20, 8, 11, 8, 8, 8, 8, 17, 24, 24, 20, 46, 40, 30]
@@ -5634,13 +8323,30 @@ def _open_video_upstream(vid: str, headers: dict, validator=None):
 
 
 def _open_atc_video_upstream(item_id: str, headers: dict, validator=None):
+    """先读主媒体缓存；缺失、过期或不可用时按已保存的抖音来源补充。"""
+    try:
+        return _open_primary_video_upstream(item_id, headers, validator)
+    except ApiError as primary_error:
+        if primary_error.status == 416:
+            raise
+        cached = _atc_cache_get(item_id) or {}
+        work_url = cached.get("work_url") or ""
+        if not work_url and re.fullmatch(r"\d{8,30}", item_id):
+            work_url = _douyin_work_url("video", item_id)
+        if not _is_douyin_work_url(work_url):
+            raise
+        _, official_id, _ = _douyin_resolve_share_url(work_url)
+        return _open_douyin_video_upstream(official_id, headers, validator)
+
+
+def _open_primary_video_upstream(item_id: str, headers: dict, validator=None):
     """只从 ATC 服务端缓存取 URL，且仍限定在抖音媒体白名单。"""
     cached = _atc_cache_get(item_id)
     if not _atc_url_fresh(cached, _atc_cfg()["url_ttl"]):
         raise ApiError(403, "媒体地址已过期，请重新解析或刷新页面")
     upstream = cached["video_url"]
     if not _host_allowed(upstream):
-        raise ApiError(502, "AnyToCopy 返回的媒体域名不在安全白名单")
+        raise ApiError(502, "视频线路未通过安全校验")
     resp = None
     accepted = False
     try:
@@ -5669,10 +8375,296 @@ def _open_atc_video_upstream(item_id: str, headers: dict, validator=None):
     except ApiError:
         raise
     except Exception:
-        raise ApiError(502, "AnyToCopy 视频线路暂时不可用，请稍后重试")
+        raise ApiError(502, "视频线路暂时不可用，请稍后重试")
     finally:
         if resp is not None and not accepted:
             _close_upstream(resp)
+
+
+def _douyin_media_for_item(item_id: str, refresh: bool = False) -> Optional[dict]:
+    """返回一条仍在有效期内的官方 CDN 地址；需要时重新打开官方网页。"""
+    if not refresh:
+        cached = _douyin_cached_media(item_id)
+        if cached:
+            return cached
+    # 解析函数带按 item 锁，多个 Range/下载请求不会重复启动浏览器。
+    try:
+        result = _parse_douyin_item_direct("video", item_id)
+    except Exception:
+        return None
+    cached = _douyin_cached_media(item_id)
+    if cached:
+        return cached
+    direct = ((result.get("video") or {}).get("direct_url")
+              or (result.get("video") or {}).get("url") or "")
+    direct = _douyin_public_url(direct)
+    if direct:
+        return _douyin_cache_media(item_id, [direct])
+    return None
+
+
+def _invalidate_douyin_media(item_id: str) -> None:
+    with _douyin_media_lock:
+        _douyin_media_cache.pop(str(item_id), None)
+
+
+def _invalidate_douyin_note_media(item_id: str) -> None:
+    with _douyin_media_lock:
+        _douyin_note_media_cache.pop(str(item_id), None)
+
+
+def _douyin_note_media_for_item(item_id: str,
+                                refresh: bool = False) -> Optional[dict]:
+    """返回一组仍有效的官方图片地址，过期时惰性重抓。"""
+    if not refresh:
+        cached = _douyin_cached_note_media(item_id)
+        if cached:
+            return cached
+    try:
+        _parse_douyin_item_direct("note", item_id)
+    except Exception:
+        return None
+    return _douyin_cached_note_media(item_id)
+
+
+def _open_douyin_image_upstream(item_id: str, index: int):
+    """只从 item_id 对应的短时内存缓存取图，失效时刷新一次。"""
+    def attempt(record):
+        urls = list((record or {}).get("urls") or [])
+        if index < 1 or index > len(urls):
+            return None
+        upstream = _douyin_public_url(urls[index - 1])
+        if not upstream:
+            return None
+        resp = None
+        accepted = False
+        try:
+            kwargs = {
+                "headers": {**CDN_HEADERS, "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"},
+                "retry_http_statuses": (408, 425, 429, 500, 502, 503, 504),
+                "ban_on_auth_error": False,
+            }
+            pinned_proxy = _douyin_browser_proxy_for_item(item_id)
+            if pinned_proxy:
+                kwargs["proxy_override"] = pinned_proxy
+            resp, _ = open_url(upstream, **kwargs)
+            status = resp.status if hasattr(resp, "status") else resp.getcode()
+            if status != 200:
+                raise ValueError(f"unexpected image status {status}")
+            content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0]
+            content_type = content_type.strip().lower()
+            if not content_type.startswith("image/"):
+                raise ValueError("unexpected image content type")
+            raw_length = str(resp.headers.get("Content-Length") or "")
+            if raw_length.isdigit() and int(raw_length) > IMAGE_MAX_BYTES:
+                raise ApiError(413, "图片文件过大")
+            geturl = getattr(resp, "geturl", None)
+            final_url = geturl() if callable(geturl) else ""
+            if final_url and not _host_allowed(final_url):
+                raise ValueError("image redirect left the Douyin media allowlist")
+            accepted = True
+            return resp, content_type
+        except ApiError:
+            raise
+        except Exception:
+            return None
+        finally:
+            if resp is not None and not accepted:
+                _close_upstream(resp)
+
+    record = _douyin_note_media_for_item(item_id)
+    opened = attempt(record)
+    if opened:
+        return opened
+    _invalidate_douyin_note_media(item_id)
+    refreshed = _douyin_note_media_for_item(item_id, refresh=True)
+    opened = attempt(refreshed)
+    if opened:
+        return opened
+    raise ApiError(502, "抖音图片线路暂时不可用，请稍后重试")
+
+
+def _open_douyin_video_upstream(item_id: str, headers: dict, validator=None):
+    """打开官方网页生成的短时签名 CDN 地址；失效时只刷新一次。"""
+    record = _douyin_media_for_item(item_id)
+    if not record:
+        raise ApiError(503, "抖音官方视频地址暂时不可用，请稍后重试")
+
+    def attempt(candidate_record):
+        for upstream in candidate_record.get("urls") or [candidate_record.get("url")]:
+            if not upstream or not _douyin_public_url(upstream):
+                continue
+            resp = None
+            accepted = False
+            try:
+                # CDN 签名可能绑定生成时的出口 IP；浏览器抓取时若使用了
+                # 代理，媒体请求也固定到同一出口，避免首个 Range 直接 403。
+                pinned_proxy = _douyin_browser_proxy_for_item(item_id)
+                open_kwargs = {
+                    "headers": headers,
+                    "retry_http_statuses": (408, 425, 429, 500, 502, 503, 504),
+                    "ban_on_auth_error": False,
+                }
+                if pinned_proxy:
+                    open_kwargs["proxy_override"] = pinned_proxy
+                resp, _ = open_url(upstream, **open_kwargs)
+                status = resp.status if hasattr(resp, "status") else resp.getcode()
+                if status not in (200, 206):
+                    raise ValueError(f"unexpected video status {status}")
+                content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0]
+                content_type = content_type.strip().lower()
+                if not content_type or not (
+                        content_type.startswith("video/") or content_type in {
+                            "application/mp4", "application/octet-stream",
+                            "binary/octet-stream"}):
+                    raise ValueError(f"unexpected video content type {content_type}")
+                geturl = getattr(resp, "geturl", None)
+                final_url = geturl() if callable(geturl) else ""
+                if final_url and not _host_allowed(final_url):
+                    raise ValueError("video redirect left the Douyin media allowlist")
+                if validator:
+                    validator(resp)
+                accepted = True
+                return resp
+            except urlerr.HTTPError as exc:
+                # Range 超出媒体末尾是一个确定的客户端请求错误，
+                # 不是 CDN 签名失效；不应重抓页面或换线重试。
+                if exc.code == 416:
+                    content_range = str(exc.headers.get("Content-Range") or "")
+                    headers_out = {"Accept-Ranges": "bytes"}
+                    if re.fullmatch(r"bytes\s+\*/\d+", content_range, re.I):
+                        headers_out["Content-Range"] = content_range
+                    _close_upstream(exc)
+                    raise ApiError(416, "请求范围超出媒体长度", headers_out)
+                _close_upstream(exc)
+            except ApiError as exc:
+                # Chromium 抓取与媒体请求若使用了不同代理出口，CDN 可能
+                # 返回鉴权/网关错误；清掉绑定后让下一轮重新选择出口。
+                if pinned_proxy and exc.status in (401, 403, 502, 503):
+                    _remember_douyin_browser_proxy(item_id, None)
+                    continue
+                raise
+            except Exception:
+                if resp is not None:
+                    _close_upstream(resp)
+            finally:
+                if resp is not None and not accepted:
+                    _close_upstream(resp)
+        return None
+
+    try:
+        opened = attempt(record)
+        if opened is not None:
+            return opened
+        # CDN 签名通常按请求方 IP/时间失效；重新跑官方页面取得新签名。
+        _invalidate_douyin_media(item_id)
+        refreshed = _douyin_media_for_item(item_id, refresh=True)
+        if refreshed:
+            opened = attempt(refreshed)
+            if opened is not None:
+                return opened
+    except ApiError:
+        raise
+    raise ApiError(502, "抖音视频线路暂时不可用，请稍后重试")
+
+
+@app.get("/api/douyin/image/{item_id}/{index}")
+def api_douyin_image(item_id: str, index: int, request: Request,
+                     exp: int = 0, sig: str = "", dl: str = "",
+                     name: str = "image.jpeg"):
+    """图集同源转发：客户端只能按作品 ID + 序号访问。"""
+    if not re.fullmatch(r"\d{8,30}", str(item_id or "")):
+        raise ApiError(400, "非法的抖音作品 ID")
+    if index < 1 or index > 100:
+        raise ApiError(404, "图片不存在")
+    _require_media_token("douyin_image", f"{item_id}:{index}", exp, sig)
+    lease = _media_lease(request, IMAGE_REQUESTS_PER_MIN)
+    try:
+        resp, content_type = _open_douyin_image_upstream(item_id, index)
+    except Exception:
+        _media_release(lease)
+        raise
+
+    def image_stream():
+        sent = 0
+        while True:
+            block = resp.read(256 * 1024)
+            if not block:
+                break
+            sent += len(block)
+            if sent > IMAGE_MAX_BYTES:
+                raise OSError("image exceeded configured byte limit")
+            yield block
+
+    headers = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    raw_length = str(resp.headers.get("Content-Length") or "")
+    if raw_length.isdigit():
+        headers["Content-Length"] = raw_length
+    if dl:
+        headers["Content-Disposition"] = _content_disposition(name or "image.jpeg")
+    finalize = _media_finalizer(resp, lease)
+    return _MediaStreamingResponse(
+        image_stream(), finalize=finalize, media_type=content_type,
+        headers=headers)
+
+@app.get("/api/douyin/video/{item_id}")
+def api_douyin_video(item_id: str, request: Request, exp: int = 0,
+                     sig: str = "", dl: str = "", name: str = "video.mp4"):
+    """抖音官方网页链路的同源 Range 流。
+
+    客户端只提交作品 ID 和短期 HMAC，服务端从内存中的官方签名媒体记录取
+    地址；绝不接受任意 URL，避免把该端点变成 SSRF。CDN 签名失效时由
+    ``_open_douyin_video_upstream`` 惰性重抓官方网页并重试一次。
+    """
+    if not re.fullmatch(r"\d{8,30}", str(item_id or "")):
+        raise ApiError(400, "非法的抖音作品 ID")
+    _require_media_token("douyin_direct", item_id, exp, sig)
+    range_header = request.headers.get("range", "")
+    if not _valid_single_range(range_header):
+        raise ApiError(416, "仅支持单段 bytes Range 请求")
+    lease = _media_lease(request)
+    extra = dict(CDN_HEADERS)
+    if range_header:
+        extra["Range"] = range_header
+    opener = lambda outgoing, validator: _open_douyin_video_upstream(
+        item_id, outgoing, validator=validator)
+    try:
+        resp = opener(
+            extra, lambda candidate: _video_response_shape(
+                candidate, range_header))
+        status, start, end, total, expected = _video_response_shape(
+            resp, range_header)
+    except ApiError:
+        _media_release(lease)
+        raise
+    except Exception:
+        _media_release(lease)
+        raise ApiError(502, "抖音视频线路暂时不可用，请稍后重试")
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if expected is not None:
+        headers["Content-Length"] = str(expected)
+    if status == 206:
+        headers["Content-Range"] = (
+            f"bytes {start}-{end}/{total if total is not None else '*'}")
+    if dl:
+        headers["Content-Disposition"] = _content_disposition(name or "video.mp4")
+    stream = _ResumableVideoStream(
+        item_id, resp, extra, start, end, total, expected, opener=opener)
+    scope = "download" if dl else "play"
+    finalize = _media_finalizer(
+        stream, lease, on_close=lambda: _traffic_add(scope, stream.sent))
+    stream.set_on_close(finalize)
+    return _MediaStreamingResponse(
+        stream, finalize=finalize, status_code=status,
+        media_type="video/mp4", headers=headers)
 
 
 @app.get("/api/video/{vid}")
@@ -5730,10 +8722,11 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
         media_type="video/mp4", headers=headers)
 
 
-@app.get("/api/atc/video/{item_id}")
+@app.get("/api/atc/video/{item_id}", include_in_schema=False)
+@app.get("/api/media/video/{item_id}", name="stream_media")
 def api_atc_video(item_id: str, request: Request, exp: int = 0, sig: str = "",
                   dl: str = "", name: str = "video.mp4"):
-    """ATC 解析地址的受控同源流；不接受 URL 参数，避免通用 SSRF。"""
+    """受签名保护的视频播放与下载接口；仅接受作品 ID。"""
     if not re.fullmatch(r"[\w-]{8,40}", item_id):
         raise ApiError(400, "非法的作品 ID")
     _require_media_token("atc_video", item_id, exp, sig)
@@ -5757,7 +8750,7 @@ def api_atc_video(item_id: str, request: Request, exp: int = 0, sig: str = "",
         raise
     except Exception:
         _media_release(lease)
-        raise ApiError(502, "AnyToCopy 视频线路暂时不可用，请稍后重试")
+        raise ApiError(502, "视频线路暂时不可用，请稍后重试")
 
     headers = {
         "Accept-Ranges": "bytes",
@@ -5782,8 +8775,8 @@ def api_atc_video(item_id: str, request: Request, exp: int = 0, sig: str = "",
         media_type="video/mp4", headers=headers)
 
 
-# 注：图集打包 ZIP 需服务器逐张下载再压缩，会走服务器 IP/带宽，
-# 图集打包与"图片下载走浏览器直连"的设计冲突，已改为前端逐张下载（downloadAll）。
+# 注：图集打包 ZIP 需服务器同时拉取多张原图并在内存/磁盘压缩，
+# 资源放大明显；保持前端逐张调用受限流保护的同源端点（downloadAll）。
 
 
 # ---------------------------------------------------------------- 管理后台
@@ -5820,7 +8813,8 @@ def admin_login(body: LoginBody, request: Request):
         left = ADMIN_LOGIN_MAX_FAILS - _admin_fail_count(ip)
         raise ApiError(403, f"密码错误，还可尝试 {left} 次" if left > 0
                        else "密码错误，账号已临时锁定，请 15 分钟后再试")
-    _admin_fails.pop(ip, None)          # 成功登录 → 清零失败计数
+    with _rate_lock:
+        _admin_fails.pop(ip, None)      # 成功登录 → 清零失败计数
     tok = _new_session()
     resp = JSONResponse({"ok": True})
     resp.set_cookie("admin_session", tok, httponly=True, samesite="lax",
@@ -6165,9 +9159,10 @@ def admin_api_logs(request: Request, limit: int = 100):
     return {"logs": [dict(r) for r in rows]}
 
 
-# ---- AnyToCopy 统一解析（配置 / 测试 / 播放优先级）----
+# ---- 视频解析服务（配置 / 测试 / 播放优先级）----
 
-@app.get("/api/admin/atc")
+@app.get("/api/admin/atc", include_in_schema=False)
+@app.get("/api/admin/parser", name="get_parser_settings")
 def admin_atc_get(request: Request):
     _require_admin(request)
     status = _atc_status()
@@ -6185,17 +9180,22 @@ def admin_atc_get(request: Request):
                 raise _atc_rejected(resp, "测试任务查询")
             data = resp.get("data") or {}
             if not isinstance(data, dict):
-                raise ApiError(502, "AnyToCopy 测试任务结果格式无效")
-            st = str(data.get("status") or "").upper()
-            if st == "SUCCESS" or _atc_basic_result_ready(data):
+                raise ApiError(502, "测试任务结果暂不可用，请稍后重试")
+            st = _atc_status_value(data)
+            normalized = _atc_result_data(data)
+            normalized_video = (normalized.get("video")
+                                if isinstance(normalized.get("video"), dict) else {})
+            if st in ("SUCCESS", "SUCCEEDED", "DONE") or _atc_basic_result_ready(data):
                 test = {"state": "success", "ms": test.get("ms"),
-                        "duration": data.get("duration"),
-                        "has_video": bool(data.get("videoUrl")
-                                          or data.get("videoUrlList")),
-                        "has_text": bool(data.get("textContent"))}
+                        "duration": normalized.get("duration"),
+                        "has_video": bool(
+                            normalized.get("videoUrl")
+                            or normalized.get("videoUrlList")
+                            or normalized_video.get("url")),
+                        "has_text": bool(normalized.get("textContent"))}
             elif st in ("FAILED", "FAILURE"):
                 test = {"state": "failed",
-                        "error": (data.get("errorMessage") or "任务失败")[:200]}
+                        "error": "测试任务处理失败，请稍后重试"}
             set_app_setting("atc_test_state", json.dumps(test, ensure_ascii=False))
             status["test"] = json.dumps(test, ensure_ascii=False)
         except Exception as exc:
@@ -6205,6 +9205,7 @@ def admin_atc_get(request: Request):
             set_app_setting("atc_test_state", json.dumps(
                 test, ensure_ascii=False))
             status["test"] = json.dumps(test, ensure_ascii=False)
+    status["test"] = _public_parser_test_state()
     return status
 
 
@@ -6220,7 +9221,8 @@ class AtcSettingsBody(BaseModel):
     play_priority: Optional[list] = None
 
 
-@app.post("/api/admin/atc")
+@app.post("/api/admin/atc", include_in_schema=False)
+@app.post("/api/admin/parser", name="set_parser_settings")
 def admin_atc_set(body: AtcSettingsBody, request: Request):
     _require_admin(request)
     if body.api_key is not None:
@@ -6230,7 +9232,7 @@ def admin_atc_set(body: AtcSettingsBody, request: Request):
     if body.base_url is not None:
         base = body.base_url.strip().rstrip("/")
         if base and base != ATC_DEFAULT_BASE:
-            raise ApiError(400, "视频解析接口固定为 AnyToCopy 官方地址")
+            raise ApiError(400, "视频解析接口由系统管理，无法修改")
         set_app_setting("atc_base_url", ATC_DEFAULT_BASE)
     if body.enabled is not None:
         set_app_setting("atc_enabled", "1" if body.enabled else "0")
@@ -6246,7 +9248,7 @@ def admin_atc_set(body: AtcSettingsBody, request: Request):
     if body.play_priority is not None:
         if not (isinstance(body.play_priority, list)
                 and sorted(body.play_priority) == sorted(SHARE_PLAY_SOURCES)):
-            raise ApiError(400, "播放优先级必须且只能包含 dy1 / dy2 / atc / proxy 四项")
+            raise ApiError(400, "请选择全部四条播放线路，每条仅保留一次")
         set_app_setting("share_play_priority", json.dumps(body.play_priority))
     return _atc_status()
 
@@ -6255,7 +9257,8 @@ class AtcTestBody(BaseModel):
     work_url: str = ""
 
 
-@app.post("/api/admin/atc/test")
+@app.post("/api/admin/atc/test", include_in_schema=False)
+@app.post("/api/admin/parser/test", name="test_parser")
 def admin_atc_test(body: AtcTestBody, request: Request):
     """测试连接：按默认解析模式只传 workUrl，不请求文案。
     状态写 app_settings.atc_test_state（task_id + 提交耗时），由 GET 轮询推进。"""
@@ -6269,28 +9272,32 @@ def admin_atc_test(body: AtcTestBody, request: Request):
         resp = _atc_request("POST", "/video/extract",
                             {"workUrl": work_url}, cfg)
     except Exception as e:
-        detail = e.message if isinstance(e, ApiError) else type(e).__name__
+        detail = e.message if isinstance(e, ApiError) else "服务连接异常，请稍后重试"
         set_app_setting("atc_test_state", json.dumps(
             {"state": "failed", "error": detail}, ensure_ascii=False))
         raise ApiError(502, f"连接失败：{detail}")
     ms = int((time.time() - t0) * 1000)
     if resp.get("code") != 200 or not resp.get("data"):
+        rejected = _atc_rejected(resp, "测试任务提交")
         set_app_setting("atc_test_state", json.dumps(
-            {"state": "failed", "error": str(resp.get("msg") or resp)[:200]}))
-        raise ApiError(502, f"任务提交被拒：{resp.get('msg') or '未知错误'}")
+            {"state": "failed", "error": rejected.message}, ensure_ascii=False))
+        raise rejected
     created = resp["data"]
     if isinstance(created, dict) and (
-            str(created.get("status") or "").upper() == "SUCCESS"
+            _atc_status_value(created) in ("SUCCESS", "SUCCEEDED", "DONE")
             or _atc_basic_result_ready(created)):
+        normalized = _atc_result_data(created)
+        normalized_video = (normalized.get("video")
+                            if isinstance(normalized.get("video"), dict) else {})
         state = {"state": "success", "ms": ms,
-                 "duration": created.get("duration"),
-                 "has_video": bool(created.get("videoUrl")
-                                   or created.get("videoUrlList")),
-                 "has_text": bool(created.get("textContent"))}
+                 "duration": normalized.get("duration"),
+                 "has_video": bool(normalized.get("videoUrl")
+                                   or normalized.get("videoUrlList")
+                                   or normalized_video.get("url")),
+                 "has_text": bool(normalized.get("textContent"))}
         set_app_setting("atc_test_state", json.dumps(state, ensure_ascii=False))
         return {"ok": True, **state}
-    task_id = (str(created.get("taskId") or "")
-               if isinstance(created, dict) else str(created))
+    task_id = _atc_task_id(created)
     if not task_id:
         raise ApiError(502, "任务提交响应缺少 taskId")
     set_app_setting("atc_test_state", json.dumps(
@@ -6627,8 +9634,6 @@ def user_create_key(body: NewKeyBody, request: Request):
     u = current_user(request)
     if not u:
         raise ApiError(401, "请先登录")
-    if len(list_api_keys(u["id"])) >= 10:
-        raise ApiError(400, "每个账号最多 10 个密钥")
     return create_api_key(u["id"], body.name)
 
 
@@ -6664,19 +9669,21 @@ def _start_health():
     _prepare_share_parse_jobs()
     _refund_stale_quota_reservations()
     _prepare_api_jobs()
+    _prepare_atc_jobs()
     _cleanup_retained_data(force=True)
     # 所有可能阻断 startup 的迁移/清理完成后才启动非 daemon worker，避免半启动悬挂。
     _start_share_parse_workers(prepared=True)
     _start_api_job_workers(prepared=True)
+    _start_atc_workers(prepared=True)
     threading.Thread(target=_health_loop, daemon=True).start()
     threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
-    threading.Thread(target=_atc_worker, daemon=True).start()
 
 
 @app.on_event("shutdown")
 def _stop_mihomo():
     _stop_share_parse_workers()
     _stop_api_job_workers()
+    _stop_atc_workers()
     # 内存里的转发流量计数落库，重启不丢
     try:
         _flush_media_traffic()
@@ -6768,7 +9775,7 @@ _LANDING_SEO = {
                 "faq": [
                     ("什么是抖音文案提取？", "把视频里的语音自动转成文字，同时保留作品的标题与正文，适合收集口播文案、做内容分析。语音转文字是需要主动开启的异步任务，通常 1–3 分钟完成。"),
                     ("文案提取收费吗？", "注册用户每天有免费提取次数（默认 5 次，以页面显示为准）。同一视频全站只提取一次，再次打开命中缓存不重复扣次。"),
-                    ("我的链接会发给第三方吗？", "基础解析会把作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址，但默认不请求语音文案；只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。"),
+                    ("我的链接会发给第三方吗？", "公开作品链接会提交给已配置的第三方内容解析服务，以获取作品信息和媒体地址；抖音缺失信息由服务器通过官方接口补全。普通解析默认不请求语音文案；只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。"),
                     ("提取要等多久？", "通常 1–3 分钟，取决于视频时长，短视频更快。提交后可以离开页面，回来后重新打开开关即可查看结果。"),
                 ],
                 "howto": ("如何提取抖音视频文案", [
@@ -6782,7 +9789,7 @@ _LANDING_SEO = {
                 "faq": [
                     ("What is Douyin transcript extraction?", "It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Speech-to-text is an opt-in async job, usually done in 1–3 minutes."),
                     ("Is transcript extraction free?", "Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing."),
-                    ("Is my link sent to a third party?", "Basic parsing submits the post link to the third-party service AnyToCopy to obtain post metadata and media URLs, but does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file."),
+                    ("Is my link sent to a third party?", "Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Basic parsing does not request a speech transcript. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file."),
                     ("How long does it take?", "Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result."),
                 ],
                 "howto": ("How to extract the transcript of a Douyin video", [
@@ -6804,7 +9811,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
         "zh": {
             "title": "多平台无水印下载器 · 支持抖音、小红书、B站、TikTok 等 50+ 平台",
             "desc": "免费的多平台视频与图集解析工具：支持抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等 50+ 平台。粘贴公开作品链接即可获取无水印原片、图集和作品信息；普通解析默认不获取语音文案。开源可审查、不保存媒体文件、无广告。",
-            "kw": "多平台视频下载,无水印下载器,抖音下载,小红书视频下载,快手视频下载,B站视频下载,微博视频下载,TikTok downloader,YouTube downloader,视频号下载,图集下载,AnyToCopy API",
+            "kw": "多平台视频下载,无水印下载器,抖音下载,小红书视频下载,快手视频下载,B站视频下载,微博视频下载,TikTok downloader,YouTube downloader,视频号下载,图集下载",
             "site": "多平台无水印下载器",
             "ogt": "50+ 平台无水印下载 · 一个输入框统一解析",
             "ogd": "支持抖音、小红书、快手、B站、微博、TikTok、YouTube 等 50+ 平台；粘贴链接即可预览视频、图集与无水印原片。开源、无广告、不保存媒体文件。",
@@ -6813,7 +9820,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
         "en": {
             "title": "Multi-platform Video Downloader — 50+ Platforms, No Watermark",
             "desc": "Parse public posts from 50+ platforms including Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok and YouTube. Preview original videos and galleries with no media-file storage; transcript extraction is off by default.",
-            "kw": "multi platform video downloader,no watermark downloader,douyin downloader,xiaohongshu downloader,kuaishou downloader,bilibili downloader,weibo downloader,tiktok downloader,youtube downloader,photo gallery downloader,AnyToCopy API",
+            "kw": "multi platform video downloader,no watermark downloader,douyin downloader,xiaohongshu downloader,kuaishou downloader,bilibili downloader,weibo downloader,tiktok downloader,youtube downloader,photo gallery downloader",
             "site": "Multi-platform Video Downloader",
             "ogt": "No-watermark downloads from 50+ content platforms",
             "ogd": "Paste one public post link to parse videos, galleries and post details from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok, YouTube and more.",
@@ -6826,11 +9833,11 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "支持 50+ 内容平台的视频与图集解析工具：粘贴抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等平台的公开作品链接，即可预览无水印原片、图集与作品信息。基础解析不要求登录源平台，普通解析默认不获取语音文案，站点不保存媒体文件。",
             "features": ["50+ 内容平台统一解析", "抖音、小红书、快手、B站视频解析", "微博、视频号、Twitter/X 作品解析", "TikTok 与 YouTube 视频解析", "视频与图集预览", "批量解析与 Excel 导出", "抖音作品分享页", "可选语音文案提取", "媒体文件不落地", "开发者 API"],
             "faq": [
-                ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
+                ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。公开作品链接会提交给已配置的第三方内容解析服务，抖音缺失信息由服务器通过官方接口补全；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录源平台账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
-                ("解析得到的视频有水印吗？", "本站优先展示 AnyToCopy 返回的无水印原片，也不会加入本站自己的二次水印；实际可提取内容以源平台和作品类型为准。"),
+                ("解析得到的视频有水印吗？", "本站优先展示可获取的无水印原片，也不会加入本站自己的二次水印；实际可提取内容以源平台和作品类型为准。"),
                 ("支持图集（图片作品）下载吗？", "支持。图集作品会自动识别，可逐张下载原图，也可批量下载。"),
                 ("有没有 API 可以批量调用？", "有。登录后可在 API 控制台生成密钥，通过异步接口批量提交链接并查询结果，按次计费。"),
                 ("怎么提取抖音视频的文案（语音转文字）？", "解析后打开结果卡上的「获取文案（语音转文字）」开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。"),
@@ -6844,7 +9851,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "A video and gallery parser for 50+ content platforms. Paste a public post link from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, WeChat Channels, Twitter/X, TikTok, YouTube and more to preview the original media and post details. Basic parsing requires no source-platform login, transcript extraction is off by default, and the site stores no media files.",
             "features": ["Unified parsing for 50+ platforms", "Douyin, Xiaohongshu, Kuaishou and Bilibili", "Weibo, WeChat Channels and Twitter/X", "TikTok and YouTube", "Video and gallery preview", "Batch parsing and Excel export", "Douyin share pages", "Optional speech transcript", "No media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
@@ -7021,21 +10028,25 @@ def share_page(sid: str, request: Request):
     view = None
     if row:
         row = dict(row)
-        # ATC 媒体地址是临时签名链；无论视频/图集都按后台 TTL 刷新。
+        # 统一解析返回的临时签名链过期时，按作品 ID 惰性刷新。
         try:
             stored = json.loads(row["payload"] or "{}")
         except ValueError:
             stored = {}
-        is_atc = ((stored.get("video") or {}).get("source") == "atc"
-                  or stored.get("source") == "atc")
-        refresh_after = min(SHARE_REFRESH_TTL, _atc_cfg()["url_ttl"])
-        should_refresh_media = (
-            (row["kind"] == "note" or is_atc)
-            and time.time() - (row["refreshed_at"] or 0) > refresh_after)
+        stored_video = stored.get("video") or {}
+        is_atc = (stored_video.get("source") in ("atc", "parser")
+                  or stored.get("source") in ("atc", "parser"))
+        is_douyin_direct = (
+            stored_video.get("source") in ("douyin_direct", "douyin_web")
+            or stored.get("source") in ("douyin_direct", "douyin_web"))
+        # 分享页请求必须保持非阻塞：签名媒体过期时由 _share_view 的惰性
+        # 入队逻辑或 /api/douyin/video 的同源端点处理，不能在 HTML 请求里
+        # 再次调用上游解析器（否则微信访问会被 502/超时拖住）。
         should_repair_video = (
-            row["kind"] != "note" and not row["vid"] and not is_atc)
+            row["kind"] != "note" and not row["vid"]
+            and not is_atc and not is_douyin_direct)
         if (_share_state(row) == "ok"
-                and (should_refresh_media or should_repair_video)):
+                and should_repair_video):
             row = _refresh_share(row)
         view = _share_view(row, origin)
         # pending 页面完成后会自动 reload；只在终态记录一次，避免单次访问被算成 2 次。
@@ -7105,7 +10116,7 @@ def api_quota(request: Request):
     return {"limit": limit, "used": used, "remaining": remaining,
             "user_daily": FREE_USER_DAILY,
             "user": {"email": u["email"]} if u else None,
-            "atc": {"enabled": atc_on,
+            "transcript": {"enabled": atc_on,
                     "daily": atc_limit, "remaining": atc_remaining}}
 
 
@@ -7127,10 +10138,10 @@ def auth_captcha(request: Request):
 
 
 class CaptchaBody(BaseModel):
-    cid: str = ""
+    cid: str = Field(default="", max_length=128)
     x: float = -1
-    trajectory: list = []
-    nonce: str = ""
+    trajectory: list[dict] = Field(default_factory=list, max_length=256)
+    nonce: str = Field(default="", max_length=128)
 
 
 @app.post("/api/auth/captcha/verify")
@@ -7152,10 +10163,10 @@ def auth_me(request: Request):
 
 
 class RegisterBody(BaseModel):
-    email: str
-    password: str
-    pass_token: str = ""      # 滑块通过后签发的一次性令牌（缺它必拒）
-    hp: str = ""              # 蜜罐字段，正常用户为空
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=256)
+    pass_token: str = Field(default="", max_length=512)  # 滑块通过后签发的一次性令牌
+    hp: str = Field(default="", max_length=200)           # 蜜罐字段，正常用户为空
 
 
 def _do_auth_guard(request: Request, body: RegisterBody):
@@ -7249,16 +10260,16 @@ def llms_txt(request: Request):
 
 ## 核心特性
 - **50+ 平台统一解析**：一个输入框识别抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等公开作品链接。
-- 视频无水印原片：AnyToCopy 返回对应平台可提取的原片地址，实际能力以源平台和作品类型为准。
+- 抖音无水印原片：通过隔离 Chromium 捕获抖音官方 detail 数据和短时 CDN 地址；其他平台的能力以兼容适配器、源平台和作品类型为准。
 - 图集（图片作品）下载：自动识别多图作品，可逐张或批量下载原图。
 - **一键生成分享页**：把抖音作品变成一个网页，发给朋友点开即看。
 - **分享到微信显示为卡片**：在微信内打开分享页，点右上角 ··· 转发，好友收到带封面标题的卡片（直接粘贴网址则是纯链接，这是微信机制）。
 - **免 App 观看**：接收方无需安装抖音、无需登录，微信内置浏览器直接播放。
 - **分享海报**：前端合成带二维码的海报图，长按保存后可发朋友圈；链接被拦截时的传播兜底。
 - 在线预览：下载前可直接在网页中预览播放。
-- **统一视频解析**：网页、开放 API 与分享页解析都会把规范化后的作品链接提交给 AnyToCopy，以获取作品信息和媒体地址。普通解析只提交 `workUrl`，默认不请求语音文案。
+- **按平台解析**：公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不请求语音文案。
 - **文案提取（语音转文字）**：解析后主动打开「获取文案」开关，才会额外请求语音转文字；注册用户每天免费提取，同一视频全站只计一次。
-- 可靠媒体链路：播放与图片直连优先，视频下载走同源签名流式转发，本站不缓存、不留存。
+- 可靠媒体链路：视频与抖音图片均有受签名/限流保护的同源流式转发，本站不落地、不留存媒体。
 - 开源可审查、数据最小化：不保存媒体文件；免费额度和诊断只处理必要的用途化摘要、粗粒度环境与事件，保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除；站内账号可选。
 - 开发者 API：登录后于控制台生成密钥，异步批量提交链接、轮询结果，按次计费。
 
@@ -7268,7 +10279,7 @@ def llms_txt(request: Request):
 3. 在线预览视频或图集，按页面提供的当前平台方式保存原片；抖音作品还可点「生成分享页」发给微信好友。
 
 ## 常见问答
-- 会处理和保留哪些数据？——不保存视频或图片文件。每次解析会把规范化后的作品链接提交给 AnyToCopy 获取作品信息和媒体地址，普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
+- 会处理和保留哪些数据？——不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
 - 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
 - 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，仅保存标题封面等元数据，不存储视频文件。
 - 需要登录或装软件吗？——无需登录源平台或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。

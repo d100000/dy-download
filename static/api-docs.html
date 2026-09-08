@@ -70,7 +70,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 
 <section class="hero">
   <h1 data-i18n-html="h1">多平台解析 <span class="hl">开放 API</span></h1>
-  <p class="lead" data-i18n="lead">通过异步接口批量提交 50+ 内容平台的公开作品链接，获取视频地址、图集图片、标题作者与互动数据。规范 JSON、按次计费、异步可追踪——适合研究、获得授权的备份与二次开发。</p>
+  <p class="lead" data-i18n="lead">通过异步接口批量提交 50+ 内容平台的公开作品链接，获取视频地址、图集图片、标题作者与媒体元数据。优先使用已配置的内容解析服务；抖音缺少视频、互动数据或作者信息时由服务器自动补全。规范 JSON、按次计费、异步可追踪——适合研究、获得授权的备份与二次开发。</p>
   <div class="cta">
     <a class="btn btn-primary" id="startBtn" href="/api-console" data-i18n="get_key">登录后生成密钥</a>
     <a class="btn btn-ghost" href="#endpoints" data-i18n="see_ep">查看接口</a>
@@ -92,7 +92,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 
 <div class="endpoint">
   <div class="ep-head"><span class="method">POST</span><span class="path">/api/shares</span><span class="sub" style="margin:0">无需 API Key</span></div>
-  <div class="ep-desc" data-i18n-html="ep_share">异步创建本地分享页。接收阶段只在本地校验并规范化唯一一个 <code>https://v.douyin.com/&lt;短码&gt;/</code>，不请求抖音；持久化占位页和后台任务后立即返回 <code>202 Accepted</code>。建议每次创建发送 <code>Idempotency-Key</code>，网络重试将返回同一 sid。</div>
+  <div class="ep-desc" data-i18n-html="ep_share">异步创建本地分享页。接收阶段只在本地校验并规范化唯一一个 <code>https://v.douyin.com/&lt;短码&gt;/</code>，不访问源平台；持久化占位页和后台任务后立即返回 <code>202 Accepted</code>。建议每次创建发送 <code>Idempotency-Key</code>，网络重试将返回同一 sid。</div>
   <h3 class="sec" data-i18n="req">请求示例</h3>
   <pre>curl -X POST 'https://你的域名/api/shares' \
   -H 'Content-Type: application/json' \
@@ -112,14 +112,27 @@ Retry-After: 2
 </div>
 
 <div class="endpoint">
+  <div class="ep-head"><span class="method get">GET</span><span class="path">/api/author?item_id={item_id}</span></div>
+  <div class="ep-desc" data-i18n-html="ep_author">读取已解析作品的作者详情。昵称、头像、主页与作品统计来自解析结果；首次读取时服务端会按需短时富化资料，不暴露上游服务细节。</div>
+  <pre>curl 'https://你的域名/api/author?item_id=7123456789'
+
+{ "item_id": "7123456789", "nickname": "作者昵称", "author_url": "https://www.douyin.com/user/...",
+  "sec_uid": "MS4w...", "unique_id": "creator_id", "follower_count": 2000,
+  "total_favorited": "45434", "following_count": 4, "aweme_count": 55,
+  "enriched": true }</pre>
+</div>
+
+<div class="endpoint">
   <div class="ep-head"><span class="method get">GET</span><span class="path">/api/shares/{sid}</span></div>
-  <div class="ep-desc" data-i18n-html="ep_share_status">查询公开最小状态。<code>pending / processing</code> 时按 <code>poll_after_ms</code> 轮询；<code>ready</code> 时可复制 <code>share_url_versioned</code> 到微信；<code>failed</code> 只返回稳定错误码和用户文案，不暴露内部代理信息。分享页 <code>/s/{sid}</code> 会自动轮询并在完成后刷新，普通用户无需自行实现这段逻辑。</div>
+  <div class="ep-desc" data-i18n-html="ep_share_status">查询公开最小状态。<code>pending / processing</code> 时按 <code>poll_after_ms</code> 轮询；<code>ready</code> 后若 <code>media_available=false</code>，继续按 <code>media_poll_after_ms</code> 检查，直到媒体可用。完成时可复制 <code>share_url_versioned</code> 到微信；<code>failed</code> 只返回稳定错误码和用户文案，不暴露内部代理信息。分享页 <code>/s/{sid}</code> 会自动轮询。</div>
   <pre>curl 'https://你的域名/api/shares/Ab3xYz7'
 
 { "ok": true, "data": {
   "sid": "Ab3xYz7", "status": "ready", "ready": true, "shareable": true,
   "kind": "video", "item_id": "7123456789", "title": "作品标题",
-  "author": "作者昵称", "share_url_versioned": "https://你的域名/s/Ab3xYz7?v=1780000008" } }</pre>
+  "author": "作者昵称", "media_available": true, "media_pending": false,
+  "media_poll_after_ms": 0,
+  "share_url_versioned": "https://你的域名/s/Ab3xYz7?v=1780000008" } }</pre>
 </div>
 
 <div class="endpoint">
@@ -165,10 +178,10 @@ Retry-After: 2
           "kind": "video", "platform": "douyin", "share_supported": true,
           "item_id": "7123456789", "title": "作品标题",
           "author": "作者昵称", "cover": "封面图地址", "duration_ms": 15333,
-          "video": { "url": "无水印播放地址（长期有效）",
-                     "download_url": "同源签名下载地址（12 小时有效）",
+          "video": { "url": "短时有效的媒体播放地址",
+                     "proxy_url": "本站同源签名播放地址（12 小时有效）",
+                     "download_url": "本站同源签名下载地址（12 小时有效）",
                      "width": 1080, "height": 1920, "filename": "作品标题.mp4" },
-          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },
           "music": { "title": "背景音乐" }, "tags": ["话题1", "话题2"] } },
       { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "链接已失效" }
     ] } }</pre>
@@ -199,12 +212,12 @@ Retry-After: 2
 <div class="tbl-wrap"><table>
   <thead><tr><th data-i18n="th_field">字段</th><th data-i18n="th_mean">含义</th></tr></thead>
   <tbody>
-    <tr><td><code>video.url</code></td><td data-i18n="f1">AnyToCopy 返回的原片播放地址，有效期内浏览器可直连</td></tr>
-    <tr><td><code>video.alt_url</code></td><td data-i18n="f2">备用播放域名，与 url 互为备份</td></tr>
-    <tr><td><code>video.download_url</code></td><td data-i18n="f3">可选。已验证媒体域名的本站同源签名下载地址，默认 12 小时过期</td></tr>
-    <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">可选。已验证媒体域名的本站同源播放兜底线路</td></tr>
+    <tr><td><code>video.url</code></td><td data-i18n="f1">短时有效的媒体播放地址；有效期与可用性以服务返回为准</td></tr>
+    <tr><td><code>video.alt_url</code></td><td data-i18n="f2">可选的备用播放地址；失败时可切换使用</td></tr>
+    <tr><td><code>video.download_url</code></td><td data-i18n="f3">可选。按作品 ID 读取本站同源 HMAC 下载地址，默认 12 小时过期</td></tr>
+    <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">可选。本站同源 HMAC 播放地址，适合受限网络环境</td></tr>
     <tr><td><code>images[]</code></td><td data-i18n="f5">图集作品（kind = note）的原图列表，含 url / filename</td></tr>
-    <tr><td><code>stats</code></td><td data-i18n="f6">互动数据：digg 点赞 / comment 评论 / collect 收藏 / share 分享</td></tr>
+    <tr><td><code>stats</code></td><td data-i18n="f6">点赞（digg）、评论、收藏和分享数；抖音缺失值由服务器补全，仍无法获取时为 null</td></tr>
     <tr><td><code>warning</code></td><td data-i18n="f7">成功但带警告时出现（如部分数据缺失）</td></tr>
   </tbody>
 </table></div>
@@ -268,32 +281,33 @@ $('#langBtn').onclick=()=>{const to=LANG==='zh'?'en':'zh';document.cookie='lang=
 const I18N={en:{
   brand:"Multi-platform Downloader · API", nav_home:"Home", nav_console:"Console", nav_login:"Sign in",
   h1:'Multi-platform parsing <span class="hl">Open API</span>',
-  lead:"Submit public post links from 50+ content platforms and receive video URLs, gallery images, title/author and engagement stats. Clean JSON, pay-per-request and async tracking — built for research, authorized backup and integration.",
+  lead:"Submit public post links from 50+ content platforms and receive video URLs, gallery images, title/author and media metadata. The configured parsing service is tried first. Missing Douyin media, engagement counts and author information are supplemented on the server. Clean JSON, pay-per-request and async tracking — built for research, authorized backup and integration.",
   get_key:"Sign in to create a key", see_ep:"See endpoints",
   s1:"Quick start", s1a_h:"Sign up / in", s1a_p:"Click “Sign in” at the top-right of the home page and pass the slider check.",
   s1b_h:"Create an API key", s1b_p:"Open the API console and click “Create key”. New keys include trial balance.",
   s1c_h:"Make a call", s1c_p:"Async share pages can be created directly; paid Open API calls require the <code>X-API-Key</code> header.",
   s2:"Authentication", s2_p:"The async share-page endpoints use the website's free quota and require no API key. Open API routes under <code>/api/v1/*</code> authenticate only through the <code>X-API-Key: your_key</code> request header. Never put a key in a URL query parameter.",
   s3:"Endpoints", req:"Request", resp:"Response",
-  ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one <code>https://v.douyin.com/&lt;code&gt;/</code> URL locally; it performs no Douyin request. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
-  ep_share_status:"Read the minimal public state. Poll by <code>poll_after_ms</code> while pending/processing. When ready, copy <code>share_url_versioned</code> for WeChat. Failed responses contain only stable public error codes, never internal proxy details. The <code>/s/{sid}</code> page already polls and refreshes itself automatically.",
+  ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one <code>https://v.douyin.com/&lt;code&gt;/</code> URL locally; it does not contact Douyin. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
+  ep_author:"Read structured author details for a parsed item. Nickname, avatar, profile URL, <code>sec_uid</code> and post engagement fields come from the normalized result; the first lookup may briefly enrich profile details. Upstream implementation details are not exposed.",
+  ep_share_status:"Read the minimal public state. Poll by <code>poll_after_ms</code> while pending/processing. If a ready response has <code>media_available=false</code>, continue with <code>media_poll_after_ms</code>. When ready, copy <code>share_url_versioned</code> for WeChat. Failed responses contain only stable public error codes, never internal proxy details. The <code>/s/{sid}</code> page already handles polling.",
   ep_share_delete:"Delete or cancel your share page. Signed-in owners use their session; anonymous creators send the creation response's <code>manage_token</code> in the <code>X-Share-Manage-Token</code> header. The token never appears in public status, URLs, or pages. An unclaimed task is refunded; once parsing has started, publication is cancelled but one quota unit remains charged.",
   ep1:"Submit a durable batch job; the full estimated cost is pre-authorized and processing is async. Max <b>100</b> public HTTPS post links per job, covering 50+ platforms including Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok and YouTube (or pass full share text for automatic extraction). Send an <code>Idempotency-Key</code>: retries return the same job without reserving funds twice; reusing the key with different links returns <code>409</code>.",
   ep1_alt:"# Or pass full share text — all links inside are extracted automatically:",
   ep1_code:'{ "code": 0, "message": "accepted",\n  "data": { "job_id": "job_xxx", "total": 2, "status": "pending",\n            "price_cents": 1, "estimated_cost_cents": 2,\n            "query_url": "/api/v1/jobs/job_xxx" } }',
   ep2:"Poll job status and results (with the same API key). When <code>status</code> is <code>done</code>, <code>results</code> holds per-link outcomes; poll every 2–5 seconds while running. Failed items are not billed (exact automatic refund).",
-  ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "platform": "douyin", "share_supported": true,\n          "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "AnyToCopy original-media URL",\n                     "download_url": "optional signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "link expired" }\n    ] } }',
+  ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "platform": "douyin", "share_supported": true,\n          "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "Douyin official short-lived signed CDN URL",\n                     "download_url": "optional signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "link expired" }\n    ] } }',
   ep3:"Check the current key's balance and usage.",
   s3b:"Job status & result fields", st_h:"Job status (status)", th_mean:"Meaning",
   st1:"Accepted, waiting in queue", st2:"Running (some items started or finished)", st3:"All items settled (check per-item ok)",
   f_h:"Fields of a succeeded item's data (kind = video)", th_field:"Field",
   f0:"Detected source platform and whether this site can create a share page for the item",
-  f1:"Original-media play URL returned by AnyToCopy, directly playable by browsers while valid",
-  f2:"Alternate play domain, a backup of url",
-  f3:"Optional same-origin signed download URL for verified media hosts; expires in 12 hours by default",
-  f4:"Optional same-origin playback fallback for verified media hosts",
+  f1:"A short-lived media play URL; validity depends on the service response",
+  f2:"An optional alternate media URL, when available; a backup of url",
+  f3:"Same-origin HMAC-signed download URL for verified media; refreshed by item_id and expires in 12 hours by default",
+  f4:"Same-origin HMAC-signed playback fallback for verified media",
   f5:"Original image list for gallery posts (kind = note), with url / filename",
-  f6:"Engagement: digg likes / comment / collect favorites / share",
+  f6:"Engagement counts: digg (likes), comments, collects and shares. Missing Douyin values are supplemented on the server; unavailable values remain null",
   f7:"Present when the item succeeded with a warning (e.g. partial data missing)",
   s4:"Billing", s4_p:"The entire job is pre-authorized at submission using the snapshotted unit price. Insufficient available balance rejects the whole job. Successful items become charges and failed items are refunded exactly. Jobs, leases, and the ledger survive restarts; use Idempotency-Key for safe retries.",
   s6:"Example (Python)",

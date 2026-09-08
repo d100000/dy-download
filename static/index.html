@@ -247,8 +247,9 @@ h1 .hl{color:var(--accent)}
 @media (max-width:680px){ .card-body{flex-direction:column} }
 .player-wrap{flex:none; width:min(300px,100%); margin:0 auto}
 .player-wrap video{
-  width:100%; aspect-ratio:9/16; max-height:480px; border-radius:12px;
-  background:#000; display:block; object-fit:contain;
+  width:100%; height:auto; aspect-ratio:var(--video-ratio,9/16);
+  max-height:480px; border-radius:12px; background:#000; display:block;
+  object-fit:contain;
 }
 .info{flex:1; min-width:0; display:flex; flex-direction:column; gap:14px}
 .badge{
@@ -287,11 +288,7 @@ h1 .hl{color:var(--accent)}
 .meta-row{display:flex; gap:22px; flex-wrap:wrap; padding:12px 0; border-top:1px solid var(--border); border-bottom:1px solid var(--border)}
 .meta-item .k{font-size:12px; color:var(--muted); letter-spacing:.04em}
 .meta-item .v{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums}
-.stats-row{display:flex; gap:8px; flex-wrap:wrap}
-.stat-chip{flex:1; min-width:64px; text-align:center; background:var(--surface-2);
-  border:1px solid var(--border); border-radius:11px; padding:9px 4px}
-.stat-chip b{display:block; font-size:16px; font-weight:700; font-variant-numeric:tabular-nums; line-height:1.2}
-.stat-chip span{font-size:11.5px; color:var(--muted)}
+.meta-item .v.is-pending{color:var(--muted); font-size:13px; font-weight:500}
 .extras{display:flex; flex-direction:column; gap:7px}
 .extra-line{font-size:13px; color:var(--muted); display:flex; gap:6px; align-items:baseline}
 .extra-line span{color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
@@ -311,7 +308,7 @@ a.ghost-btn{text-decoration:none}
 .batch-stat b{color:var(--text); font-variant-numeric:tabular-nums}
 .batch-actions{display:flex; gap:8px}
 .batch-tblwrap{border:1px solid var(--border); border-radius:14px; background:var(--surface); box-shadow:var(--shadow); overflow-x:auto}
-.batch-table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:640px}
+.batch-table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:560px}
 .batch-table th{text-align:left; font-size:11.5px; letter-spacing:.04em; color:var(--muted); font-weight:600;
   padding:11px 14px; border-bottom:1.5px solid var(--border); white-space:nowrap; background:var(--surface-2)}
 .batch-table td{padding:10px 14px; border-bottom:1px solid var(--border); vertical-align:middle}
@@ -322,7 +319,6 @@ a.ghost-btn{text-decoration:none}
 .bt-t{font-weight:500; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
 .bt-a{font-size:12px; color:var(--muted); margin-top:2px}
 .bt-tag{font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:99px; background:var(--surface-2); color:var(--muted); white-space:nowrap}
-.bt-nums{color:var(--muted); white-space:nowrap}
 .bt-ops{white-space:nowrap}
 .mini-btn{display:inline-flex; align-items:center; font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:8px; background:var(--accent); color:var(--accent-ink); margin-right:6px; text-decoration:none; transition:opacity .15s}
 .mini-btn:hover{opacity:.88}
@@ -336,10 +332,13 @@ a.ghost-btn{text-decoration:none}
   max-width:420px; width:100%; max-height:90vh; overflow:auto; box-shadow:var(--shadow)}
 .pm-close{position:absolute; top:10px; right:10px; z-index:2; width:32px; height:32px; border-radius:9px;
   background:rgba(0,0,0,.5); color:#fff; display:grid; place-items:center; font-size:15px}
-.pm-body video{width:100%; max-height:70vh; background:#000; display:block; border-radius:16px 16px 0 0}
+.pm-body video{width:100%; height:auto; aspect-ratio:var(--video-ratio,16/9);
+  max-height:70vh; object-fit:contain; background:#000; display:block; border-radius:16px 16px 0 0}
 .pm-title{padding:14px 16px 4px; font-size:14.5px; font-weight:600; line-height:1.5}
+.pm-meta{display:flex; gap:8px; padding:4px 16px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums}
+.pm-meta span+span::before{content:"·"; margin-right:8px; color:var(--faint)}
 .pm-act{padding:8px 16px 16px}
-.pm-act .primary-btn{width:100%; justify-content:center}
+.pm-act .primary-btn{width:100%; justify-content:center; text-decoration:none}
 .pm-imgs{display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; padding:12px 16px 16px}
 .pm-imgs img{width:100%; border-radius:8px; display:block}
 
@@ -530,14 +529,15 @@ a.ghost-btn{text-decoration:none}
 .story-link-card{
   position:absolute; z-index:4; left:24px; top:72px; width:min(250px,62%); padding:13px 14px;
   display:flex; align-items:center; gap:11px; border:1px solid rgba(255,255,255,.14); border-radius:12px;
-  background:rgba(27,27,29,.94); box-shadow:0 18px 46px -26px #000; transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease),left 620ms var(--motion-ease),top 620ms var(--motion-ease);
+  background:rgba(27,27,29,.94); box-shadow:0 18px 46px -26px #000; will-change:transform,opacity;
+  transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease);
 }
 .story-link-icon{width:32px; height:32px; flex:none; display:grid; place-items:center; border-radius:9px; color:#25F4EE; background:#15191B}
 .story-link-lines{flex:1; min-width:0}
 .story-link-lines b,.story-link-lines span{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .story-link-lines b{font-size:12px; color:#F5F5F7}
 .story-link-lines span{font-size:10px; color:#7D7D82; margin-top:2px}
-.story-parser{position:absolute; z-index:3; left:50%; top:48%; width:146px; height:146px; transform:translate(-50%,-50%); transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease),left 620ms var(--motion-ease),top 620ms var(--motion-ease)}
+.story-parser{position:absolute; z-index:3; left:50%; top:48%; width:146px; height:146px; transform:translate(-50%,-50%); will-change:transform,opacity; transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease)}
 .story-ring{position:absolute; border-radius:50%; border:1px solid rgba(255,255,255,.14); inset:0}
 .story-ring.r2{inset:17px; border-color:rgba(37,244,238,.25); transform:rotate(35deg)}
 .story-ring.r3{inset:34px; border-color:rgba(240,45,85,.3); transform:rotate(-28deg)}
@@ -549,7 +549,7 @@ a.ghost-btn{text-decoration:none}
 .story-flow.f2{left:54%; top:60%; width:25%; transform:rotate(21deg)}
 .story-result-card{
   position:absolute; z-index:5; right:22px; bottom:22px; width:min(290px,72%); padding:10px; border-radius:15px;
-  background:#171719; border:1px solid rgba(255,255,255,.14); box-shadow:0 22px 56px -26px #000;
+  background:#171719; border:1px solid rgba(255,255,255,.14); box-shadow:0 22px 56px -26px #000; will-change:transform,opacity;
   transition:opacity 460ms var(--motion-ease),transform 620ms var(--motion-ease);
 }
 .story-video{height:168px; position:relative; overflow:hidden; border-radius:10px; background:linear-gradient(145deg,#232329,#0D0D0F)}
@@ -567,7 +567,7 @@ a.ghost-btn{text-decoration:none}
 
 @media (min-width:721px) and (min-height:680px) and (prefers-reduced-motion:no-preference){
   .motion-story.story-enhanced{height:220vh}
-  .story-enhanced .story-stage{position:sticky; top:88px; height:calc(100vh - 112px); height:calc(100svh - 112px); min-height:590px; max-height:760px}
+  .story-enhanced .story-stage{position:sticky; top:88px; height:calc(100vh - 112px); height:calc(100svh - 112px); min-height:0; max-height:760px}
   .story-enhanced .story-copy{position:absolute; inset:0 auto auto 0; opacity:0; transform:translateY(24px); border-top-color:transparent; transition:opacity 420ms var(--motion-ease),transform 560ms var(--motion-ease)}
   .story-enhanced .story-stage[data-story-step="0"] .story-copy[data-story-copy="0"],
   .story-enhanced .story-stage[data-story-step="1"] .story-copy[data-story-copy="1"],
@@ -665,6 +665,11 @@ a.ghost-btn{text-decoration:none}
   .story-flow.f2{left:51%; top:57%; width:27%}
 }
 
+/* 矮桌面无法容纳粘性舞台时，使用普通纵向叙事，避免进度控件误导或裁切内容。 */
+@media (min-width:721px) and (max-height:679px){
+  .story-progress{display:none}
+}
+
 @media (max-width:900px) and (min-width:601px){
   .platform-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
 }
@@ -714,9 +719,6 @@ a.ghost-btn{text-decoration:none}
   .actions>*{flex:1 1 auto; justify-content:center; min-height:44px}
   .album-head{padding:16px 16px 0}
   .album-grid{padding:14px 16px 16px; grid-template-columns:repeat(2,1fr); gap:10px}
-  .stats-row{gap:6px}
-  .stat-chip{min-width:0; padding:8px 2px}
-  .stat-chip b{font-size:15px}
   .trust{margin-top:42px}
   .trust-title{font-size:19px}
   .trust-grid{grid-template-columns:1fr 1fr; gap:8px}
@@ -854,7 +856,7 @@ footer{
         <span data-i18n="composer_label">平台分享链接</span>
       </div>
       <div class="composer-status" role="status" aria-live="polite" aria-atomic="true">
-        <span class="status-default" data-i18n="composer_status">AnyToCopy API 解析</span>
+        <span class="status-default" data-i18n="composer_status">支持 50+ 平台</span>
         <span class="status-ready" data-i18n="composer_ready">已识别支持的平台链接</span>
         <span class="status-loading" data-i18n="composer_loading">正在获取作品信息</span>
       </div>
@@ -918,7 +920,7 @@ footer{
       <li class="platform-item"><span class="platform-logo"><img src="/platform-logos/youtube.svg" alt="" decoding="async"></span><span class="platform-meta"><b>YouTube</b><small data-i18n="platform_long_video">长视频</small></span></li>
       <li class="platform-item more"><span class="platform-logo" aria-hidden="true">＋</span><span class="platform-meta"><b data-i18n="platform_more">更多平台</b><small data-i18n="platform_growing">持续增加中</small></span></li>
     </ul>
-    <p class="platform-foot" data-i18n="platform_foot">依托 AnyToCopy API 统一解析，无需在不同平台工具之间来回切换。</p>
+    <p class="platform-foot" data-i18n="platform_foot">一个入口覆盖 50+ 内容平台，无需在不同工具之间来回切换。</p>
   </section>
 </section>
 
@@ -930,7 +932,7 @@ footer{
       <span class="story-label" data-i18n="story_label">从分享链接到无水印原片</span>
       <div class="story-progress" role="group" data-i18n-aria="story_progress_label" aria-label="解析流程步骤">
         <button type="button" data-story-goto="0" aria-label="查看粘贴链接步骤" data-i18n-aria="story_goto1" aria-current="step"></button>
-        <button type="button" data-story-goto="1" aria-label="查看 API 解析步骤" data-i18n-aria="story_goto2"></button>
+        <button type="button" data-story-goto="1" aria-label="查看获取作品信息步骤" data-i18n-aria="story_goto2"></button>
         <button type="button" data-story-goto="2" aria-label="查看下载与分享步骤" data-i18n-aria="story_goto3"></button>
       </div>
     </div>
@@ -945,8 +947,8 @@ footer{
           </li>
           <li class="story-copy" data-story-copy="1">
             <span class="story-index">02</span>
-            <h3 data-i18n="story_h2">一次请求，拿全信息。</h3>
-            <p data-i18n="story_p2">AnyToCopy API 返回标题、作者、封面、视频或图集。</p>
+            <h3 data-i18n="story_h2">作品信息，自动整理。</h3>
+            <p data-i18n="story_p2">自动整理标题、作者和封面，并识别视频或图集。</p>
           </li>
           <li class="story-copy" data-story-copy="2">
             <span class="story-index">03</span>
@@ -956,7 +958,7 @@ footer{
         </ol>
       </div>
       <div class="story-visual" aria-hidden="true">
-        <span class="story-visual-label">ANYTOCOPY / VIDEO EXTRACT</span>
+        <span class="story-visual-label">LINK TO ORIGINAL</span>
         <div class="story-flow f1"></div><div class="story-flow f2"></div>
         <div class="story-link-card">
           <span class="story-link-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
@@ -964,7 +966,7 @@ footer{
         </div>
         <div class="story-parser">
           <span class="story-ring r1"></span><span class="story-ring r2"></span><span class="story-ring r3"></span>
-          <span class="story-parser-core">API</span>
+          <span class="story-parser-core">AUTO</span>
         </div>
         <div class="story-result-card">
           <div class="story-video">
@@ -987,12 +989,12 @@ footer{
     <div class="trust-card reveal">
       <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.7-1.7"/></svg></div>
       <h3 data-i18n="tc1_h">开源且克制</h3>
-      <p data-i18n-html="tc1_p">前端开源可审查，<strong>不保存视频或图片文件</strong>，兼容线路只做流式转发。</p>
+      <p data-i18n-html="tc1_p">前端开源可审查，<strong>不保存视频或图片文件</strong>，媒体线路只做流式转发。</p>
     </div>
     <div class="trust-card reveal">
       <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-9 12h8l-1 8 9-12h-8z"/></svg></div>
       <h3 data-i18n="tc2_h">解析更稳定</h3>
-      <p data-i18n-html="tc2_p">统一解析接口配合播放、下载兼容线路，失败时自动切换与重试。</p>
+      <p data-i18n-html="tc2_p">遇到临时线路异常时会自动重试，让预览和下载更顺畅。</p>
     </div>
     <div class="trust-card reveal">
       <div class="tc-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m5.6 5.6 12.8 12.8"/></svg></div>
@@ -1013,7 +1015,7 @@ footer{
     <div class="api-band-text">
       <span class="api-tag" data-i18n="api_tag">开发者 API</span>
       <h2 data-i18n="api_h">需要批量 / 自动化？用开放 API</h2>
-      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交受支持平台链接——标题、作者、视频地址、图集图片、互动数据一次拿全。按次计费、稳定可靠，适合研究、备份与二次开发。</p>
+      <p data-i18n="api_p">登录后在控制台生成 API Key，通过异步接口批量提交受支持平台链接——标题、作者、视频地址与图集图片一次拿全。按次计费、稳定可靠，适合研究、备份与二次开发。</p>
       <div class="api-feats">
         <span data-i18n="api_f1">✓ 异步批量：提交即返回任务号</span>
         <span data-i18n="api_f2">✓ 规范 JSON：结构化字段</span>
@@ -1045,7 +1047,7 @@ GET /api/v1/jobs/job_xxx
   <div class="faq-list">
     <details class="faq-item reveal">
       <summary data-i18n="faq_q1">这个下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，兼容线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。每次解析都会把规范化后的作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址；普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
     </details>
     <details class="faq-item reveal">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -1103,7 +1105,7 @@ const I18N = {
     hero_h1:'<span class="hero-line"><span>Paste a share link.</span></span><span class="hero-line hl"><span>Get the watermark-free original.</span></span>',
     hero_sub:"Works with public posts from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, TikTok, YouTube and more.",
     hero_share:"No source-platform sign-in · No media-file storage · <strong>Share pages for Douyin posts</strong>",
-    composer_label:"Platform share link", composer_status:"Powered by AnyToCopy API",
+    composer_label:"Platform share link", composer_status:"Supports 50+ platforms",
     composer_ready:"Supported platform link detected", composer_loading:"Fetching post details",
     ph_input:"Paste video / gallery share text or a link\nSupports Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo and 50+ platforms",
     btn_paste:"Paste", btn_upload:"Upload file", btn_parse:"Start parsing", btn_loading:"Parsing…",
@@ -1116,13 +1118,13 @@ const I18N = {
     platform_short:"Short video · Gallery", platform_social:"Post · Video", platform_long:"Long video · Post",
     platform_ecommerce:"Commerce video", platform_social_video:"Social video", platform_news:"News video",
     platform_short_video:"Short video", platform_long_video:"Long video", platform_more:"More platforms",
-    platform_growing:"More being added", platform_foot:"Unified through the AnyToCopy API, so you do not need a different tool for every platform.",
+    platform_growing:"More being added", platform_foot:"One place for 50+ content platforms, so you do not need a different tool for every platform.",
     err_link:"Paste a public post link from a supported platform.",
     story_label:"From share link to watermark-free original",
     story_title:'One paste.<strong>Three steps.</strong>', story_progress_label:"Parsing flow steps",
-    story_goto1:"View paste-link step", story_goto2:"View API parsing step", story_goto3:"View download and sharing step",
+    story_goto1:"View paste-link step", story_goto2:"View post-details step", story_goto3:"View download and sharing step",
     story_h1:"Paste it as-is.", story_p1:"Full share text works too, and multiple links are split automatically.",
-    story_h2:"One request. Every detail.", story_p2:"The AnyToCopy API returns the title, creator, cover, video or gallery.",
+    story_h2:"Post details, organized.", story_p2:"Title, creator and cover are organized automatically, with video or gallery detected for you.",
     story_h3:"Original ready. Use it your way.", story_p3:"Preview the original online; Douyin posts can also become share pages for friends.",
     story_visual_link:"Share text · Platform link detected", story_visual_ready:"Watermark-free original ready",
     story_visual_meta:"Video · 00:27 · MP4", story_visual_download:"Download", story_visual_share:"Share",
@@ -1135,18 +1137,18 @@ const I18N = {
     ts_slow:"Still extracting — reopen the toggle later to see the result",
     ts_copy:"Copy all", ts_audio:"Listen to audio ↗",
     trust_title:"Simple, private, reliable",
-    tc1_h:"Open and restrained", tc1_p:"The front end is auditable and we <strong>do not store video or image files</strong>; compatibility routes only stream bytes.",
-    tc2_h:"More reliable parsing", tc2_p:"A unified parsing API plus playback and download fallbacks switch routes and retry when needed.",
+    tc1_h:"Open and restrained", tc1_p:"The front end is auditable and we <strong>do not store video or image files</strong>; media routes only stream bytes.",
+    tc2_h:"More reliable parsing", tc2_p:"Temporary route issues are retried automatically for smoother previews and downloads.",
     tc3_h:"Clean and ad-free", tc3_p:"No popups or pre-roll ads, and no second watermark added to your downloads.",
     tc4_h:"Easy to share", tc4_p:"Douyin posts can become a share page or poster so friends can watch without installing the app.",
     api_tag:"Developer API", api_h:"Need bulk / automation? Use the open API",
-    api_p:"Sign in, create an API key in the console, and submit supported-platform links in bulk via the async API — title, author, video URL, gallery images and stats in one call. Billed per request, reliable, built for research, backup and integration.",
+    api_p:"Sign in, create an API key in the console, and submit supported-platform links in bulk via the async API — title, author, video URL and gallery images in one call. Billed per request, reliable, built for research, backup and integration.",
     api_f1:"✓ Async batch: submit → get a job id", api_f2:"✓ Clean JSON: structured fields", api_f3:"✓ Pay per request · balance visible",
     api_cta1:"View API docs", api_cta2:"Open API console",
     faq_title:"FAQ", faq_lead:"Paste a public post link from a supported platform to preview its video or gallery. Douyin posts can also become a WeChat-friendly share page. No source-platform sign-in is required; basic parsing needs no site account or app installation.",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page only stores the post's title and cover — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
-    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; compatibility routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. Every parse submits the normalized post link to the third-party service AnyToCopy to obtain post metadata and media URLs. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; media routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. <strong>Public post links are sent to a configured third-party content service</strong>; missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
     faq_q2:"Do I need to log in or install anything?", faq_a2:"No source-platform login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
@@ -1279,7 +1281,7 @@ setupSectionMotion();
 const story = $('#motionStory'), storyStage = $('#storyStage');
 const storyDesktop = matchMedia('(min-width:721px) and (min-height:680px)');
 const storyButtons = [...document.querySelectorAll('[data-story-goto]')];
-let storyVisible = false, pageMotionFrame = 0, storyTravel = 1, activeStoryStep = -1;
+let storyVisible = false, pageMotionFrame = 0, storyTravel = 1, activeStoryStep = -1, lastStoryTurn = '';
 function setStoryStep(step){
   if (activeStoryStep === step) return;
   activeStoryStep = step;
@@ -1292,7 +1294,11 @@ function updateStoryMotion(){
   const rect = story.getBoundingClientRect();
   const progress = Math.max(0,Math.min(1,(88 - rect.top) / storyTravel));
   const step = progress < .3 ? 0 : progress < .68 ? 1 : 2;
-  storyStage.style.setProperty('--story-turn',`${(-28 + progress * 150).toFixed(1)}deg`);
+  const turn = `${(-28 + progress * 150).toFixed(1)}deg`;
+  if (turn !== lastStoryTurn){
+    lastStoryTurn = turn;
+    storyStage.style.setProperty('--story-turn',turn);
+  }
   setStoryStep(step);
 }
 function updatePageMotion(){
@@ -1306,7 +1312,7 @@ function schedulePageMotion(){
 function syncStoryMode(){
   const enhanced = storyDesktop.matches && !motionQuery.matches;
   story.classList.toggle('story-enhanced',enhanced);
-  if (enhanced){ measureStory(); updateStoryMotion(); } else setStoryStep(2);
+  if (enhanced){ measureStory(); updateStoryMotion(); } else setStoryStep(0);
 }
 if ('IntersectionObserver' in window){
   new IntersectionObserver(entries => {
@@ -1319,7 +1325,10 @@ storyButtons.forEach((btn,i) => btn.onclick = () => {
   if (story.classList.contains('story-enhanced')){
     const top = scrollY + story.getBoundingClientRect().top;
     scrollTo({top:top + storyTravel * (i / 2),behavior});
-  } else document.querySelector(`[data-story-copy="${i}"]`)?.scrollIntoView({behavior,block:'center'});
+  } else {
+    setStoryStep(i);
+    document.querySelector(`[data-story-copy="${i}"]`)?.scrollIntoView({behavior,block:'center'});
+  }
 });
 window.addEventListener('scroll',schedulePageMotion,{passive:true});
 window.addEventListener('resize',() => { measureStory(); schedulePageMotion(); },{passive:true});
@@ -1389,16 +1398,26 @@ async function refreshQuota(){
   try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
     if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily);
-    if (q.atc) _atc = q.atc;
+    if (q.transcript || q.atc) _atc = q.transcript || q.atc;
     if (q.user) _loggedIn = true;
     syncTranscriptUI();
   } catch {}
 }
 
 /* ---------- 输入区 ---------- */
+let resultScrollTimer = 0, composerSuccessTimer = 0, parseRun = 0;
+function invalidateParse(){
+  parseRun += 1;
+  clearTimeout(resultScrollTimer);
+  if (composer.classList.contains('is-loading')) setLoading(false);
+}
 $('#pasteBtn').onclick = async () => {
   try {
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function')
+      throw new Error('clipboard unavailable');
     input.value = await navigator.clipboard.readText();
+    invalidateParse();
+    hideError();
     syncComposerState(true);
     input.focus();
   } catch { showError('浏览器未授权读取剪贴板，请手动粘贴（Cmd/Ctrl+V）'); }
@@ -1409,6 +1428,8 @@ $('#fileInput').onchange = async (e) => {
   try {
     const txt = await f.text();
     input.value = (input.value ? input.value + '\n' : '') + txt;
+    invalidateParse();
+    hideError();
     syncComposerState(true);
     const n = supportedWorkLinks(input.value).length;
     showOk(`已读取文件，共识别 ${n} 个链接，点「解析」开始`);
@@ -1429,8 +1450,8 @@ function syncComposerState(confirm=false){
     pasteConfirmTimer = setTimeout(() => composer.classList.remove('paste-confirm'),420);
   }
 }
-input.addEventListener('input',() => { syncComposerState(); if (composer.classList.contains('is-error')) hideError(); });
-$('#clearBtn').onclick = () => { input.value = ''; syncComposerState(); hideError(); result.classList.remove('show'); input.focus(); };
+input.addEventListener('input',() => { invalidateParse(); syncComposerState(); hideError(); });
+$('#clearBtn').onclick = () => { input.value = ''; invalidateParse(); syncComposerState(); hideError(); result.classList.remove('show'); input.focus(); };
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); parse(); }
 });
@@ -1455,7 +1476,10 @@ function hideError(){ alertBox.classList.remove('show','ok'); composer.classList
 /* ---------- 解析 ---------- */
 parseBtn.onclick = parse;
 async function parse(){
+  if (parseBtn.disabled) return;
   const text = input.value.trim();
+  const run = ++parseRun;
+  clearTimeout(resultScrollTimer);
   hideError();
   if (!text) { showError(t('err_link') || '请粘贴受支持平台的公开作品链接'); return; }
   const links = supportedWorkLinks(text);
@@ -1464,12 +1488,13 @@ async function parse(){
   setLoading(true);
   result.classList.remove('show');
   try {
-    if (multi) { await parseBatch(text); return; }
+    if (multi) { await parseBatch(text, run); return; }
     const resp = await fetch('/api/parse', {
       method:'POST', headers: jsonHeaders(),
       body: JSON.stringify({text})
     });
     const data = await resp.json().catch(() => ({}));
+    if (run !== parseRun || input.value.trim() !== text) return;
     if (!resp.ok){
       if (resp.status === 429 && !_loggedIn){
         showQuotaError(data.error || '今日免费次数已用完');
@@ -1480,9 +1505,10 @@ async function parse(){
     render(data);
     refreshQuota();
   } catch (e) {
-    showError(e.message || '网络异常，请检查连接后重试');
+    if (run === parseRun && input.value.trim() === text)
+      showError(e.message || '网络异常，请检查连接后重试');
   } finally {
-    setLoading(false);
+    if (run === parseRun) setLoading(false);
   }
 }
 
@@ -1514,11 +1540,12 @@ function maybeRegTip(){
 /* ---------- 批量解析：表格视图 ---------- */
 let _batch = [];   // 成功项：data + _link，供表格/导出/下载引用
 
-async function parseBatch(text){
+async function parseBatch(text, run = parseRun){
   const resp = await fetch('/api/parse/batch', {
     method:'POST', headers: jsonHeaders(), body: JSON.stringify({text})
   });
   const data = await resp.json().catch(() => ({}));
+  if (run !== parseRun || input.value.trim() !== text) return;
   if (!resp.ok){
     if (resp.status === 429 && !_loggedIn){
       showQuotaError(data.error || '今日免费次数已用完');
@@ -1537,8 +1564,7 @@ async function parseBatch(text){
 function renderBatch(count, fails){
   const rows = _batch.map((d, i) => {
     const isNote = d.kind === 'note';
-    const cover = isNote ? (d.images?.[0]?.url || '') : (d.cover || '');
-    const st = d.stats || {};
+    const cover = isNote ? albumImageSrc(d.images?.[0]) : (d.cover || '');
     const canDownload = isNote || Boolean(d.video?.download_url || d.video?.proxy_url);
     const canShare = sharePageSupported(d);
     return `<tr>
@@ -1546,14 +1572,13 @@ function renderBatch(count, fails){
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
       <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||'未知')}</div></td>
       <td><span class="bt-tag">${isNote?'图集':'视频'}</span></td>
-      <td class="tnum">${isNote?('· '+(d.images?.length||0)+'图'):fmtDur(d.duration_ms)}</td>
-      <td class="bt-nums tnum">❤${fmtNum(st.digg)} · 💬${fmtNum(st.comment)} · ★${fmtNum(st.collect)}</td>
+      <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,'待读取')}</td>
       <td class="bt-ops">
-        ${isNote?`<button class="mini-btn" onclick="downloadAll('${esc(d.item_id)}')">下载图集</button>`
+        ${isNote?`<button class="mini-btn" onclick="downloadBatchAlbum(${i},this)">下载图集</button>`
                 :(canDownload
                   ? `<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>`
                   : `<a class="mini-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">打开原片</a>`)}
-        ${canShare ? `<button class="mini-btn ghost" onclick="makeShare('${esc(d.item_id)}',this)">分享页</button>` : ''}
+        ${canShare ? `<button class="mini-btn ghost" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">分享页</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -1571,7 +1596,7 @@ function renderBatch(count, fails){
       </div>
     </div>
     <div class="tblwrap batch-tblwrap"><table class="batch-table">
-      <thead><tr><th>#</th><th>封面</th><th>标题 / 作者</th><th>类型</th><th>时长</th><th>互动数据</th><th>操作</th></tr></thead>
+      <thead><tr><th>#</th><th>封面</th><th>标题 / 作者</th><th>类型</th><th>时长</th><th>操作</th></tr></thead>
       <tbody>${rows || ''}</tbody>
     </table></div>
     ${failHtml}`;
@@ -1629,16 +1654,24 @@ function openPlayer(i){
   const body = m.querySelector('.pm-body');
   if (d.kind === 'note'){
     body.innerHTML = `<div class="pm-title">${esc(d.title)}</div><div class="pm-imgs">${
-      (d.images||[]).map(im=>`<img src="${esc(im.url)}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
+      (d.images||[]).map(im=>`<img src="${esc(albumImageSrc(im))}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
-    body.innerHTML = `<video controls autoplay playsinline webkit-playsinline x5-playsinline
+    const canDownload = Boolean(d.video?.download_url || d.video?.proxy_url);
+    body.innerHTML = `<video controls autoplay preload="metadata" playsinline webkit-playsinline x5-playsinline
       x5-video-player-type="h5" x5-video-player-fullscreen="false"
-      src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
+      src="${esc(videoPlaySrc(d.video))}" ${videoDatasetHTML(d.video)}
+      style="${esc(videoRatioStyle(d.video))}" data-video-width="${esc(d.video.width || '')}"
+      data-video-height="${esc(d.video.height || '')}"
+      data-read-metadata="1" data-batch-index="${i}"
       onerror="videoProxyFallback(this)"
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       <div class="pm-title">${esc(d.title)}</div>
-      <div class="pm-act"><button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button></div>`;
+      <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,'读取中…')}</span><span data-video-resolution>${videoResolutionText(d.video,'读取中…')}</span></div>
+      <div class="pm-act">${canDownload
+        ? `<button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button>`
+        : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}</div>`;
   }
+  wireVideoMetadata(body);
   m.classList.add('show'); document.body.style.overflow='hidden';
 }
 function closePlayer(){ const m=$('#playerModal'); if(m){ m.classList.remove('show'); m.querySelector('video')?.pause(); document.body.style.overflow=''; } }
@@ -1650,7 +1683,6 @@ function setLoading(on){
   composer.setAttribute('aria-busy',on ? 'true' : 'false');
 }
 
-let resultScrollTimer = 0, composerSuccessTimer = 0;
 function revealRenderedResult(){
   result.classList.remove('show');
   requestAnimationFrame(() => {
@@ -1669,21 +1701,60 @@ function revealRenderedResult(){
 /* ---------- 渲染 ---------- */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function copyText(text, fallbackEl=null){
+  const value = String(text ?? '');
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function'){
+    try { await navigator.clipboard.writeText(value); return true; } catch {}
+  }
+  const area = document.createElement('textarea');
+  area.value = value;
+  area.setAttribute('readonly','');
+  area.style.position = 'fixed'; area.style.opacity = '0';
+  document.body.appendChild(area); area.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  area.remove();
+  if (!ok && fallbackEl && typeof fallbackEl.select === 'function'){
+    fallbackEl.value = value; fallbackEl.select();
+  }
+  return ok;
+}
 const fmtDur = (ms) => {
-  const s = Math.round((ms||0)/1000);
-  return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+  const value = Number(ms);
+  const total = Number.isFinite(value) && value > 0 ? Math.round(value / 1000) : 0;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2,'0');
+  return hours ? `${hours}:${String(minutes).padStart(2,'0')}:${seconds}` : `${minutes}:${seconds}`;
 };
-const fmtNum = (n) => (n===null||n===undefined) ? '—' : (n>=10000 ? (n/10000).toFixed(1)+'w' : String(n));
 const fmtDate = (sec) => { if(!sec) return ''; const d=new Date(sec*1000); const p=n=>String(n).padStart(2,'0');
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
 
-function statsRow(st){
-  if (!st) return '';
-  const c = [['❤ 点赞', st.digg], ['💬 评论', st.comment], ['★ 收藏', st.collect], ['↗ 分享', st.share]];
-  return `<div class="stats-row">${c.map(([label, n]) =>
-    `<div class="stat-chip"><b>${fmtNum(n)}</b><span>${label}</span></div>`).join('')}</div>`;
+function videoDurationMs(video){
+  const seconds = Number(video?.duration);
+  return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : 0;
 }
-
+function videoDurationText(ms, pending='读取中…'){
+  const value = Number(ms);
+  return Number.isFinite(value) && value > 0 ? fmtDur(value) : pending;
+}
+function videoResolutionText(video, pending='读取中…'){
+  const width = Math.round(Number(video?.width) || 0);
+  const height = Math.round(Number(video?.height) || 0);
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? `${width}×${height}` : pending;
+}
+function videoRatioDimensions(video){
+  const width = Math.round(Number(video?.videoWidth || video?.width
+    || video?.dataset?.videoWidth) || 0);
+  const height = Math.round(Number(video?.videoHeight || video?.height
+    || video?.dataset?.videoHeight) || 0);
+  return width > 0 && height > 0 ? {width, height} : null;
+}
+function videoRatioStyle(video){
+  const dims = videoRatioDimensions(video);
+  return dims ? `--video-ratio:${dims.width} / ${dims.height}` : '';
+}
 function extrasBlock(d){
   let h = '';
   if (d.music && d.music.title)
@@ -1698,12 +1769,84 @@ function extrasBlock(d){
 const _albums = {};   // item_id -> images（供批量场景的"下载全部"取用）
 const _videos = {};   // item_id -> video（避免把标题/URL 注入内联 onclick）
 
+// Keep metadata wiring usable as an isolated unit (and avoid depending on
+// helpers declared earlier in the page when a partial harness evaluates it).
+function syncVideoAspectRatio(video){
+  const width = Math.round(Number(video?.videoWidth || video?.width
+    || video?.dataset?.videoWidth) || 0);
+  const height = Math.round(Number(video?.videoHeight || video?.height
+    || video?.dataset?.videoHeight) || 0);
+  if (!(width > 0 && height > 0)) return;
+  const ratio = `${width} / ${height}`;
+  if (video.style?.setProperty) video.style.setProperty('--video-ratio', ratio);
+  const wrap = video.closest('.player-wrap,.pm-body');
+  if (wrap?.style?.setProperty) wrap.style.setProperty('--video-ratio', ratio);
+}
+
+function videoMetadataScope(video){
+  return video.closest('.card,.pm-body') || result;
+}
+function setVideoMetadataValue(scope, selector, value){
+  scope.querySelectorAll(selector).forEach(el => {
+    el.textContent = value;
+    el.classList.remove('is-pending');
+  });
+}
+function batchVideoIndex(video){
+  const raw = video.dataset.batchIndex;
+  return /^\d+$/.test(raw || '') ? Number(raw) : -1;
+}
+function syncVideoMetadata(video){
+  syncVideoAspectRatio(video);
+  const durationMs = videoDurationMs(video);
+  const width = Math.round(Number(video.videoWidth) || 0);
+  const height = Math.round(Number(video.videoHeight) || 0);
+  const scope = videoMetadataScope(video);
+  if (durationMs) setVideoMetadataValue(scope, '[data-video-duration]', fmtDur(durationMs));
+  if (width && height) setVideoMetadataValue(scope, '[data-video-resolution]', `${width}×${height}`);
+
+  const itemId = video.dataset.itemId || '';
+  if (itemId && _videos[itemId]){
+    if (durationMs) _videos[itemId].duration_ms = durationMs;
+    if (width && height) Object.assign(_videos[itemId], {width, height});
+  }
+  const index = batchVideoIndex(video);
+  if (index >= 0 && _batch[index]){
+    if (durationMs){
+      _batch[index].duration_ms = durationMs;
+      const cell = result.querySelector(`[data-batch-duration="${index}"]`);
+      if (cell) cell.textContent = fmtDur(durationMs);
+    }
+    if (width && height) Object.assign(_batch[index].video || {}, {width, height});
+  }
+}
+function markVideoMetadataUnavailable(video){
+  const scope = videoMetadataScope(video);
+  scope.querySelectorAll('[data-video-duration],[data-video-resolution]').forEach(el => {
+    if (el.classList.contains('is-pending') || el.textContent.includes('读取中')) el.textContent = '暂未读取';
+  });
+  const index = batchVideoIndex(video);
+  const cell = index >= 0 ? result.querySelector(`[data-batch-duration="${index}"]`) : null;
+  if (cell && !Number(_batch[index]?.duration_ms)) cell.textContent = '暂未读取';
+}
+function wireVideoMetadata(root2){
+  root2.querySelectorAll('video[data-read-metadata]').forEach(video => {
+    if (video.dataset.metadataWired === '1') return;
+    video.dataset.metadataWired = '1';
+    video.addEventListener('loadedmetadata', () => syncVideoMetadata(video));
+    video.addEventListener('durationchange', () => syncVideoMetadata(video));
+    syncVideoAspectRatio(video);
+    if (video.readyState >= 1) syncVideoMetadata(video);
+  });
+}
+
 function render(d){
   result.innerHTML = (d.kind === 'note' ? albumHTML(d) : videoHTML(d));
   if (d.kind === 'note') _albums[d.item_id] = d.images;
   else _videos[d.item_id] = d.video;
   _shareSrc[d.item_id] = input.value;      // 解析缓存过期时用它重新解析
   revealRenderedResult();
+  wireVideoMetadata(result);
   wireAvatar(result, d.item_id);
   maybeRegTip();
 }
@@ -1753,7 +1896,7 @@ async function startTranscript(itemId, box){
   body.style.display = '';
   body.innerHTML = `<span class="ts-note">${esc(t('ts_ing') || '通常需要 1-3 分钟，请稍候（可离开，回来后再点按钮查看）')}</span>`;
   try {
-    const r = await fetch('/api/atc/transcript', {method:'POST', headers: jsonHeaders(),
+    const r = await fetch('/api/transcript', {method:'POST', headers: jsonHeaders(),
       body: JSON.stringify({item_id: itemId})});
     const d = await r.json().catch(() => ({}));
     if (!r.ok){
@@ -1782,7 +1925,7 @@ async function pollTranscript(itemId, box, n){
   _tsTimer = setTimeout(async () => {
     if (!box.isConnected) return;
     try {
-      const d = await (await fetch('/api/atc/transcript?item_id=' + encodeURIComponent(itemId))).json();
+      const d = await (await fetch('/api/transcript?item_id=' + encodeURIComponent(itemId))).json();
       if (d.state === 'ready'){ renderTranscript(box, d); return; }
       if (d.state === 'failed'){ _tsSetBusy(box, false);
         box.querySelector('.ts-body').innerHTML =
@@ -1803,10 +1946,10 @@ function renderTranscript(box, d){
       ${d.audio_url ? `<a href="${esc(d.audio_url)}" target="_blank" rel="noopener">${esc(t('ts_audio') || '试听音频 ↗')}</a>` : ''}
     </div>`;
   body.querySelector('.ts-copy').onclick = (e) => {
-    navigator.clipboard?.writeText(d.text || '').then(() => {
+    copyText(d.text || '').then(ok => { if (ok) {
       const o = e.target.textContent; e.target.textContent = '✓';
       setTimeout(() => e.target.textContent = o, 1400);
-    }).catch(() => {});
+    }});
   };
 }
 
@@ -1815,9 +1958,9 @@ function copyCard(btn){
   const title = card.querySelector('.v-title')?.textContent.trim() || '';
   const tags = [...card.querySelectorAll('.tag')].map(t=>t.textContent).join(' ');
   const txt = (title + (tags ? '\n' + tags : '')).trim();
-  navigator.clipboard.writeText(txt).then(() => {
+  copyText(txt).then(ok => { if (ok) {
     const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1500);
-  }).catch(()=>{});
+  }});
 }
 
 function authorRow(d){
@@ -1920,7 +2063,8 @@ function downloadTarget(onError){
   frame.onload = () => {
     try {
       const href = frame.contentWindow?.location?.href || '';
-      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/')) return;
+      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/') && !href.includes('/api/media/video/')
+          && !href.includes('/api/douyin/video/')) return;
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
@@ -1944,7 +2088,9 @@ function downloadFallbackURL(url, filename){
   try {
     const u = new URL(url, location.href);
     if (u.origin !== location.origin || !(
-      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/'))) return '';
+      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/') || u.pathname.startsWith('/api/media/video/')
+      || u.pathname.startsWith('/api/douyin/video/')))
+      return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;
@@ -2064,7 +2210,8 @@ async function preflightVideoDownload(source){
   throw lastError || new Error('下载失败，请稍后重试');
 }
 
-/* 视频直接走同源签名流，绕开抖音首跳 302 的 CORS 限制；图片仍由浏览器直连。
+/* 视频直接走同源签名流，绕开抖音首跳 302 的 CORS 限制；
+   抖音图片也优先走按作品 ID 刷新的同源端点。
    视频只做 1 字节预检，随后交给浏览器原生流式保存，避免把整段视频堆进内存。
    下载目标隔离在隐藏 iframe，错误不会覆盖当前页面。 */
 async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false){
@@ -2109,34 +2256,67 @@ function sharePageSupported(d){
 }
 
 function videoPlaySrc(v){
-  if (!v) return '';
-  // 微信内同样直连优先（省服务器带宽），直连失败由 videoProxyFallback 自动落同源代理
-  return v.url || v.alt_url || v.proxy_url || '';
+  return videoPlayRoutes(v)[0] || '';
+}
+
+function videoPlayRoutes(v){
+  if (!v) return [];
+  const directDouyin = v.source === 'douyin_direct' || v.source === 'douyin_web';
+  const ordered = directDouyin && IS_WECHAT_UA
+    ? [v.proxy_url, v.url, v.alt_url, v.atc_url]
+    : [v.url, v.atc_url, v.alt_url, v.proxy_url];
+  return ordered.filter((url, index, all) => url && all.indexOf(url) === index);
+}
+
+function videoDatasetHTML(v){
+  return `data-direct="${esc(v?.url||'')}" data-atc="${esc(v?.atc_url||'')}"
+    data-alt="${esc(v?.alt_url||'')}" data-proxy="${esc(v?.proxy_url||'')}"
+    data-source="${esc(v?.source||'')}" data-play-index="0"`;
 }
 
 function videoProxyFallback(v){
-  // 直连域名被拦截/防盗链拒绝时自动换同源代理；已起播后的晚到 error 不处理
-  if (!v.dataset.proxy || v.currentTime > 0) return;
-  if ((v.src || '').includes('/api/video/') || (v.src || '').includes('/api/atc/video/')) return;
-  v.src = v.dataset.proxy; v.load(); v.play?.();
+  // 每条线路最多尝试一次；即使同源代理先失败，仍可回退官方直链。
+  if (v.currentTime > 0) return;
+  const routes = videoPlayRoutes({
+    url:v.dataset.direct, atc_url:v.dataset.atc, alt_url:v.dataset.alt,
+    proxy_url:v.dataset.proxy, source:v.dataset.source
+  });
+  const nextIndex = Number(v.dataset.playIndex || 0) + 1;
+  if (!routes[nextIndex]){ markVideoMetadataUnavailable(v); return; }
+  v.dataset.playIndex = String(nextIndex);
+  v.src = routes[nextIndex]; v.load(); v.play?.();
 }
 
 function useProxyFallback(el){
   const v = el.closest('.player-wrap')?.querySelector('video');
-  if (v && v.dataset.proxy){ v.src = v.dataset.proxy; v.load(); v.play?.(); el.remove(); }
+  if (v && v.dataset.proxy){
+    const routes = videoPlayRoutes({url:v.dataset.direct, atc_url:v.dataset.atc,
+      alt_url:v.dataset.alt, proxy_url:v.dataset.proxy, source:v.dataset.source});
+    v.dataset.playIndex = String(Math.max(0, routes.indexOf(v.dataset.proxy)));
+    v.src = v.dataset.proxy; v.load(); v.play?.(); el.remove();
+  }
 }
 
 function videoHTML(d){
   const platform = platformName(d.platform || 'douyin');
   const canDownload = Boolean(d.video.download_url || d.video.proxy_url);
   const canShare = sharePageSupported(d);
+  const durationValue = Number(d.duration_ms);
+  const widthValue = Number(d.video.width);
+  const heightValue = Number(d.video.height);
+  const hasDuration = Number.isFinite(durationValue) && durationValue > 0;
+  const hasResolution = Number.isFinite(widthValue) && Number.isFinite(heightValue)
+    && widthValue > 0 && heightValue > 0;
   return `
   <div class="card">
     <div class="card-body">
       <div class="player-wrap">
         <video controls playsinline webkit-playsinline x5-playsinline
                x5-video-player-type="h5" x5-video-player-fullscreen="false" preload="metadata"
-               src="${esc(videoPlaySrc(d.video))}" data-proxy="${esc(d.video.proxy_url||'')}"
+               src="${esc(videoPlaySrc(d.video))}" ${videoDatasetHTML(d.video)}
+               style="${esc(videoRatioStyle(d.video))}" data-video-width="${esc(d.video.width || '')}"
+               data-video-height="${esc(d.video.height || '')}"
+               data-read-metadata="1" data-item-id="${esc(d.item_id)}"
                onerror="videoProxyFallback(this)"
                ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
         ${!d.video.proxy_url ? '' : `<div class="fallback-hint">
@@ -2144,22 +2324,21 @@ function videoHTML(d){
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">${esc(platform)} · 视频 · 无水印 · ${d.video.source==='atc'?'AnyToCopy 解析':(IS_WECHAT_UA ? '直连优先 · 兼容兜底' : '直连播放')}</span>
+        <span class="badge">${esc(platform)} · 视频 · 无水印</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
-          <div class="meta-item"><div class="k">时长</div><div class="v">${fmtDur(d.duration_ms)}</div></div>
-          <div class="meta-item"><div class="k">分辨率</div><div class="v">${d.video.width&&d.video.height?`${d.video.width}×${d.video.height}`:'720P'}</div></div>
+          <div class="meta-item"><div class="k">时长</div><div class="v${hasDuration?'':' is-pending'}" data-video-duration>${videoDurationText(d.duration_ms)}</div></div>
+          <div class="meta-item"><div class="k">分辨率</div><div class="v${hasResolution?'':' is-pending'}" data-video-resolution>${videoResolutionText(d.video)}</div></div>
           <div class="meta-item"><div class="k">格式</div><div class="v">MP4</div></div>
           ${d.create_time?`<div class="meta-item"><div class="k">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
         </div>
-        ${statsRow(d.stats)}
         ${extrasBlock(d)}
         <div class="actions">
           ${canDownload
             ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>`
             : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}
-          ${canShare ? `<button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>` : ''}
+          ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">🔗 生成分享页</button>` : ''}
           <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
         </div>
         <div class="ts-box" data-item="${esc(d.item_id)}">
@@ -2169,7 +2348,7 @@ function videoHTML(d){
           </div>
           <div class="ts-body" style="display:none"></div>
         </div>
-        <div class="tip">作品信息与无水印地址由 AnyToCopy API 提取；普通解析不获取语音文案，同源线路只流式转发不落地文件</div>
+        <div class="tip">视频时长与分辨率会在加载原片后自动读取</div>
       </div>
     </div>
   </div>`;
@@ -2183,25 +2362,25 @@ function albumHTML(d){
   <div class="card">
     <div class="album-head">
       <div class="info" style="gap:10px">
-        <span class="badge">${esc(platform)} · 图集 · ${imgs.length} 张原图 · 浏览器直连</span>
+        <span class="badge">${esc(platform)} · 图集 · ${imgs.length} 张原图 · 逐张安全下载</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
-        ${statsRow(d.stats)}
         ${extrasBlock(d)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
-        ${canShare ? `<button class="ghost-btn" onclick="makeShare('${esc(d.item_id)}',this)">🔗 生成分享页</button>` : ''}
-        <button class="primary-btn" onclick="downloadAll('${esc(d.item_id)}')">⬇ 下载全部</button>
+        ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">🔗 生成分享页</button>` : ''}
+        <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadAlbumAll(this)">⬇ 下载全部</button>
       </div>
     </div>
     <div class="album-grid">
       ${imgs.map((im, i) => `
         <figure class="album-item">
           <span class="idx">${i+1}</span>
-          <img src="${esc(im.url)}" alt="图集第 ${i+1} 张" loading="lazy">
-          <button onclick="browserDownload('${esc(im.url)}','${esc(im.filename)}',this)" title="下载这张" aria-label="下载第 ${i+1} 张">
+          <img src="${esc(albumImageSrc(im))}" alt="图集第 ${i+1} 张" loading="lazy">
+          <button data-item-id="${esc(d.item_id)}" data-image-index="${i}"
+                  onclick="downloadAlbumImage(this)" title="下载这张" aria-label="下载第 ${i+1} 张">
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               <path d="M7 1.5V9M7 9L4 6M7 9L10 6M2 12.5H12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
@@ -2213,8 +2392,27 @@ function albumHTML(d){
 
 async function downloadAll(itemId){
   const imgs = _albums[itemId] || [];
-  for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
+  for (const im of imgs){
+    await browserDownload(albumDownloadSrc(im), im.filename);
+    await new Promise(r=>setTimeout(r,400));
+  }
 }
+
+function albumImageSrc(image){ return image?.proxy_url || image?.url || ''; }
+function albumDownloadSrc(image){
+  return image?.download_url || image?.proxy_url || image?.url || '';
+}
+function downloadAlbumImage(btn){
+  const images = _albums[btn.dataset.itemId] || [];
+  const image = images[Number(btn.dataset.imageIndex)];
+  if (image) browserDownload(albumDownloadSrc(image), image.filename, btn);
+}
+function downloadAlbumAll(btn){ return downloadAll(btn.dataset.itemId); }
+function downloadBatchAlbum(index, btn){
+  const item = _batch[Number(index)];
+  return item ? downloadAll(item.item_id) : false;
+}
+function makeShareButton(btn){ return makeShare(btn.dataset.itemId, btn); }
 
 /* ================= 分享页：生成「微信里点开就能看」的链接 ================= */
 const _shareSrc = {};          // item_id -> 原始链接，解析缓存过期时用于重新解析
@@ -2313,17 +2511,18 @@ function renderMine(list){
         <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a>
         <button onclick="copyMine(this)" data-url="${esc(s.url)}"
                 data-title="${esc(s.title)}" data-author="${esc(s.author||'')}">复制</button>
-        <button class="del" onclick="delMine('${esc(s.sid)}')">删除</button>
+        <button class="del" data-sid="${esc(s.sid)}" onclick="delMineButton(this)">删除</button>
       </div>
     </div>`;
   }).join('');
 }
 function copyMine(btn){
   const text = shareText(btn.dataset.title, btn.dataset.author, btn.dataset.url);
-  navigator.clipboard?.writeText(text).then(()=>{
+  copyText(text).then(ok=>{ if (ok) {
     const o = btn.textContent; btn.textContent = '✓'; setTimeout(()=>btn.textContent=o, 1400);
-  }).catch(()=>{});
+  }});
 }
+function delMineButton(btn){ return delMine(btn.dataset.sid); }
 async function delMine(sid){
   if (!confirm('删除后这个分享链接会立即失效，确定删除？')) return;
   try {
@@ -2346,10 +2545,7 @@ function copyShareUrl(btn){
   const el = $('#shareUrl');
   const done = () => { const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1600); };
   const text = shareText(el.dataset.title, el.dataset.author, el.value);
-  navigator.clipboard?.writeText(text).then(done).catch(()=>{
-    el.value = text; el.select();
-    try{ document.execCommand('copy'); done(); }catch{}
-  });
+  copyText(text, el).then(ok => { if (ok) done(); });
 }
 
 /* ================= 登录 / 注册（表单 → 弹出滑块 → 通过后继续）================= */

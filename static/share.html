@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<!-- 抖音 CDN 对带第三方 Referer 的媒体请求一律 403（防盗链），全页不带 Referer 出站 -->
+<!-- 媒体请求不携带来源页信息，减少不必要的跨站信息暴露 -->
 <meta name="referrer" content="no-referrer">
 {{SHARE_HEAD}}
 <meta name="format-detection" content="telephone=no">
@@ -47,14 +47,12 @@ img{max-width:100%; display:block}
 /* ---------- 卡片 ---------- */
 .card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius);
   overflow:hidden; box-shadow:var(--shadow)}
-/* 把 70vh 高度上限按视频比例换算成宽度，再居中；避免 aspect-ratio 回算后只在右侧留空。 */
-.player{position:relative; width:100%; max-width:39.375vh; margin-inline:auto; background:#000;
-  aspect-ratio:9/16; display:grid; place-items:center}
-.player.wide{max-width:124.444vh; aspect-ratio:16/9}
-@supports (height:100dvh){
-  .player{max-width:39.375dvh}
-  .player.wide{max-width:124.444dvh}
-}
+/* 以真实媒体比例布局并居中；未知比例时先用竖屏占位，loadedmetadata 后立即修正。 */
+.player{position:relative; width:min(100%,var(--player-width,39.375vh)); max-width:100%;
+  margin-inline:auto; background:#000; aspect-ratio:var(--video-ratio,9/16);
+  display:grid; place-items:center}
+.player.wide{width:min(100%,var(--player-width,124.444vh)); max-width:100%;
+  aspect-ratio:var(--video-ratio,16/9)}
 .player video{width:100%; height:100%; object-fit:contain; background:#000}
 .poster{position:absolute; inset:0; width:100%; height:100%; object-fit:cover; filter:brightness(.82)}
 .playbtn{position:absolute; inset:0; display:grid; place-items:center; z-index:2}
@@ -64,6 +62,16 @@ img{max-width:100%; display:block}
   border-bottom:12px solid transparent; margin-left:5px}
 .loading{position:absolute; z-index:3; color:#fff; font-size:13px; background:rgba(0,0,0,.55);
   padding:7px 14px; border-radius:999px; display:none}
+.media-pending{position:absolute; inset:0; z-index:2; display:grid; place-items:center;
+  align-content:center; gap:10px; padding:24px; text-align:center; color:#fff;
+  background:linear-gradient(180deg,rgba(0,0,0,.16),rgba(0,0,0,.68))}
+.media-pending .spinner{width:28px; height:28px; border:3px solid rgba(255,255,255,.35);
+  border-top-color:#fff; border-radius:50%; animation:spin .85s linear infinite}
+.media-pending p{font-size:13px; line-height:1.6; text-shadow:0 1px 4px rgba(0,0,0,.5)}
+.media-pending button{border:1px solid rgba(255,255,255,.55); border-radius:999px;
+  padding:6px 14px; color:#fff; background:rgba(0,0,0,.3); font-size:12px}
+.btn:disabled{opacity:.48; cursor:not-allowed}
+@media (prefers-reduced-motion:reduce){.media-pending .spinner{animation:none}}
 
 .body{padding:15px 15px 17px}
 .badge{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--ok);
@@ -77,10 +85,6 @@ img{max-width:100%; display:block}
 .author .s{font-size:12px; color:var(--faint)}
 .author .go{margin-left:auto; font-size:12.5px; color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
   padding:5px 11px; border-radius:999px; white-space:nowrap}
-.stats{display:grid; grid-template-columns:repeat(4,1fr); gap:7px; margin-top:13px}
-.stat{background:var(--surface-2); border-radius:11px; padding:8px 4px; text-align:center}
-.stat b{display:block; font-size:14.5px; font-variant-numeric:tabular-nums}
-.stat span{font-size:11px; color:var(--faint)}
 .extra{margin-top:11px; font-size:12.5px; color:var(--muted); display:flex; flex-direction:column; gap:5px}
 .tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:9px}
 .tag{font-size:11.5px; color:var(--muted); background:var(--surface-2); padding:3px 9px; border-radius:999px}
@@ -191,8 +195,8 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
 <div class="mask" id="mask">
   <div class="arrow">↗</div>
   <div class="m-in">
-    <h3 id="maskTitle">在浏览器中打开</h3>
-    <p id="maskDesc">微信内不支持直接保存视频文件，<br>请按下面两步操作 👇</p>
+    <h3 id="maskTitle">下载需在浏览器中打开</h3>
+    <p id="maskDesc">视频可以直接在微信内播放；如需保存文件，<br>请按下面两步操作 👇</p>
     <div class="step" id="maskStep">
       ① 点击右上角的 <b>···</b> 按钮<br>
       ② 选择 <b>「在浏览器中打开」</b><br>
@@ -211,11 +215,37 @@ const app = document.getElementById('app');
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const num = (n) => (n === null || n === undefined) ? '—'
-  : (n >= 10000 ? (n/10000).toFixed(1).replace(/\.0$/,'') + 'w' : String(n));
+async function copyText(text){
+  const value = String(text ?? '');
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function'){
+    try { await navigator.clipboard.writeText(value); return true; } catch {}
+  }
+  const area = document.createElement('textarea');
+  area.value = value; area.setAttribute('readonly','');
+  area.style.position = 'fixed'; area.style.opacity = '0';
+  document.body.appendChild(area); area.select();
+  let ok = false; try { ok = document.execCommand('copy'); } catch {}
+  area.remove(); return ok;
+}
 const fmtDate = (ts) => { if(!ts) return ''; const d = new Date(ts*1000);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
 
+function mediaDimensions(video){
+  const width = Math.round(Number(video?.videoWidth || video?.width
+    || video?.dataset?.videoWidth) || 0);
+  const height = Math.round(Number(video?.videoHeight || video?.height
+    || video?.dataset?.videoHeight) || 0);
+  return width > 0 && height > 0 ? {width, height} : null;
+}
+function playerInlineStyle(video){
+  const dims = mediaDimensions(video);
+  if (!dims) return '';
+  const ratio = dims.width / dims.height;
+  const maxHeight = Math.max(160, window.innerHeight * .7);
+  const available = Math.max(160, Math.min(window.innerWidth - 28, 560));
+  const width = Math.max(160, Math.min(available, maxHeight * ratio));
+  return `--video-ratio:${dims.width} / ${dims.height};--player-width:${Math.round(width)}px`;
+}
 /* 埋点：sendBeacon 不阻塞页面。extra 用于播放诊断（source/stage/detail/ms） */
 function track(kind, extra){
   try {
@@ -232,8 +262,8 @@ function toast(msg){
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 1900);
 }
 const _MASK_DEFAULT = {
-  title: '在浏览器中打开',
-  desc: '微信内不支持直接保存视频文件，<br>请按下面两步操作 👇',
+  title: '下载需在浏览器中打开',
+  desc: '视频可以直接在微信内播放；如需保存文件，<br>请按下面两步操作 👇',
   step: '① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「在浏览器中打开」</b><br>③ 在浏览器里点下载即可保存原片',
 };
 /* copy=false 时隐藏「复制本页链接」按钮。用在「发送给好友」引导里：
@@ -257,10 +287,7 @@ function shareText(){
 }
 function copyLink(){
   const text = shareText();
-  navigator.clipboard?.writeText(text).then(()=>toast('链接已复制')).catch(()=>{
-    const i = document.createElement('input'); i.value = text; document.body.appendChild(i);
-    i.select(); try{ document.execCommand('copy'); toast('链接已复制'); }catch{} i.remove();
-  });
+  copyText(text).then(ok => toast(ok ? '链接已复制' : '复制失败，请手动复制地址栏'));
 }
 /* 分享给好友：微信内无法用按钮直接唤起分享面板，只能引导用户点右上角 ···。
    必须走 ··· 转发才会出卡片——微信不展开粘贴的网址，复制链接发出去只会是纯文字链，
@@ -290,7 +317,7 @@ function shareToFriend(){
 /* ---------------- 状态页 ---------------- */
 const STATES = {
   notfound: ['🔍','分享页不存在','链接可能有误，或已被创建者删除。'],
-  pending:  ['','视频正在准备中','链接已创建，系统正在后台获取抖音内容。'],
+  pending:  ['','视频正在准备中','链接已创建，系统正在后台获取内容。'],
   processing:['','正在获取视频内容','通常只需几秒，完成后本页会自动更新。'],
   failed:   ['⚠️','内容获取失败','抖音内容暂时无法获取，请稍后重新生成。'],
   expired:  ['⏳','分享链接已过期','为保护创作者权益，分享页有有效期。可以让分享者重新生成一个。'],
@@ -356,6 +383,19 @@ async function pollShareStatus(){
     _statusFailures = 0;
     _statusNotice = '';
     if (d.status === 'ready'){
+      // Metadata may be ready a little before the short-lived media URL. Keep
+      // the page in place and wait for the persisted refresh job instead of
+      // reloading forever with a dead play/download button.
+      if (d.media_available === false && S.kind !== 'note'){
+        S.state = 'ok';
+        S.media_available = false;
+        S.media_pending = true;
+        _statusNotice = '媒体正在准备中，页面会自动重试。';
+        render();
+        _statusPollRound += 1;
+        scheduleStatusPoll(nextStatusPollDelay(d.media_poll_after_ms || 0, 0));
+        return;
+      }
       clearTimeout(_statusTimer); _statusTimer = null;
       location.reload();
       return;
@@ -382,7 +422,14 @@ async function pollShareStatus(){
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){ clearTimeout(_statusTimer); _statusTimer = null; return; }
   if (S.state === 'pending' || S.state === 'processing') scheduleStatusPoll(100);
+  else if (S.state === 'ok' && S.media_available === false) scheduleStatusPoll(100);
 });
+
+function retryMedia(){
+  _statusNotice = '';
+  _statusFailures = 0;
+  pollShareStatus();
+}
 
 /* ---------------- 正常页 ---------------- */
 function authorBlock(d){
@@ -397,12 +444,6 @@ function authorBlock(d){
     ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener">原作品 ›</a>` : ''}
   </div>`;
 }
-function statsBlock(st){
-  if (!st) return '';
-  const c = [['点赞',st.digg],['评论',st.comment],['收藏',st.collect],['分享',st.share]];
-  return `<div class="stats">${c.map(([k,v]) =>
-    `<div class="stat"><b>${num(v)}</b><span>${k}</span></div>`).join('')}</div>`;
-}
 function extraBlock(d){
   let h = '';
   if (d.music && d.music.title) h += `<div>🎵 ${esc(d.music.title)}${d.music.author ? ' · ' + esc(d.music.author) : ''}</div>`;
@@ -416,19 +457,25 @@ function extraBlock(d){
 function render(){
   const d = S.data || {};
   const isNote = S.kind === 'note';
+  const hasMedia = !isNote && d.video &&
+    (d.video.url || d.video.atc_url || d.video.proxy_url);
   const wide = d.video && d.video.width && d.video.height && d.video.width > d.video.height;
+  const playerStyle = playerInlineStyle(d.video || {});
 
   const media = isNote
     ? `<div class="album">${(d.images||[]).map((im,i)=>`
         <figure>
           <span class="idx">${i+1}</span>
-          <img src="${esc(im.url)}" alt="第 ${i+1} 张" loading="lazy" referrerpolicy="no-referrer"
-               onerror="imgFail()">
-          <button class="save" onclick="saveImage('${esc(im.url)}','${esc(im.filename)}')">保存</button>
+          <img src="${esc(shareImageSrc(im))}" alt="第 ${i+1} 张" loading="lazy" referrerpolicy="no-referrer"
+               onerror="imgFail(this)">
+          <button class="save" onclick="saveImageAt(${i})">保存</button>
         </figure>`).join('')}</div>`
-    : `<div class="player${wide ? ' wide' : ''}" id="playerBox">
+    : `<div class="player${wide ? ' wide' : ''}" id="playerBox" style="${esc(playerStyle)}"
+          data-video-width="${esc(d.video?.width || '')}" data-video-height="${esc(d.video?.height || '')}">
         ${S.cover ? `<img class="poster" id="poster" src="${esc(S.cover)}" alt="" referrerpolicy="no-referrer">` : ''}
-        <div class="playbtn" id="playBtn" onclick="startPlay()"><i></i></div>
+        ${hasMedia
+          ? `<button class="playbtn" id="playBtn" type="button" aria-label="播放视频" onclick="startPlay()"><i aria-hidden="true"></i></button>`
+          : `<div class="media-pending" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><p>${esc(_statusNotice || '视频正在准备中，请稍候…')}</p><button type="button" onclick="retryMedia()">重新检查</button></div>`}
         <div class="loading" id="loading">加载中…</div>
       </div>`;
 
@@ -442,10 +489,9 @@ function render(){
     <div class="card">
       ${media}
       <div class="body">
-        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'} · ${!isNote && IS_WECHAT_UA ? '直连优先 · 兼容线路兜底' : '浏览器直连'}</span>
+        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'}</span>
         <div class="title">${esc(S.title)}</div>
         ${authorBlock(d)}
-        ${statsBlock(d.stats)}
         ${extraBlock(d)}
       </div>
     </div>
@@ -468,7 +514,7 @@ function render(){
     </div>
 
     <footer>
-      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。作品链接会提交给 AnyToCopy 获取元数据和媒体地址，普通解析不请求语音文案；访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。媒体直连时，媒体源会接收请求方网络与浏览器信息。<br>
+      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析不请求语音文案。访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。媒体直连时，媒体源会接收请求方网络与浏览器信息。<br>
       请勿未经授权二次发布或商用。<a href="javascript:void(0)" onclick="report()">侵权投诉</a> ·
       <a href="/">关于本站</a>${S.expires_at ? ' · 本页 ' + fmtDate(S.expires_at) + ' 过期' : ''}
     </footer>
@@ -477,19 +523,40 @@ function render(){
   <div class="bar"><div class="in">
     ${isNote
       ? `<button class="btn p" onclick="saveAll()">⬇ 保存全部图片</button>`
-      : `<button class="btn p" onclick="download(this)">⬇ 下载无水印原片</button>`}
+      : `<button class="btn p" onclick="download(this)"${hasMedia ? '' : ' disabled aria-disabled="true"'}>⬇ 下载无水印原片</button>`}
     <button class="btn g" onclick="shareToFriend()">↗ 分享给好友</button>
   </div></div>`;
 }
 
-/* ---------------- 播放：ATC 直连 → 同源流，旧分享页保留 dy1/dy2 ----------------
-   新解析使用 AnyToCopy 返回的媒体地址，直连失败后转受签名保护的同源流。
+/* ---------------- 播放：媒体直连 → 同源流 ----------------
+   新解析使用统一媒体地址，直连失败后转受签名保护的同源流。
    微信 WebView 拦截直连域名时常不报 error 只挂起，因此仍用短看门狗及时切线。
    每条线路的 try/ok/fail 都上报后台「播放诊断」，用来回答「微信里哪些视频能播」。 */
 let _playSession = 0;
+// Keep the playback state machine self-contained: the same block is exercised
+// by the lightweight browser regression harness as well as the full page.
+function syncPlayerRatio(video){
+  const width = Math.round(Number(video?.videoWidth || video?.width
+    || video?.dataset?.videoWidth) || 0);
+  const height = Math.round(Number(video?.videoHeight || video?.height
+    || video?.dataset?.videoHeight) || 0);
+  const box = document.getElementById('playerBox');
+  if (!(width > 0 && height > 0) || !box || !box.style?.setProperty) return;
+  const ratio = `${width} / ${height}`;
+  const maxHeight = Math.max(160, window.innerHeight * .7);
+  const available = Math.max(160, Math.min(window.innerWidth - 28, 560));
+  const boxWidth = Math.max(160, Math.min(available, maxHeight * width / height));
+  box.style.setProperty('--video-ratio', ratio);
+  box.style.setProperty('--player-width', `${Math.round(boxWidth)}px`);
+  box.classList.toggle('wide', width / height > 1.05);
+}
 function startPlay(){
   const d = S.data || {};
-  if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)) return;
+  if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)){
+    toast('视频正在准备中，请稍候');
+    retryMedia();
+    return;
+  }
   const box = document.getElementById('playerBox');
   const btn = document.getElementById('playBtn');
   const ld = document.getElementById('loading');
@@ -503,18 +570,21 @@ function startPlay(){
   btn.style.display = 'none'; ld.style.display = 'block';
   track('play');
 
-  // 播放线路按后台配置的优先级动态构建；旧 dy 线路对 ATC 新数据自动跳过。
+  // 播放线路按后台配置的优先级动态构建。
   const directWait = IS_WECHAT_UA ? 4000 : 7000;
-  const fromAtc = d.video.source === 'atc';
+  const source = String(d.video.source || '').toLowerCase();
+  const fromUnified = source === 'parser' || source === 'atc';
+  const fromDouyinDirect = source === 'douyin_direct' || source === 'douyin_web';
   const ROUTES = {
-    atc:   {src: d.video.atc_url || (fromAtc ? d.video.url : ''), wait: directWait, tip: '加载中…'},
+    atc:   {src: d.video.atc_url || (fromUnified ? (d.video.direct_url || d.video.url) : ''), wait: directWait, tip: '加载中…'},
     proxy: {src: d.video.proxy_url, wait: 12000,      tip: '切换备用线路中…'},
-    dy1:   {src: fromAtc ? '' : d.video.url,     wait: directWait, tip: '切换旧直连中…'},
-    dy2:   {src: fromAtc ? '' : d.video.alt_url, wait: directWait, tip: '切换旧备线中…'},
+    dy1:   {src: fromUnified ? '' : d.video.url,     wait: directWait, tip: fromDouyinDirect ? '切换官方直连中…' : '切换旧直连中…'},
+    dy2:   {src: fromUnified ? '' : d.video.alt_url, wait: directWait, tip: fromDouyinDirect ? '切换官方备用线路中…' : '切换旧备线中…'},
   };
   const priority = (Array.isArray(d.play_priority) && d.play_priority.length)
-    ? d.play_priority : (fromAtc
-      ? ['atc','proxy','dy1','dy2'] : ['dy1','dy2','atc','proxy']);
+    ? d.play_priority
+    : (fromUnified ? ['atc','proxy','dy1','dy2']
+       : (fromDouyinDirect ? ['proxy','dy1','dy2'] : ['dy1','dy2','atc','proxy']));
   const seen = new Set();
   const routes = priority
     .filter(k => ROUTES[k])
@@ -527,8 +597,15 @@ function startPlay(){
   v.setAttribute('x5-video-player-fullscreen','false');
   v.controls = true; v.preload = 'auto'; v.autoplay = true;
   if (S.cover) v.poster = S.cover;
+  if (v.dataset){
+    v.dataset.videoWidth = d.video.width || '';
+    v.dataset.videoHeight = d.video.height || '';
+  }
+  v.addEventListener('loadedmetadata', () => syncPlayerRatio(v));
+  v.addEventListener('durationchange', () => syncPlayerRatio(v));
   v.id = 'player';
   box.appendChild(v);
+  syncPlayerRatio(v);
   const poster = document.getElementById('poster'); if (poster) poster.style.display = 'none';
 
   let idx = -1, t0 = 0, timer = 0, settled = false, hs = null, attempt = 0;
@@ -583,12 +660,16 @@ function startPlay(){
     v.src = r.src; v.load();
     const playPromise = v.play?.();
     if (playPromise?.then){
-      playPromise.then(() => onOK(myAttempt)).catch(()=>{ /* controls 仍可手动播放 */ });
+      // play() Promise 只表示请求被接受，不等于已经开始出帧；最终成功
+      // 仍由 playing/timeupdate/readyState 看门狗确认，避免过早停止切线。
+      playPromise.then(() => {
+        if (isActuallyPlaying()) onOK(myAttempt);
+      }).catch(()=>{ /* controls 仍可手动播放 */ });
     }
     // 直连在部分网络/内核下不会报 error，只是一直不 ready —— 用看门狗兜底
     timer = setTimeout(() => {
       if (!isCurrent() || settled || myAttempt !== attempt) return;
-      if (isActuallyPlaying() || v.readyState >= 2) onOK(myAttempt);
+      if (isActuallyPlaying()) onOK(myAttempt);
       else onErr('timeout', myAttempt);
     }, r.wait);
   }
@@ -617,7 +698,11 @@ function startPlay(){
 /* ---------------- 下载 ---------------- */
 function download(btn){
   const d = S.data || {};
-  if (!d.video || !(d.video.url || d.video.atc_url)) return;
+  if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)){
+    toast('视频正在准备中，请稍候');
+    retryMedia();
+    return;
+  }
   track('download');
   if (IS_WECHAT_UA){ showMask(); return; }
   browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
@@ -631,6 +716,14 @@ function saveImage(url, name){
   }
   browserDownload(url, name);
 }
+function shareImageSrc(image){ return image?.proxy_url || image?.url || ''; }
+function shareImageDownloadSrc(image){
+  return image?.download_url || image?.proxy_url || image?.url || '';
+}
+function saveImageAt(index){
+  const image = ((S.data || {}).images || [])[Number(index)];
+  if (image) saveImage(shareImageDownloadSrc(image), image.filename);
+}
 async function saveAll(){
   if (IS_WECHAT_UA){
     showMask('长按图片即可保存', '在微信里逐张 <b>长按图片</b> → 「保存图片」，<br>或用浏览器打开一键批量下载。');
@@ -638,7 +731,10 @@ async function saveAll(){
   }
   const imgs = (S.data || {}).images || [];
   track('download');
-  for (const im of imgs){ await browserDownload(im.url, im.filename); await new Promise(r=>setTimeout(r,400)); }
+  for (const im of imgs){
+    await browserDownload(shareImageDownloadSrc(im), im.filename);
+    await new Promise(r=>setTimeout(r,400));
+  }
 }
 function downloadTarget(onError){
   const id = 'nativeDownloadTarget';
@@ -654,7 +750,8 @@ function downloadTarget(onError){
   frame.onload = () => {
     try {
       const href = frame.contentWindow?.location?.href || '';
-      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/')) return;
+      if (!href.includes('/api/video/') && !href.includes('/api/atc/video/') && !href.includes('/api/media/video/')
+          && !href.includes('/api/douyin/video/')) return;
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
@@ -676,7 +773,9 @@ function downloadFallbackURL(url, filename){
   try {
     const u = new URL(url, location.href);
     if (u.origin !== location.origin || !(
-      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/'))) return '';
+      u.pathname.startsWith('/api/video/') || u.pathname.startsWith('/api/atc/video/') || u.pathname.startsWith('/api/media/video/')
+      || u.pathname.startsWith('/api/douyin/video/')))
+      return '';
     u.searchParams.set('dl', '1');
     u.searchParams.set('name', filename || 'video.mp4');
     return u.pathname + u.search;
@@ -820,11 +919,12 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
     if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; }
   }
 }
-function imgFail(){
-  // 图集 CDN 直链过期：服务端会在下次访问时按 item_id 刷新，这里提示用户重载
+function imgFail(image){
+  // 同源图片端点在服务端已刷新过一次；失败时保留
+  // 当前页面和其他已加载图片，避免整页无限重载。
+  if (image){ image.onerror = null; image.classList.add('is-failed'); image.alt = '图片暂时加载失败'; }
   if (window._imgFailed) return; window._imgFailed = true;
-  toast('图片链接已刷新，正在重新加载…');
-  setTimeout(()=>location.reload(), 1200);
+  toast('部分图片暂时无法加载，请稍后刷新再试');
 }
 
 /* ---------------- 分享海报（前端 canvas 合成，服务器不参与、不落地） ----------------
@@ -904,12 +1004,6 @@ async function makePoster(){
     } catch {}
     x.fillStyle = '#B9C0CA'; x.font = '400 27px "PingFang SC",system-ui,sans-serif';
     x.fillText('@' + (S.author || '抖音创作者'), P + (S.avatar ? 70 : 0), y);
-
-    // 互动数据
-    const st = (S.data || {}).stats || {};
-    y += 52;
-    x.fillStyle = '#7C8593'; x.font = '400 24px "PingFang SC",system-ui,sans-serif';
-    x.fillText(`❤ ${num(st.digg)}   💬 ${num(st.comment)}   ★ ${num(st.collect)}`, P, y);
 
     // 二维码 + 引导
     const qr = await loadImg('/s/' + S.sid + '/qr.png', false);
@@ -992,7 +1086,11 @@ if (!S || !S.state || S.state !== 'ok') {
   renderState(S && S.state);
   if (S && (S.state === 'pending' || S.state === 'processing'))
     scheduleStatusPoll(nextStatusPollDelay(S.poll_after_ms, 0));
-} else { render(); setupWxShare(); }
+} else {
+  render(); setupWxShare();
+  if (S.kind !== 'note' && S.media_available === false)
+    scheduleStatusPoll(nextStatusPollDelay(S.media_poll_after_ms, 0));
+}
 </script>
 </body>
 </html>

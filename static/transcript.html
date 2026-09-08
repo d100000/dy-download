@@ -99,7 +99,7 @@ footer{margin-top:64px; padding:24px 0 36px; border-top:1px solid var(--border);
     </details>
     <details class="faq-item">
       <summary data-i18n="q3">我的链接会发给第三方吗？</summary>
-      <p data-i18n="a3">基础解析会把作品链接提交给第三方服务 AnyToCopy，以获取作品信息和媒体地址，但默认不请求语音文案；只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。</p>
+      <p data-i18n="a3">解析时会将规范化后的公开作品链接提交给第三方内容解析服务，以获取作品信息和媒体地址。基础解析默认不请求语音文案，只有你主动打开「获取文案」时才额外请求语音转文字。本站只保存处理结果元数据，不保存视频文件。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="q4">提取要等多久？</summary>
@@ -132,7 +132,7 @@ const I18N = { en: {
   q2:"Is transcript extraction free?",
   a2:"Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing.",
   q3:"Is my link sent to a third party?",
-  a3:"Basic parsing submits the post link to the third-party service AnyToCopy to obtain post metadata and media URLs, but does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file.",
+  a3:"Public post links are sent to the configured third-party content parsing service; missing Douyin information is supplemented through official interfaces on the server. Basic parsing does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file.",
   q4:"How long does it take?",
   a4:"Usually 1–3 minutes depending on video length; short clips are faster. You can leave after submitting — reopen the toggle later to see the result.",
   note:"No video or image files are stored; transcript results are removed automatically per the data retention period. Copyright belongs to the original creators — for personal study and authorized material archiving only.",

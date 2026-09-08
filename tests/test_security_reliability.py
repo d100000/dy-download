@@ -2,7 +2,10 @@ import asyncio
 import importlib.util
 import json
 import os
+import sqlite3
 import stat
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -46,6 +49,35 @@ def make_request(path="/", headers=None, client_ip="203.0.113.10",
     })
 
 
+class _NestedLockProbe:
+    """把同一线程的二次加锁变成可断言异常，避免回归测试永久挂起。"""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+        self._owner = None
+
+    def acquire(self, *args, **kwargs):
+        owner = threading.get_ident()
+        if self._owner == owner:
+            raise AssertionError("_db_lock was acquired recursively")
+        acquired = self._wrapped.acquire(*args, **kwargs)
+        if acquired:
+            self._owner = owner
+        return acquired
+
+    def release(self):
+        self._owner = None
+        return self._wrapped.release()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.release()
+        return False
+
+
 def clear_billing():
     with server._db_lock:
         conn = server._db()
@@ -62,6 +94,16 @@ def clear_billing():
 
 
 class StaticRegressionTests(unittest.TestCase):
+    def test_chromium_proxy_auth_uses_cdp_response_field(self):
+        source = Path("server.py").read_text("utf-8")
+        self.assertIn('"authChallengeResponse": auth_params', source)
+        self.assertNotIn('"authChallenge": auth_params', source)
+        self.assertEqual(
+            server._douyin_browser_credentials(
+                {"url": "http://alice:p%40ss@proxy.example:8080"},
+                "http://proxy.example:8080"),
+            ("alice", "p@ss"))
+
     def test_homepage_platform_logos_are_local_and_allowlisted(self):
         html = Path("static/index.html").read_text("utf-8")
         for name in ("xiaohongshu", "kuaishou", "bilibili", "pinduoduo",
@@ -95,6 +137,17 @@ class StaticRegressionTests(unittest.TestCase):
         for forbidden in ("零隐私采集", "zero privacy", "collects nothing",
                           "no collection, nothing uploaded"):
             self.assertNotIn(forbidden, corpus)
+
+    def test_homepage_copy_is_backend_provider_neutral(self):
+        source = Path("static/index.html").read_text("utf-8")
+        rendered = server.index(make_request("/")).body.decode("utf-8")
+        for page in (source, rendered):
+            self.assertNotIn("AnyToCopy", page)
+            self.assertNotIn("ANYTOCOPY", page)
+            self.assertNotIn("VIDEO EXTRACT", page)
+            self.assertNotIn("/video/extract", page)
+        self.assertIn("支持 50+ 平台", rendered)
+        self.assertIn("第三方内容解析服务", rendered)
 
     def test_oss_video_proxy_has_alternate_route_and_strict_media_type(self):
         source = Path("oss/server.py").read_text("utf-8")
@@ -178,6 +231,17 @@ class MultiPlatformLinkTests(unittest.TestCase):
         parse.assert_called_once_with(
             "https://www.kuaishou.com/short-video/abc123")
 
+    def test_item_refresh_uses_official_path_for_numeric_douyin_id(self):
+        item_id = "123456789012345678"
+        parsed = {"item_id": item_id, "source": "douyin_direct", "kind": "video"}
+        with mock.patch.object(server, "_atc_cache_get", return_value=None), \
+                mock.patch.object(
+                    server, "_parse_douyin_item_direct", return_value=parsed) as parse:
+            result = server._parse_item("video", item_id)
+        self.assertIs(result, parsed)
+        parse.assert_called_once_with(
+            "video", item_id, "https://www.douyin.com/video/123456789012345678/")
+
     def test_result_contract_namespaces_non_douyin_ids_and_marks_sharing(self):
         payload = {
             "workId": "sameitem123", "title": "demo", "workType": "video",
@@ -194,6 +258,43 @@ class MultiPlatformLinkTests(unittest.TestCase):
         self.assertNotEqual(xhs["item_id"], bili["item_id"])
         self.assertEqual(douyin["item_id"], "sameitem123")
         self.assertTrue(douyin["share_supported"])
+
+
+class UnifiedResultNormalizationTests(unittest.TestCase):
+    def test_nested_platform_payload_is_found_without_direct_scraper(self):
+        payload = {"data": {"item": {"aweme_id": "123456789012345678",
+                                       "video": {"duration": 1}}}}
+        self.assertEqual(server._douyin_find_item(payload)["aweme_id"],
+                         "123456789012345678")
+
+    def test_task_id_and_status_helpers_accept_nested_scalar_wrappers(self):
+        self.assertEqual(server._atc_task_id({"data": "task-123"}), "task-123")
+        self.assertEqual(server._atc_task_id({"result": {"taskID": 456}}), "456")
+        self.assertEqual(server._atc_status_value(
+            {"data": {"result": {"task_status": "success"}}}), "SUCCESS")
+
+    def test_basic_readiness_does_not_confuse_profile_or_cover_with_media(self):
+        self.assertFalse(server._atc_basic_result_ready({
+            "status": "WAITING",
+            "author": {"url": "https://cdn.example.com/profile"},
+        }))
+        self.assertFalse(server._atc_basic_result_ready({
+            "status": "WAITING",
+            "cover": "https://cdn.example.com/cover.jpg",
+        }))
+        self.assertTrue(server._atc_basic_result_ready({
+            "status": "WAITING",
+            "video": {"url": "https://cdn.example.com/video.mp4"},
+        }))
+        self.assertTrue(server._atc_basic_result_ready({
+            "status": "WAITING", "workType": "note",
+            "imageUrlList": ["https://cdn.example.com/page-1.jpg"],
+        }))
+
+    def test_future_media_cache_is_not_treated_as_fresh(self):
+        self.assertFalse(server._atc_url_fresh(
+            {"video_url": "https://cdn.example.com/video.mp4",
+             "url_fetched_at": int(time.time()) + 3600}, ttl=3600))
 
 
 class AsyncShareTests(unittest.TestCase):
@@ -633,6 +734,77 @@ class AsyncShareTests(unittest.TestCase):
                     server.ShareConfigBody(
                         primary_domain="https://user:pass@example.com/path"), request)
         self.assertEqual(invalid.exception.status, 422)
+
+
+class SyncShareLockTests(unittest.TestCase):
+    """同步分享页在登录会话下不能递归获取全局数据库锁。"""
+
+    def setUp(self):
+        server._share_hits.clear()
+        now = int(time.time())
+        self.user_id = server.db_exec(
+            "INSERT INTO users(email,pw_salt,pw_hash,created_at,last_login,reg_ip) "
+            "VALUES(?,?,?,?,?,?)",
+            (f"sync-lock-{time.time_ns()}@test.dev", "s", "h", now, now, ""))
+        self.token = server._new_user_session(self.user_id)
+
+    def tearDown(self):
+        server._user_sessions.pop(self.token, None)
+        with server._db_lock:
+            conn = server._db()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("DELETE FROM shares WHERE owner_user_id=?", (self.user_id,))
+                conn.execute(
+                    "DELETE FROM quota_reservations WHERE subjects LIKE ?",
+                    (f"%user:{self.user_id}%",))
+                conn.execute("DELETE FROM usage_daily WHERE subject=?",
+                             (f"user:{self.user_id}",))
+                conn.execute("DELETE FROM users WHERE id=?", (self.user_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        server._share_hits.clear()
+
+    def test_authenticated_sync_share_does_not_reenter_db_lock(self):
+        item_id = f"sync-lock-item-{self.user_id}"
+        parsed = {
+            "kind": "video", "item_id": item_id,
+            "title": "authenticated share", "author": "tester",
+            "avatar": "", "cover": "",
+            "video": {
+                "url": "https://www.iesdouyin.com/aweme/v1/play/?video_id=lock_probe_vid",
+            },
+        }
+        request = make_request(
+            "/api/share", client_ip="203.0.113.98",
+            headers={"Cookie": f"sess={self.token}"})
+        original_lock = server._db_lock
+        probe = _NestedLockProbe(original_lock)
+
+        # The probe turns the old permanent wait into an immediate assertion.  The
+        # endpoint is exercised instead of calling _share_create directly so quota
+        # reservation/refund code is covered as well.
+        with mock.patch.object(server, "_db_lock", probe), \
+                mock.patch.object(server, "_parse_cached", return_value=parsed), \
+                mock.patch.object(server, "_share_view", return_value={"ok": True}), \
+                mock.patch.object(server, "_atc_enqueue", return_value=True):
+            result = server.api_share_create(
+                server.ShareBody(text="https://v.douyin.com/SyncLock9/"), request)
+
+        self.assertEqual(result, {"ok": True})
+        row = server.db_exec(
+            "SELECT owner_user_id,expires_at,quota_reservation_id "
+            "FROM shares WHERE item_id=?",
+            (item_id,), "one")
+        self.assertIsNotNone(row)
+        self.assertEqual(row["owner_user_id"], self.user_id)
+        self.assertGreater(row["expires_at"], int(time.time()) + server.SHARE_TTL_ANON)
+        reservation = server.db_exec(
+            "SELECT status,committed_units FROM quota_reservations WHERE id=?",
+            (row["quota_reservation_id"],), "one")
+        self.assertEqual((reservation["status"], reservation["committed_units"]),
+                         ("settled", 1))
 
 
 class MediaSecurityTests(unittest.TestCase):
@@ -1457,11 +1629,17 @@ class DurableBillingTests(unittest.TestCase):
         self.assertNotIn("/api/keys/{key}", paths)
 
     def test_revoked_user_key_disappears_and_does_not_count_toward_limit(self):
-        key = server.create_api_key(999, "rotated-key")["key"]
-        self.assertEqual(len(server.list_api_keys(999)), 1)
-        self.assertTrue(server.revoke_api_key(key, 999))
-        self.assertEqual(server.list_api_keys(999), [])
-        self.assertTrue(any(k["key"] == key for k in server.list_api_keys()))
+        server.db_exec(
+            "INSERT OR REPLACE INTO users(id,email,created_at,disabled) "
+            "VALUES(999,'key-test@example.test',?,0)", (int(time.time()),))
+        try:
+            key = server.create_api_key(999, "rotated-key")["key"]
+            self.assertEqual(len(server.list_api_keys(999)), 1)
+            self.assertTrue(server.revoke_api_key(key, 999))
+            self.assertEqual(server.list_api_keys(999), [])
+            self.assertTrue(any(k["key"] == key for k in server.list_api_keys()))
+        finally:
+            server.db_exec("DELETE FROM users WHERE id=999")
 
     def test_idempotent_preauthorization_success_charge_and_failure_refund(self):
         links = [
@@ -1711,10 +1889,10 @@ class AtcEnhancementTests(unittest.TestCase):
             "textContent": "默认解析不应下发这个字段",
             "duration": 8.2, "workType": "video",
         })
-        self.assertEqual(parsed["source"], "atc")
-        self.assertEqual(parsed["video"]["source"], "atc")
+        self.assertEqual(parsed["source"], "parser")
+        self.assertEqual(parsed["video"]["source"], "parser")
         self.assertEqual(parsed["duration_ms"], 8200)
-        self.assertIn("/api/atc/video/", parsed["video"]["download_url"])
+        self.assertIn("/api/media/video/", parsed["video"]["download_url"])
         self.assertNotIn("textContent", parsed)
         self.assertNotIn("text_content", parsed)
         cached = server._atc_cache_get(parsed["item_id"])
@@ -1848,9 +2026,10 @@ class AtcEnhancementTests(unittest.TestCase):
 
     def test_share_view_injects_atc_only_when_fresh(self):
         import json as _json
-        row = {"id": "atcv123", "item_id": "7300", "kind": "video", "vid": "v9",
+        row = {"id": "atcv123", "item_id": "7300", "kind": "video", "vid": "",
                "title": "t", "author": "a", "avatar": "", "cover": "",
-               "custom_title": "", "payload": _json.dumps({"video": {}}),
+               "custom_title": "", "payload": _json.dumps(
+                   {"source": "atc", "video": {"source": "atc"}}),
                "expires_at": 0, "status": "ok", "views": 0, "plays": 0,
                "downloads": 0, "cta_clicks": 0, "created": int(time.time())}
         # 关闭时：无 atc_url，但有默认优先级
@@ -1862,10 +2041,10 @@ class AtcEnhancementTests(unittest.TestCase):
         now = int(time.time())
         server.db_exec(
             "INSERT INTO atc_cache(item_id,video_url,url_fetched_at,created,updated) "
-            "VALUES('7300','https://cdn.example.com/x.mp4',?,?,?)", (now, now, now))
+            "VALUES('7300','https://v3.douyinvod.com/x.mp4',?,?,?)", (now, now, now))
         view = server._share_view(row)
-        self.assertEqual(view["data"]["video"].get("atc_url"),
-                         "https://cdn.example.com/x.mp4")
+        self.assertEqual(view["data"]["video"].get("direct_url"),
+                         "https://v3.douyinvod.com/x.mp4")
         # 过期：不注入且惰性入队
         server.db_exec(
             "UPDATE atc_cache SET url_fetched_at=? WHERE item_id='7300'",
@@ -1876,12 +2055,375 @@ class AtcEnhancementTests(unittest.TestCase):
             "SELECT purpose,status FROM atc_jobs WHERE item_id='7300'", (), "one")
         self.assertEqual(tuple(job), ("play", "pending"))
 
+    def test_share_view_enqueues_when_atc_cache_is_missing(self):
+        import json as _json
+        self._enable()
+        row = {"id": "atc-missing", "item_id": "7301", "kind": "video", "vid": "",
+               "title": "t", "author": "a", "avatar": "", "cover": "",
+               "custom_title": "", "payload": _json.dumps(
+                   {"source": "atc", "_link": "https://v.douyin.com/missing/",
+                    "video": {"source": "atc", "url": "https://v3.douyinvod.com/old.mp4"}}),
+               "expires_at": 0, "status": "ok", "views": 0, "plays": 0,
+               "downloads": 0, "cta_clicks": 0, "created": int(time.time())}
+        with mock.patch.object(server, "_atc_enqueue", return_value=True) as enqueue:
+            view = server._share_view(row)
+        self.assertFalse(view["data"]["video"]["media_available"])
+        self.assertNotIn("url", view["data"]["video"])
+        self.assertNotIn("_link", view["data"])
+        self.assertNotIn("work_url", view["data"])
+        enqueue.assert_called_once_with(
+            "7301", work_url="https://v.douyin.com/missing/", purpose="play")
+
+    def test_video_share_page_queues_refresh_without_blocking_on_extraction(self):
+        import json as _json
+        self._enable()
+        sid = "atc-page-refresh"
+        now = int(time.time())
+        server.db_exec(
+            "INSERT OR REPLACE INTO shares"
+            "(id,item_id,kind,vid,title,author,avatar,cover,payload,custom_title,"
+            "expires_at,refreshed_at,status,created,source_url,parse_status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, "7304", "video", "", "t", "a", "", "",
+             _json.dumps({"source": "atc", "video": {"source": "atc"}}),
+             "", now + 86400, now - 7200, "ok", now - 7200,
+             "https://v.douyin.com/page-refresh/", "ready"))
+        try:
+            with mock.patch.object(
+                    server, "_refresh_share",
+                    side_effect=AssertionError("video page must not block on extraction")), \
+                    mock.patch.object(server, "_atc_enqueue", return_value=True) as enqueue:
+                response = server.share_page(
+                    sid, make_request(f"/s/{sid}"))
+            self.assertEqual(response.status_code, 200)
+            enqueue.assert_called_once_with(
+                "7304", work_url="https://v.douyin.com/page-refresh/", purpose="play")
+        finally:
+            server.db_exec("DELETE FROM shares WHERE id=?", (sid,))
+
+    def test_share_view_sanitizes_legacy_direct_snapshot(self):
+        import json as _json
+        self._enable()
+        row = {"id": "legacy-atc", "item_id": "7302", "kind": "video", "vid": "",
+               "title": "legacy", "author": "a", "avatar": "", "cover": "",
+               "custom_title": "", "payload": _json.dumps(
+                   {"source": "douyin_direct", "video": {
+                       "source": "douyin_direct",
+                       "url": "https://v3.douyinvod.com/legacy.mp4",
+                       "proxy_url": "/api/douyin/video/7302"}}),
+               "expires_at": 0, "status": "ok", "views": 0, "plays": 0,
+               "downloads": 0, "cta_clicks": 0, "created": int(time.time())}
+        with mock.patch.object(server, "_atc_enqueue", return_value=True) as enqueue:
+            view = server._share_view(row)
+        video = view["data"]["video"]
+        self.assertEqual(view["data"]["source"], "douyin_direct")
+        self.assertEqual(video["source"], "douyin_direct")
+        self.assertFalse(video["media_available"])
+        self.assertNotIn("url", video)
+        # 短 ID 是历史占位数据，不生成一个必然 400 的官方媒体令牌。
+        self.assertNotIn("proxy_url", video)
+        enqueue.assert_not_called()
+
+    def test_play_refresh_does_not_persist_transcript_unless_requested(self):
+        item_id = "7303"
+        server._atc_save_result(item_id, {
+            "videoUrl": "https://v3.douyinvod.com/play.mp4",
+            "content": "基础内容", "textContent": "不应保存",
+            "audioUrl": "https://v3.douyinvod.com/audio.mp3", "duration": 8.5,
+        }, work_url="https://v.douyin.com/play/")
+        cached = server._atc_cache_get(item_id)
+        self.assertEqual(cached["video_url"], "https://v3.douyinvod.com/play.mp4")
+        self.assertEqual(cached["text_content"], "")
+        self.assertEqual(cached["audio_url"], "")
+
+        server._atc_save_result(item_id, {
+            "textContent": "主动提取的文案", "audioUrl": "https://v3.douyinvod.com/audio.mp3"
+        }, work_url="https://v.douyin.com/play/", include_text=True)
+        cached = server._atc_cache_get(item_id)
+        self.assertEqual(cached["text_content"], "主动提取的文案")
+        self.assertEqual(cached["audio_url"], "https://v3.douyinvod.com/audio.mp3")
+
+        # 后续普通播放刷新不能清空已经主动获取的文案。
+        server._atc_save_result(item_id, {
+            "videoUrl": "https://v3.douyinvod.com/play-new.mp4",
+            "textContent": "来自基础任务的意外字段",
+        }, work_url="https://v.douyin.com/play/")
+        cached = server._atc_cache_get(item_id)
+        self.assertEqual(cached["text_content"], "主动提取的文案")
+        self.assertEqual(cached["audio_url"], "https://v3.douyinvod.com/audio.mp3")
+
+    def test_duration_normalization_handles_units_and_nested_payloads(self):
+        self.assertEqual(server._atc_duration_ms("01:02"), 62_000)
+        self.assertEqual(server._atc_duration_ms("PT1M2.5S"), 62_500)
+        self.assertEqual(server._atc_duration_ms(125000), 125000)
+        self.assertEqual(server._atc_payload_duration_ms({
+            "data": {"item": {"video": {"durationMs": 9050}}}}), 9050)
+
+
+class HardeningRegressionTests(unittest.TestCase):
+    def test_container_requires_an_explicit_strong_admin_password(self):
+        dockerfile = Path("Dockerfile").read_text("utf-8")
+        self.assertIn("ENV REQUIRE_ADMIN_PASSWORD=1", dockerfile)
+        self.assertNotIn("ENV ADMIN_PASSWORD=douyin-admin", dockerfile)
+
+    def test_legacy_atc_schema_is_migrated_before_claim_index_creation(self):
+        with tempfile.TemporaryDirectory(prefix="douyin-legacy-atc-") as data_dir:
+            conn = sqlite3.connect(Path(data_dir) / "app.db")
+            try:
+                conn.execute("""
+                    CREATE TABLE atc_jobs(
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      item_id TEXT, work_url TEXT, purpose TEXT, task_id TEXT,
+                      status TEXT DEFAULT 'pending', error TEXT,
+                      created INTEGER, updated INTEGER
+                    )
+                """)
+                conn.commit()
+            finally:
+                conn.close()
+
+            env = os.environ.copy()
+            env["DATA_DIR"] = data_dir
+            probe = subprocess.run(
+                [sys.executable, "-c", (
+                    "import sqlite3,server; "
+                    "c=sqlite3.connect(server.DB_FILE); "
+                    "cols={r[1] for r in c.execute('PRAGMA table_info(atc_jobs)')}; "
+                    "idx={r[1] for r in c.execute('PRAGMA index_list(atc_jobs)')}; "
+                    "assert {'lease_owner','lease_until'} <= cols; "
+                    "assert 'idx_atc_jobs_claim' in idx")],
+                cwd=Path(__file__).resolve().parents[1], env=env,
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+
+    def test_captcha_rejects_non_finite_coordinates_and_trajectory(self):
+        request = make_request(client_ip="198.51.100.88")
+        server._captchas["nan-x"] = (
+            100, 30, time.time() - 1, "198.51.100.88")
+        trajectory = [
+            {"t": t, "x": x} for t, x in
+            ((0, 0), (60, 5), (130, 17), (210, 31), (300, 55), (390, 100))]
+        with mock.patch.object(server, "_pow_ok", return_value=True):
+            ok, _ = server.verify_captcha(
+                "nan-x", float("nan"), trajectory, "nonce", request)
+        self.assertFalse(ok)
+
+        server._captchas["inf-track"] = (
+            100, 30, time.time() - 1, "198.51.100.88")
+        trajectory[-1]["x"] = float("inf")
+        with mock.patch.object(server, "_pow_ok", return_value=True):
+            ok, _ = server.verify_captcha(
+                "inf-track", 100, trajectory, "nonce", request)
+        self.assertFalse(ok)
+
+    def test_rejected_rate_limit_hits_do_not_grow_memory(self):
+        store = {}
+        for _ in range(10000):
+            server._rate_ok(store, "198.51.100.89", 60, 3)
+        self.assertEqual(len(store["198.51.100.89"]), 3)
+
+    def test_generic_api_body_limit_runs_before_json_parsing(self):
+        response = TestClient(server.app).post(
+            "/api/report", content=b"x" * 9000,
+            headers={"Content-Type": "application/json"})
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("payload_too_large", response.json()["error"])
+
+    def test_user_trial_balance_is_granted_once_under_concurrency(self):
+        email = "trial-race@example.test"
+        server.db_exec("DELETE FROM users WHERE email=?", (email,))
+        server.db_exec(
+            "INSERT INTO users(email,created_at,disabled) VALUES(?,?,0)",
+            (email, int(time.time())))
+        uid = int(server.db_exec(
+            "SELECT id FROM users WHERE email=?", (email,), "one")[0])
+
+        def create(index):
+            try:
+                return server.create_api_key(uid, f"key-{index}")
+            except server.ApiError:
+                return None
+
+        try:
+            with ThreadPoolExecutor(max_workers=20) as pool:
+                created = [value for value in pool.map(create, range(20)) if value]
+            self.assertEqual(len(created), server.USER_ACTIVE_KEY_LIMIT)
+            self.assertEqual(
+                sum(int(value["balance_cents"]) for value in created),
+                server.NEW_KEY_BALANCE)
+            marker = server.db_exec(
+                "SELECT api_trial_granted_cents FROM users WHERE id=?",
+                (uid,), "one")[0]
+            self.assertEqual(int(marker), server.NEW_KEY_BALANCE)
+        finally:
+            keys = server.db_exec(
+                "SELECT key FROM api_keys WHERE user_id=?", (uid,), "all")
+            for row in keys:
+                server.db_exec("DELETE FROM api_ledger WHERE key=?", (row[0],))
+            server.db_exec("DELETE FROM api_keys WHERE user_id=?", (uid,))
+            server.db_exec("DELETE FROM users WHERE id=?", (uid,))
+
+    def test_note_share_strips_signed_urls_and_rebuilds_same_origin_routes(self):
+        item_id = "7123456789012345678"
+        now = int(time.time())
+        direct = ("https://p3.douyinpic.com/example.jpeg?x-expires="
+                  + str(now + 600))
+        data = {
+            "kind": "note", "item_id": item_id, "source": "douyin_direct",
+            "title": "note", "images": [{
+                "url": direct, "proxy_url": "/stale", "download_url": "/stale-dl",
+                "filename": "unsafe'\".jpeg",
+            }],
+        }
+        stored = server._share_storage_payload(data)
+        self.assertNotIn("url", stored["images"][0])
+        self.assertNotIn("proxy_url", stored["images"][0])
+        server._douyin_cache_note_media(item_id, [direct])
+        row = {
+            "id": "noteABC", "item_id": item_id, "kind": "note", "vid": "",
+            "title": "note", "author": "a", "avatar": "", "cover": "",
+            "custom_title": "", "payload": json.dumps(stored),
+            "expires_at": now + 3600, "refreshed_at": now,
+            "status": "ok", "parse_status": "ready", "views": 0,
+            "plays": 0, "downloads": 0, "cta_clicks": 0, "created": now,
+        }
+        try:
+            view = server._share_view(row)
+            image = view["data"]["images"][0]
+            self.assertTrue(image["proxy_url"].startswith(
+                f"/api/douyin/image/{item_id}/1?"))
+            self.assertIn("dl=1", image["download_url"])
+            self.assertTrue(view["media_available"])
+            status = server._share_async_payload(row, "https://share.example")
+            self.assertTrue(status["media_available"])
+            self.assertFalse(status["media_pending"])
+        finally:
+            server._invalidate_douyin_note_media(item_id)
+
+        atc_stored = server._share_storage_payload({
+            "source": "atc", "kind": "note", "images": [{
+                "url": "https://cdn.example.com/signed.jpeg",
+                "filename": "one.jpeg"}]})
+        self.assertNotIn("url", atc_stored["images"][0])
+        with self.assertRaises(server.ApiError) as rejected:
+            server._share_create(make_request(), {
+                "share_supported": False, "item_id": "xhs_demo",
+                "kind": "note", "source": "atc"})
+        self.assertEqual(rejected.exception.status, 400)
+
+    def test_atc_envelopes_are_normalized_without_scalar_guessing(self):
+        payload = {"code": 200, "data": {"result": {
+            "status": "SUCCESS", "title": "nested",
+            "videoUrl": "https://cdn.example.com/nested.mp4"}}}
+        normalized = server._atc_result_data(payload)
+        self.assertEqual(normalized["title"], "nested")
+        self.assertEqual(server._atc_status_value(payload), "SUCCESS")
+        self.assertEqual(server._atc_task_id(
+            {"code": 200, "message": "ok", "status": "WAITING"}), "")
+        self.assertEqual(server._atc_task_id({"data": {"code": 200}}), "")
+        with mock.patch.object(server, "_atc_save_result"):
+            result = server._atc_result_to_parse(
+                "https://www.bilibili.com/video/BV1nested", payload)
+        self.assertEqual(result["video"]["url"],
+                         "https://cdn.example.com/nested.mp4")
+
+    def test_atc_pending_job_has_one_atomic_owner(self):
+        server.db_exec("DELETE FROM atc_jobs")
+        now = int(time.time())
+        server.db_exec(
+            "INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
+            "VALUES('claim-one','https://example.video/work','play','pending',?,?)",
+            (now, now))
+        try:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                claimed = list(pool.map(
+                    lambda index: server._atc_claim_pending(f"owner-{index}"),
+                    range(8)))
+            winners = [job for job in claimed if job]
+            self.assertEqual(len(winners), 1)
+            row = server.db_exec(
+                "SELECT status,lease_owner FROM atc_jobs WHERE item_id='claim-one'",
+                (), "one")
+            self.assertEqual(row[0], "submitting")
+            self.assertEqual(row[1], winners[0]["lease_owner"])
+        finally:
+            server.db_exec("DELETE FROM atc_jobs WHERE item_id='claim-one'")
+
+    def test_atc_workers_stop_with_a_bounded_lifecycle(self):
+        with mock.patch.object(server, "_atc_cfg", return_value={"enabled": False}):
+            server._start_atc_workers()
+            self.assertTrue(any(thread.is_alive()
+                                for thread in server._atc_threads))
+            server._stop_atc_workers()
+        self.assertFalse(any(thread.is_alive() for thread in server._atc_threads))
+
+    def test_chromium_setup_failure_releases_global_lock(self):
+        with mock.patch.object(server, "_douyin_browser_binary",
+                               return_value="/bin/true"), \
+                mock.patch.object(server.tempfile, "mkdtemp",
+                                  side_effect=OSError("disk full")):
+            self.assertIsNone(server._douyin_browser_extract_once(
+                "7123456789012345678", "video", None))
+        self.assertTrue(server._douyin_browser_lock.acquire(blocking=False))
+        server._douyin_browser_lock.release()
+
+    def test_short_link_200_body_is_not_misread_as_self_redirect(self):
+        item_id = "7123456789012345678"
+        short = "https://v.douyin.com/TestLoop/"
+
+        class Response:
+            headers = {}
+            def geturl(self):
+                return short
+            def read(self, _limit=-1):
+                return (f'<a href="https://www.douyin.com/video/{item_id}/">x</a>'
+                        .encode())
+            def close(self):
+                pass
+
+        with mock.patch.object(server, "open_url", return_value=(Response(), None)):
+            kind, actual, canonical = server._douyin_resolve_share_url(short)
+        self.assertEqual((kind, actual), ("video", item_id))
+        self.assertEqual(canonical, f"https://www.douyin.com/video/{item_id}/")
+
+    def test_upstream_416_is_propagated_without_media_refresh(self):
+        item_id = "7123456789012345678"
+        record = {"url": "https://v3.douyinvod.com/media.mp4",
+                  "urls": ["https://v3.douyinvod.com/media.mp4"]}
+        error = urlerr.HTTPError(
+            record["url"], 416, "range", {"Content-Range": "bytes */100"}, None)
+        with mock.patch.object(server, "_douyin_media_for_item",
+                               return_value=record) as media, \
+                mock.patch.object(server, "open_url", side_effect=error):
+            with self.assertRaises(server.ApiError) as raised:
+                server._open_douyin_video_upstream(
+                    item_id, {"Range": "bytes=999-"})
+        self.assertEqual(raised.exception.status, 416)
+        self.assertEqual(raised.exception.headers.get("Content-Range"), "bytes */100")
+        self.assertEqual(media.call_count, 1)
+
+    def test_explicitly_expired_cdn_url_and_spreadsheet_formula_are_rejected(self):
+        now = int(time.time())
+        self.assertLessEqual(server._douyin_urls_expiry(
+            [f"https://p3.douyinpic.com/a?x-expires={now - 1}"], now), now - 1)
+        for value in ("=1+1", " +SUM(A1:A2)", "\t@cmd"):
+            self.assertTrue(server._xlsx_safe_text(value).lstrip().startswith("'"))
+
 
 class PlayLogTests(unittest.TestCase):
     """播放请求日志：分页、筛选、失败后下一条重试线路（next_src）。"""
 
     def setUp(self):
         server.db_exec("DELETE FROM share_events")
+        server.db_exec("DELETE FROM shares WHERE id='sidABC1'")
+        now = int(time.time())
+        server.db_exec(
+            "INSERT INTO shares(id,item_id,kind,payload,status,parse_status,"
+            "expires_at,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
+            ("sidABC1", "7000000000000000001", "video", "{}", "ok",
+             "ready", now + 3600, now, now))
+        with server._rate_lock:
+            server._share_event_hits.clear()
         self.admin = TestClient(server.app)
         r = self.admin.post("/api/admin/login",
                             json={"password": "test-only-admin-password"})
@@ -1889,6 +2431,7 @@ class PlayLogTests(unittest.TestCase):
 
     def tearDown(self):
         server.db_exec("DELETE FROM share_events")
+        server.db_exec("DELETE FROM shares WHERE id='sidABC1'")
 
     def _seed(self, n=25):
         now = int(time.time())
