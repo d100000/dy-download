@@ -255,6 +255,10 @@ h1{font-size:34px; font-weight:750; line-height:1.3; text-wrap:balance}
 .meta-item .k{font-size:12px; color:var(--muted); letter-spacing:.04em}
 .meta-item .v{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums}
 .meta-item .v.is-pending{color:var(--muted); font-size:13px; font-weight:500}
+.engagement-row{display:flex; flex-wrap:wrap; gap:8px 20px; font-size:13px; line-height:1.6}
+.engagement-item{display:flex; align-items:baseline; gap:6px; white-space:nowrap}
+.engagement-item dt{color:var(--muted)}
+.engagement-item dd{color:var(--text); font-weight:600; font-variant-numeric:tabular-nums}
 .extras{display:flex; flex-direction:column; gap:7px}
 .extra-line{font-size:13px; color:var(--muted); display:flex; gap:6px; align-items:baseline}
 .extra-line span{color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
@@ -284,6 +288,7 @@ a.ghost-btn{text-decoration:none}
 .bt-title{max-width:280px}
 .bt-t{font-weight:500; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
 .bt-a{font-size:12px; color:var(--muted); margin-top:2px}
+.bt-title .engagement-row{margin-top:6px; gap:4px 12px; font-size:12px}
 .bt-tag{font-size:11.5px; font-weight:600; padding:2px 9px; border-radius:99px; background:var(--surface-2); color:var(--muted); white-space:nowrap}
 .bt-ops{white-space:nowrap}
 .mini-btn{display:inline-flex; align-items:center; font-size:12.5px; font-weight:600; padding:6px 12px; border-radius:8px; background:var(--accent); color:var(--accent-ink); margin-right:6px; text-decoration:none; transition:opacity .15s}
@@ -303,6 +308,7 @@ a.ghost-btn{text-decoration:none}
 .pm-title{padding:14px 16px 4px; font-size:14.5px; font-weight:600; line-height:1.5}
 .pm-meta{display:flex; gap:8px; padding:4px 16px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums}
 .pm-meta span+span::before{content:"·"; margin-right:8px; color:var(--faint)}
+.pm-body>.engagement-row{padding:8px 16px}
 .pm-act{padding:8px 16px 16px}
 .pm-act .primary-btn{width:100%; justify-content:center; text-decoration:none}
 .pm-imgs{display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; padding:12px 16px 16px}
@@ -1086,7 +1092,7 @@ function renderBatch(count, fails){
     return `<tr>
       <td class="bt-idx tnum">${i+1}</td>
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
-      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||'未知')}</div></td>
+      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||'未知')}</div>${engagementHTML(d.stats)}</td>
       <td><span class="bt-tag">${isNote?'图集':'视频'}</span></td>
       <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,'待读取')}</td>
       <td class="bt-ops">
@@ -1169,7 +1175,7 @@ function openPlayer(i){
   }
   const body = m.querySelector('.pm-body');
   if (d.kind === 'note'){
-    body.innerHTML = `<div class="pm-title">${esc(d.title)}</div><div class="pm-imgs">${
+    body.innerHTML = `<div class="pm-title">${esc(d.title)}</div>${engagementHTML(d.stats)}<div class="pm-imgs">${
       (d.images||[]).map(im=>`<img src="${esc(albumImageSrc(im))}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
     const canDownload = Boolean(d.video?.download_url || d.video?.proxy_url);
@@ -1183,6 +1189,7 @@ function openPlayer(i){
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       <div class="pm-title">${esc(d.title)}</div>
       <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,'读取中…')}</span><span data-video-resolution>${videoResolutionText(d.video,'读取中…')}</span></div>
+      ${engagementHTML(d.stats)}
       <div class="pm-act">${canDownload
         ? `<button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button>`
         : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}</div>`;
@@ -1270,6 +1277,22 @@ function videoRatioDimensions(video){
 function videoRatioStyle(video){
   const dims = videoRatioDimensions(video);
   return dims ? `--video-ratio:${dims.width} / ${dims.height}` : '';
+}
+function engagementHTML(stats){
+  const labels = LANG === 'en'
+    ? [['digg','Likes'],['comment','Comments'],['share','Shares'],['collect','Saves']]
+    : [['digg','点赞'],['comment','评论'],['share','分享'],['collect','收藏']];
+  const items = labels.flatMap(([key, label]) => {
+    const raw = stats?.[key];
+    // 只显示明确的非负整数：缺失值、空字符串和布尔值都不能被当成 0。
+    if (typeof raw !== 'number' && !(typeof raw === 'string' && /^\d+$/.test(raw.trim()))) return [];
+    const count = Number(raw);
+    if (!Number.isSafeInteger(count) || count < 0) return [];
+    return [`<div class="engagement-item"><dt>${label}</dt><dd>${count.toLocaleString(LANG === 'en' ? 'en-US' : 'zh-CN')}</dd></div>`];
+  });
+  return items.length
+    ? `<dl class="engagement-row" aria-label="${LANG === 'en' ? 'Engagement' : '互动数据'}">${items.join('')}</dl>`
+    : '';
 }
 function extrasBlock(d){
   let h = '';
@@ -1849,6 +1872,7 @@ function videoHTML(d){
           <div class="meta-item"><div class="k">格式</div><div class="v">MP4</div></div>
           ${d.create_time?`<div class="meta-item"><div class="k">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
         </div>
+        ${engagementHTML(d.stats)}
         ${extrasBlock(d)}
         <div class="actions">
           ${canDownload
@@ -1882,6 +1906,7 @@ function albumHTML(d){
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
+        ${engagementHTML(d.stats)}
         ${extrasBlock(d)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">

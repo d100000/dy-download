@@ -13,8 +13,9 @@ this.fmtDur = fmtDur;
 this.videoDurationMs = videoDurationMs;
 this.videoDurationText = videoDurationText;
 this.videoResolutionText = videoResolutionText;
+this.engagementHTML = engagementHTML;
 `;
-const context = {};
+const context = {LANG: 'zh'};
 vm.runInNewContext(source, context, {filename: 'static/index.html'});
 
 function createMetadataHarness() {
@@ -67,11 +68,48 @@ this.videos = _videos;
   return {eventContext, listeners, video, duration, resolution, pendingClasses};
 }
 
-test('result UI no longer renders interaction-count cards', () => {
-  assert.doesNotMatch(homepage, /function statsRow/);
-  assert.doesNotMatch(homepage, /class="stats-row"/);
-  assert.doesNotMatch(homepage, /class="stat-chip"/);
-  assert.doesNotMatch(homepage, /<th>互动数据<\/th>/);
+test('engagement shows only available counts and preserves zero', () => {
+  const html = context.engagementHTML({digg: 93774, comment: 0, share: null, collect: '6792'});
+  assert.match(html, /<dt>点赞<\/dt><dd>93,774<\/dd>/);
+  assert.match(html, /<dt>评论<\/dt><dd>0<\/dd>/);
+  assert.match(html, /<dt>收藏<\/dt><dd>6,792<\/dd>/);
+  assert.doesNotMatch(html, /<dt>分享<\/dt>/);
+});
+
+test('missing or invalid counts never produce values or an empty row', () => {
+  for (const stats of [undefined, null, {}, {digg: null, comment: '', share: '  ', collect: false}]) {
+    assert.equal(context.engagementHTML(stats), '');
+  }
+  for (const digg of [true, false, [], {}, -1, 1.5, Infinity, NaN, 'unknown', '1.2万', '<img onerror=alert(1)>']) {
+    assert.equal(context.engagementHTML({digg}), '');
+  }
+});
+
+test('English engagement labels preserve full count precision', () => {
+  const english = {LANG: 'en'};
+  vm.runInNewContext(source, english);
+  const html = english.engagementHTML({digg: 123456789, comment: '0', share: 12, collect: 34});
+  assert.match(html, /<dt>Likes<\/dt><dd>123,456,789<\/dd>/);
+  assert.match(html, /<dt>Comments<\/dt><dd>0<\/dd>/);
+  assert.match(html, /<dt>Shares<\/dt><dd>12<\/dd>/);
+  assert.match(html, /<dt>Saves<\/dt><dd>34<\/dd>/);
+});
+
+test('video and gallery cards conditionally render engagement without empty space', () => {
+  const renderStart = homepage.indexOf('function videoHTML(d){');
+  const renderEnd = homepage.indexOf('async function downloadAll(', renderStart);
+  assert.ok(renderStart >= 0 && renderEnd > renderStart);
+  const renderContext = {
+    LANG: 'zh', esc: String, platformName: () => '抖音', sharePageSupported: () => false,
+    videoPlaySrc: () => '', videoDatasetHTML: () => '', authorRow: () => '', extrasBlock: () => '',
+  };
+  vm.runInNewContext(source + homepage.slice(renderStart, renderEnd), renderContext);
+  for (const render of [renderContext.videoHTML, renderContext.albumHTML]) {
+    const item = {item_id: 'test', title: '测试作品', video: {}, images: []};
+    assert.doesNotMatch(render(item), /class="engagement-row"/);
+    assert.match(render({...item, stats: {comment: 0}}), /<dt>评论<\/dt><dd>0<\/dd>/);
+    assert.doesNotMatch(render({...item, stats: {digg: null, comment: ''}}), /class="engagement-row"/);
+  }
 });
 
 test('video elements wire native metadata events', () => {
