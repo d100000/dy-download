@@ -243,6 +243,11 @@
     "失败": "Failed",
     "解析失败（HTTP {status}），请稍后重试": "Parsing failed (HTTP {status}). Please try again.",
     "正在更新视频地址…": "Refreshing video link…",
-    "视频地址更新失败，请点击播放重试": "Could not refresh the video link. Tap play to retry."
+    "视频地址更新失败，请点击播放重试": "Could not refresh the video link. Tap play to retry.",
+    "暂时无法检查分享内容，请稍后重试": "Could not check this share. Please try again later.",
+    "分享页不存在或已删除，请重新生成分享页": "This share was not found or was deleted. Create a new share link.",
+    "分享链接已过期，请重新生成分享页": "This share link has expired. Create a new share link.",
+    "分享内容暂不可下载，请稍后重试": "This shared content cannot be downloaded right now. Please try again later.",
+    "分享内容已变化，请刷新页面后再试": "This shared content has changed. Refresh the page and try again."
   }
 }

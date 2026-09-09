@@ -24,7 +24,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 
 依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。抖音官方完整视频链路还需要系统可执行的 Chrome/Chromium（可用 `DOUYIN_BROWSER_BIN` 指定）；没有浏览器时只尝试官方 SSR/JSON-LD 元数据，不能保证返回媒体地址。仓库 Dockerfile 已安装 `/usr/bin/chromium`，裸机部署需自行安装浏览器或设置 `DOUYIN_BROWSER_BIN`；新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
-测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（覆盖媒体签名与 Range/流租约、代理健康、原子配额、持久化计费、隐私存储、按平台解析与主动文案模式、播放日志及文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；三个 Node 测试（`test_download_flow.js`、`test_share_playback.js`、`test_video_metadata.js`）会把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑——改前端下载/播放代码时必须保留锚点或同步更新测试。测试不能替代真实链接实测：解析服务和源平台随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
+测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（覆盖媒体签名与 Range/流租约、代理健康、原子配额、持久化计费、隐私存储、按平台解析与主动文案模式、播放日志及文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；三个 Node 测试（`test_download_flow.js`、`test_share_playback.js`、`test_video_metadata.js`）会把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑——改前端下载/播放代码时必须保留锚点或同步更新测试。本地回归必须使用独立空闲端口和独立 `DATA_DIR`，不得把用户正在查看的端口切换到另一份测试数据库；服务重启需保留原数据目录和 `.app-secret`，否则存量分享将 404、旧签名将 403。测试不能替代真实链接实测：解析服务和源平台随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
 
 ## 版本号与 README 维护（每次改动必做）
 
@@ -139,7 +139,7 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 
 `parse_snapshots.source_url/canonical_url` 单独保存从原输入提取的分享链接与可用的原平台作品链接，抖音作品规范化到无追踪参数的 video/note URL；不保存整段分享文案。公开 payload 继续移除内部来源与临时媒体签名。解析快照保留 24 小时，创建分享时把来源复制到 `shares.source_url`，随分享自身有效期保留；启动迁移从旧 `atc_cache.work_url` 补空来源。`_saved_source_in_conn()` 只恢复有效记录，刷新只改媒体缓存，不延长分享有效期、不重新计费、不清空完整元数据。
 
-分享页 `prepareShareMedia()` 打开时仅加载媒体元数据，有效不调用解析；无地址、error 或 12 秒未读到元数据时复用有界下载刷新任务。播放错误先续期一次，再走已有备用线路。首页/批量预览同样按需续期，不能自动播放原本暂停的视频，也不能让迟到响应修改已替换的视频元素。中英提示使用 `uiText()`，新状态测试在 `test_playback_refresh.js` 与 `test_share_playback.js`。
+分享页下载前通过 `refreshShareDownloadData()` 重读 `/api/share/{sid}`，只更新媒体字段与签名，不重复解析或扣次；404/过期/下架禁止继续使用旧地址，下载按钮全流程防连点。分享页 `prepareShareMedia()` 打开时仅加载媒体元数据，有效不调用解析；无地址、error 或 12 秒未读到元数据时复用有界下载刷新任务。播放错误先续期一次，再走已有备用线路。首页/批量预览同样按需续期，不能自动播放原本暂停的视频，也不能让迟到响应修改已替换的视频元素。中英提示使用 `uiText()`，新状态测试在 `test_playback_refresh.js` 与 `test_share_playback.js`。
 
 ### 状态存储与部署约束
 

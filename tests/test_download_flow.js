@@ -470,3 +470,65 @@ for (const file of ['static/index.html', 'static/share.html']) {
     assert.doesNotMatch(failed.errors[0], /[\u4e00-\u9fff]|anytocopy/i);
   });
 }
+
+
+for (const file of files.slice(0,2)) {
+  test(`${file}: fallback verification failures are not hidden by a prior primary failure`,async()=>{
+    for (const status of [403,404,410,429,451]) {
+      const h=createHarness(async url=>url.startsWith('https:')
+        ? response(403,'expired','text/html')
+        : response(status,JSON.stringify({error:'请刷新下载请求后重试'}),'application/json'),file);
+      assert.equal(await h.browserDownload('', '作品.mp4', {innerHTML:'下载',disabled:false},
+        '/api/douyin/video/7670572727590577894?exp=1&sig=old',true,
+        'https://v3.douyinvod.com/expired.mp4'),false);
+      assert.deepEqual(h.errors,['请刷新下载请求后重试']);
+      assert.equal(h.clicks.length,0);
+    }
+  });
+}
+
+function shareClickHarness(fetchImpl){
+  const html=fs.readFileSync('static/share.html','utf8');
+  const source=html.slice(html.indexOf('let _shareDownloading'),html.indexOf('function saveImage'));
+  const downloads=[],errors=[],fetches=[];
+  const S={sid:'abcdefg',item_id:'7670572727590577894',title:'自定义标题',kind:'video',data:{source:'parser',stats:{digg:0,comment:12},video:{url:'https://v3.douyinvod.com/old.mp4',download_url:'/old?sig=stale',filename:'saved.mp4'}}};
+  const context={S,AbortController,IS_WECHAT_UA:false,
+    fetch:async(...args)=>{fetches.push(args);return fetchImpl(...args);},
+    setTimeout:()=>1,clearTimeout:()=>{},
+    videoDownloadRefreshURL:v=>v?.download_refresh_url||'',videoDirectDownloadURL:v=>v?.direct_url||'',
+    browserDownload:async(...args)=>{downloads.push(args);return true;},track:()=>{},toast:m=>errors.push(m)};
+  vm.runInNewContext(source,context);
+  return {context,S,downloads,errors,fetches,button:{innerHTML:'下载',disabled:false}};
+}
+function currentShare(overrides={}){
+  return response(200,JSON.stringify({state:'ok',kind:'video',item_id:'7670572727590577894',data:{source:'douyin_direct',video:{source:'douyin_direct',download_url:'/api/douyin/video/7670572727590577894?sig=new',filename:'new.mp4'}},...overrides}),'application/json');
+}
+test('share download replaces stale signed endpoints from a read-only snapshot and preserves content',async()=>{
+  const h=shareClickHarness(async()=>currentShare());
+  assert.equal(await h.context.download(h.button),true);
+  assert.equal(h.fetches.length,1);assert.equal(h.fetches[0][0],'/api/share/abcdefg');
+  assert.equal(h.fetches[0][1].cache,'no-store');
+  assert.equal(h.downloads.length,1);assert.match(h.downloads[0][3],/sig=new/);
+  assert.equal(h.S.data.video.url,undefined);assert.equal(h.S.title,'自定义标题');
+  assert.deepEqual(h.S.data.stats,{digg:0,comment:12});assert.equal(h.button.disabled,false);
+});
+test('deleted, expired or changed shares never download with old media',async()=>{
+  for (const resp of [response(404,'{}','application/json'),response(200,'null','application/json'),currentShare({state:'expired'}),
+    currentShare({state:'takedown'}),currentShare({item_id:'another-item'})]) {
+    const h=shareClickHarness(async()=>resp);
+    assert.equal(await h.context.download(h.button),false);assert.equal(h.downloads.length,0);
+    assert.equal(h.errors.length,1);assert.equal(h.button.disabled,false);
+  }
+});
+test('concurrent share download clicks share one check and one download',async()=>{
+  let finish;const h=shareClickHarness(()=>new Promise(resolve=>{finish=resolve;}));
+  const first=h.context.download(h.button);
+  assert.equal(await h.context.download(h.button),false);
+  finish(currentShare());assert.equal(await first,true);
+  assert.equal(h.fetches.length,1);assert.equal(h.downloads.length,1);
+});
+test('a failed share metadata check restores the button without using stale URLs',async()=>{
+  const h=shareClickHarness(async()=>{throw Error('network');});
+  assert.equal(await h.context.download(h.button),false);assert.equal(h.downloads.length,0);
+  assert.equal(h.button.innerHTML,'下载');assert.equal(h.button.disabled,false);
+});

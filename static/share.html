@@ -878,17 +878,58 @@ function startPlay(){
 }
 
 /* ---------------- 下载 ---------------- */
-function download(btn){
-  const d = S.data || {};
-  if (!d.video || !(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video.download_url || d.video.proxy_url)){
-    toast(uiText('视频正在准备中，请稍候'));
-    retryMedia();
-    return;
+let _shareDownloading = false;
+async function refreshShareDownloadData(){
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  let resp, current;
+  try {
+    resp = await fetch('/api/share/' + encodeURIComponent(S.sid), {
+      credentials:'same-origin', cache:'no-store', signal:controller.signal,
+      headers:{'Accept':'application/json'},
+    });
+    current = await resp.json();
+  } catch {
+    throw new Error(uiText('暂时无法检查分享内容，请稍后重试'));
+  } finally { clearTimeout(timer); }
+  if (!current || typeof current !== 'object')
+    throw new Error(uiText('暂时无法检查分享内容，请稍后重试'));
+  if (resp.status === 404 || current.state === 'notfound')
+    throw new Error(uiText('分享页不存在或已删除，请重新生成分享页'));
+  if (current.state === 'expired') throw new Error(uiText('分享链接已过期，请重新生成分享页'));
+  if (!resp.ok || current.state !== 'ok')
+    throw new Error(uiText('分享内容暂不可下载，请稍后重试'));
+  if (current.item_id !== S.item_id || current.kind !== 'video' || !current.data?.video)
+    throw new Error(uiText('分享内容已变化，请刷新页面后再试'));
+  // 只重读后台快照并取得新签名；保留页面标题、互动数与当前播放位置。
+  const video = S.data.video || (S.data.video = {});
+  for (const key of ['url','direct_url','atc_url','alt_url','proxy_url','download_url','download_refresh_url'])
+    delete video[key];
+  Object.assign(video, current.data.video);
+  S.data.source = current.data.source;
+  return S.data;
+}
+async function download(btn){
+  if (_shareDownloading || btn?.disabled) return false;
+  if (IS_WECHAT_UA){ showMask(); return false; }
+  _shareDownloading = true;
+  const oldHTML = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.textContent = uiText('检查下载线路…'); }
+  try {
+    const d = await refreshShareDownloadData();
+    if (!(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source)
+          || d.video.download_url || d.video.proxy_url))
+      throw new Error(uiText('视频正在准备中，请稍候'));
+    track('download');
+    return await browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
+      btn, d.video.download_url || d.video.proxy_url, true, videoDirectDownloadURL(d.video,d.source), d.video);
+  } catch(error) {
+    toast(error.message || uiText('下载失败，请稍后重试'));
+    return false;
+  } finally {
+    _shareDownloading = false;
+    if (btn) { btn.innerHTML = oldHTML; btn.disabled = false; }
   }
-  track('download');
-  if (IS_WECHAT_UA){ showMask(); return; }
-  browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
-    btn, d.video.download_url || d.video.proxy_url, true, videoDirectDownloadURL(d.video,d.source), d.video);
 }
 function saveImage(url, name){
   track('download');
@@ -1112,6 +1153,7 @@ async function preflightVideoDownload(source){
       if (!resp.ok){
         const error = new Error(await downloadResponseError(resp));
         error.retryable = resp.status >= 500;
+        error.status = resp.status;
         throw error;
       }
       if (resp.status !== 200 && resp.status !== 206){
@@ -1193,7 +1235,10 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
     if (!directSaved && fallback){
       if (btn) btn.textContent = uiText('尝试备用下载线路…');
       try { await preflightVideoDownload(fallback); }
-      catch(error){ throw directError || error; }
+      catch(error){
+        // 鉴权、限频和下架错误比前面的一次源站失败更可操作，不能被覆盖。
+        throw [401,403,404,410,429,451].includes(error.status) ? error : (directError || error);
+      }
       clickDownload(fallback, filename, true, directError ? ()=>toast(directError.message) : toast);
     } else if (!directSaved) {
       const blob = await fetchAssetBlob(url, (loaded, total) => {

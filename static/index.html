@@ -1863,6 +1863,7 @@ async function preflightVideoDownload(source){
       if (!resp.ok){
         const error = new Error(await downloadResponseError(resp));
         error.retryable = resp.status >= 500;
+        error.status = resp.status;
         throw error;
       }
       if (resp.status !== 200 && resp.status !== 206){
@@ -1945,7 +1946,10 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
     if (!directSaved && fallback){
       if (btn) btn.textContent = uiText('尝试备用下载线路…');
       try { await preflightVideoDownload(fallback); }
-      catch(error){ throw directError || error; }
+      catch(error){
+        // 鉴权、限频和下架错误比前面的一次源站失败更可操作，不能被覆盖。
+        throw [401,403,404,410,429,451].includes(error.status) ? error : (directError || error);
+      }
       clickDownload(fallback, filename, true, directError ? ()=>showError(directError.message) : showError);
     } else if (!directSaved) {
       const blob = await fetchAssetBlob(url, (loaded, total) => {
