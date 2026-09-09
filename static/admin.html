@@ -62,6 +62,13 @@ nav{display:flex; align-items:center; justify-content:space-between; padding:20p
 .login-card p{color:var(--muted); font-size:13px; margin-bottom:20px}
 .field{display:flex; flex-direction:column; gap:7px; text-align:left; margin-bottom:16px}
 .field label{font-size:12.5px; color:var(--muted); font-weight:600}
+.billing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;align-items:end}
+.wallet-dialog{margin:auto;width:min(620px,calc(100% - 24px));max-height:90vh;overflow:auto;padding:24px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+.wallet-dialog::backdrop{background:rgba(0,0,0,.55)}
+.wallet-dialog table{min-width:640px}.wallet-dialog td{white-space:nowrap}.wallet-dialog td:last-child{white-space:normal;min-width:140px;overflow-wrap:anywhere}
+.wallet-ledger-deltas{display:block;color:var(--muted);font-size:12px;margin-top:4px}
+.wallet-dialog h3{font-size:18px}.wallet-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:18px}
+.wallet-summary{margin:12px 0;color:var(--muted);overflow-wrap:anywhere}.wallet-message{min-height:24px;color:var(--danger);margin-top:8px;overflow-wrap:anywhere}
 input[type=password],input[type=text],input[type=number],select,textarea{
   width:100%; background:var(--surface-2); border:1px solid var(--border); border-radius:10px;
   padding:9px 12px; outline:none; transition:border-color .15s;
@@ -447,14 +454,40 @@ th.sortable:hover{color:var(--text)}
     <!-- 用户 -->
     <div class="view" id="v-users" style="display:none">
       <div class="panel">
+        <div class="panel-head"><div><h3 data-wallet="prices">网页计费</h3><div class="desc" data-wallet="policy">先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。</div></div></div>
+        <form class="panel-body" id="billingPriceForm">
+          <div class="billing-grid">
+            <div class="field"><label for="webParsePrice" data-wallet="parsePrice">解析价格（元/次）</label><input id="webParsePrice" type="number" min="0" max="1000" step="0.01" required disabled></div>
+            <div class="field"><label for="webTranscriptPrice" data-wallet="textPrice">语音转文字价格（元/次）</label><input id="webTranscriptPrice" type="number" min="0" max="1000" step="0.01" required disabled></div>
+            <div class="field"><button class="btn btn-primary" id="billingPriceSave" type="submit" disabled data-wallet="savePrices">保存价格</button></div>
+          </div>
+          <p class="hint" data-wallet="priceHint">0 表示免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。</p>
+          <p class="wallet-message" id="billingPriceMessage" role="status" aria-live="polite"></p>
+        </form>
+      </div>
+      <div class="panel">
         <div class="panel-head"><div><h3>用户列表</h3><div class="desc">注册用户、使用与消费</div></div>
           <button class="btn btn-ghost btn-sm" id="usersRefresh">刷新</button></div>
         <div class="tbl-wrap"><table>
-          <thead><tr><th>ID</th><th>邮箱</th><th>注册时间</th><th>最近登录</th><th>解析</th><th>密钥</th><th>消费</th><th>状态</th><th></th></tr></thead>
+          <thead><tr><th>ID</th><th>邮箱</th><th>注册时间</th><th>最近登录</th><th>解析</th><th data-wallet="free">今日免费剩余</th><th data-wallet="balance">账户余额 / 预留</th><th data-wallet="spent">网页消费</th><th>API 消费</th><th>状态</th><th></th></tr></thead>
           <tbody id="usersBody"></tbody>
         </table></div>
         <div class="empty" id="usersEmpty" style="display:none">还没有注册用户。</div>
       </div>
+      <dialog class="wallet-dialog" id="walletDialog" aria-labelledby="walletTitle">
+        <h3 id="walletTitle" data-wallet="edit">编辑余额</h3>
+        <p class="wallet-summary" id="walletSummary"></p>
+        <form id="walletForm">
+          <div class="field"><label for="walletMode" data-wallet="mode">调整方式</label><select id="walletMode"><option value="add" data-wallet="add">增加余额</option><option value="set" data-wallet="set">设置可用余额</option></select></div>
+          <div class="field"><label for="walletAmount" data-wallet="amount">金额（元）</label><input id="walletAmount" type="number" min="0" max="10000000" step="0.01" required></div>
+          <div class="field"><label for="walletNote" data-wallet="note">调整备注（选填）</label><input id="walletNote" type="text" maxlength="200"></div>
+          <p class="hint" data-wallet="walletHint">编辑的是可用余额；任务预留金额仍由任务成功结算或失败退回。调整会保留流水。</p>
+          <p class="wallet-message" id="walletMessage" role="status" aria-live="polite"></p>
+          <div class="wallet-actions"><button type="button" class="btn btn-ghost" id="walletReload" data-wallet="refresh">刷新余额</button><button type="button" class="btn btn-ghost" id="walletCancel" data-wallet="cancel">取消</button><button class="btn btn-primary" id="walletSave" type="submit" data-wallet="save">保存</button></div>
+        </form>
+        <h4 style="margin-top:22px" data-wallet="ledger">最近余额变动</h4>
+        <div class="tbl-wrap"><table><thead><tr><th data-wallet="time">时间</th><th data-wallet="event">类型</th><th data-wallet="change">可用余额变动</th><th data-wallet="note">备注</th></tr></thead><tbody id="walletLedger"></tbody></table></div>
+      </dialog>
     </div>
 
     <!-- 分享页 -->
@@ -1185,20 +1218,104 @@ async function loadAnalytics(){
 }
 $('#anaRefresh').onclick = loadAnalytics;
 
-/* 用户列表 */
+/* 用户余额与网页计费 */
+const WALLET_TEXT = {
+  prices:['网页计费','Website billing'],policy:['先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。','Daily free uses come first, then the account balance. Successful tasks are charged; failures are refunded. API key pricing is configured in Open API.'],
+  parsePrice:['解析价格（元/次）','Parsing price (CNY/use)'],textPrice:['语音转文字价格（元/次）','Speech-to-text price (CNY/use)'],savePrices:['保存价格','Save prices'],
+  priceHint:['0 表示免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。','0 means free. New prices apply to new tasks; existing tasks keep their original price. Cached transcripts are free.'],
+  free:['今日免费剩余','Free uses left'],balance:['账户余额 / 预留','Balance / reserved'],spent:['网页消费','Website spending'],edit:['编辑余额','Edit balance'],
+  mode:['调整方式','Adjustment'],add:['增加余额','Add funds'],set:['设置可用余额','Set available balance'],amount:['金额（元）','Amount (CNY)'],note:['调整备注（选填）','Note (optional)'],
+  walletHint:['编辑的是可用余额；任务预留金额仍由任务成功结算或失败退回。调整会保留流水。','This edits available funds. Reserved funds are settled or refunded by their tasks. Every adjustment is recorded.'],
+  refresh:['刷新余额','Refresh balance'],cancel:['取消','Cancel'],save:['保存','Save'],ledger:['最近余额变动','Recent balance activity'],time:['时间','Time'],event:['类型','Type'],change:['可用余额变动','Available balance change'],
+  loading:['加载中…','Loading…'],saving:['保存中…','Saving…'],saved:['已保存','Saved'],empty:['暂无记录','No activity'],loadFailed:['加载失败，请刷新后重试','Could not load. Please refresh and retry.'],
+  invalid:['请输入有效金额，最多两位小数','Enter a valid amount with up to two decimal places'],positive:['增加余额必须大于 0','The amount to add must be greater than 0'],
+  adjust:['管理员调整','Admin adjustment'],reserve:['任务预留','Task reservation'],settle:['任务结算 / 退款','Task settlement / refund'],refund:['退款','Refund'],reserved:['预留','Reserved'],charged:['消费','Spent']
+};
+function walletText(key){return (WALLET_TEXT[key]||[key,key])[FC_LANG];}
+document.querySelectorAll('[data-wallet]').forEach(el=>el.textContent=walletText(el.dataset.wallet));
+function moneyToCents(raw, max=1000000000){
+  const value=String(raw).trim();
+  if(!/^\d+(?:\.\d{1,2})?$/.test(value)) throw new Error(walletText('invalid'));
+  const [whole,fraction='']=value.split('.');
+  const cents=Number(whole)*100+Number(fraction.padEnd(2,'0'));
+  if(!Number.isSafeInteger(cents)||cents<0||cents>max) throw new Error(walletText('invalid'));
+  return cents;
+}
+let billingLoaded=false;
+async function loadBillingPrices(){
+  try{
+    const d=await api('/api/admin/billing-prices');
+    $('#webParsePrice').value=(d.parse_price_cents/100).toFixed(2);
+    $('#webTranscriptPrice').value=(d.transcript_price_cents/100).toFixed(2);
+    for(const id of ['webParsePrice','webTranscriptPrice','billingPriceSave']) $('#'+id).disabled=false;
+    $('#billingPriceMessage').textContent=''; billingLoaded=true;
+  }catch(e){$('#billingPriceMessage').textContent=walletText('loadFailed');}
+}
+$('#billingPriceForm').onsubmit=async e=>{
+  e.preventDefault();const btn=$('#billingPriceSave');if(btn.disabled)return;
+  try{
+    const data={parse_price_cents:moneyToCents($('#webParsePrice').value,100000),transcript_price_cents:moneyToCents($('#webTranscriptPrice').value,100000)};
+    btn.disabled=true;btn.textContent=walletText('saving');$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=true;
+    await api('/api/admin/billing-prices',{method:'POST',body:JSON.stringify(data)});
+    $('#billingPriceMessage').textContent='';toast(walletText('saved'));
+  }catch(e){$('#billingPriceMessage').textContent=e.message;}
+  finally{btn.disabled=false;btn.textContent=walletText('savePrices');$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=false;}
+};
 async function loadUsers(){
-  let d; try{ d=await api('/api/admin/users'); }catch{ return; }
+  if(!billingLoaded) loadBillingPrices();
+  let d; try{ d=await api('/api/admin/users'); }catch(e){toast(walletText('loadFailed'),true); return; }
   $('#usersEmpty').style.display=d.users.length?'none':'';
   $('#usersBody').innerHTML=d.users.map(u=>`<tr>
     <td class="tnum">${u.id}</td><td>${esc(u.email)}</td>
     <td class="tnum">${ago2(u.created_at)}</td><td class="tnum">${ago2(u.last_login)}</td>
-    <td class="tnum">${u.parses}</td><td class="tnum">${u.keys}</td><td class="tnum">${yuan(u.spent)}</td>
+    <td class="tnum">${u.parses}</td><td class="tnum">${u.free_remaining}</td>
+    <td class="tnum">${yuan(u.balance_cents)} / ${yuan(u.reserved_cents)}</td><td class="tnum">${yuan(u.spent_cents)}</td><td class="tnum">${yuan(u.spent)}</td>
     <td>${u.disabled?'<span class="badge bad">停用</span>':'<span class="badge ok">正常</span>'}</td>
-    <td><button class="btn btn-ghost btn-sm" onclick="toggleUser(${u.id},${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button></td>
+    <td><button class="btn btn-ghost btn-sm" onclick="editUserWallet(${u.id})">${esc(walletText('edit'))}</button> <button class="btn btn-ghost btn-sm" onclick="toggleUser(${u.id},${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button></td>
   </tr>`).join('');
 }
 window.toggleUser = async (uid, dis) => { try{ await api('/api/admin/users/'+uid+'/toggle',{method:'POST',body:JSON.stringify({disabled:!!dis})}); toast('已更新'); loadUsers(); }catch(e){toast(e.message,true);} };
-$('#usersRefresh').onclick = loadUsers;
+$('#usersRefresh').onclick = ()=>{billingLoaded=false;loadUsers();};
+let walletUserId=null,walletVersion=null,walletAttempt=null,walletLoad=0,walletSaving=false;
+function walletBusy(busy){for(const id of ['walletSave','walletMode','walletAmount','walletNote','walletReload']) $('#'+id).disabled=busy;}
+function renderWalletLedger(rows){return rows.map(row=>`<tr><td>${esc(new Date(row.ts*1000).toLocaleString())}</td><td>${esc(walletText(row.event))}</td><td class="tnum">${row.balance_delta>0?'+':''}${yuan(row.balance_delta)}<small class="wallet-ledger-deltas">${esc(walletText('reserved'))} ${yuan(row.reserved_delta)} · ${esc(walletText('charged'))} ${yuan(row.spent_delta)}</small></td><td>${esc(row.note||'')}</td></tr>`).join('')||`<tr><td colspan="4">${esc(walletText('empty'))}</td></tr>`;}
+async function reloadWallet(){
+  const generation=++walletLoad;walletBusy(true);walletVersion=null;walletAttempt=null;
+  $('#walletSummary').textContent=walletText('loading');$('#walletMessage').textContent='';
+  try{
+    const d=await api('/api/admin/users/'+walletUserId+'/wallet');
+    if(generation!==walletLoad)return;
+    walletVersion=d.wallet_version;
+    $('#walletSummary').textContent=d.email+' · '+walletText('balance')+': '+yuan(d.balance_cents)+' / '+yuan(d.reserved_cents);
+    $('#walletLedger').innerHTML=renderWalletLedger(d.ledger);
+    walletBusy(false);
+  }catch(e){if(generation===walletLoad){$('#walletMessage').textContent=walletText('loadFailed');$('#walletReload').disabled=false;}}
+}
+window.editUserWallet=uid=>{
+  if(walletSaving)return;
+  walletUserId=uid;$('#walletForm').reset();$('#walletLedger').innerHTML='';
+  if(!$('#walletDialog').open)$('#walletDialog').showModal();
+  reloadWallet();
+};
+$('#walletReload').onclick=reloadWallet;
+$('#walletCancel').onclick=()=>$('#walletDialog').close();
+$('#walletDialog').addEventListener('cancel',e=>{if(walletSaving)e.preventDefault();});
+$('#walletDialog').addEventListener('close',()=>{walletLoad++;walletVersion=null;walletAttempt=null;});
+$('#walletForm').onsubmit=async e=>{
+  e.preventDefault();if(walletVersion===null||$('#walletSave').disabled)return;
+  try{
+    const cents=moneyToCents($('#walletAmount').value),mode=$('#walletMode').value;
+    if(mode==='add'&&!cents)throw new Error(walletText('positive'));
+    const data={mode,cents,expected_version:walletVersion,note:$('#walletNote').value};
+    const signature=JSON.stringify(data);
+    if(walletAttempt?.signature!==signature)walletAttempt={signature,request_id:crypto.randomUUID()};
+    data.request_id=walletAttempt.request_id;
+    walletSaving=true;walletBusy(true);$('#walletCancel').disabled=true;$('#walletSave').textContent=walletText('saving');
+    await api('/api/admin/users/'+walletUserId+'/wallet',{method:'POST',body:JSON.stringify(data)});
+    toast(walletText('saved'));$('#walletDialog').close();loadUsers();
+  }catch(e){$('#walletMessage').textContent=e.message;}
+  finally{walletSaving=false;walletBusy(false);$('#walletCancel').disabled=false;$('#walletSave').textContent=walletText('save');}
+};
 
 /* 日志 */
 async function loadLogs(){

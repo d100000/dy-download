@@ -95,7 +95,7 @@ footer{margin-top:64px; padding:24px 0 36px; border-top:1px solid var(--border);
     </details>
     <details class="faq-item">
       <summary data-i18n="q2">文案提取收费吗？</summary>
-      <p data-i18n="a2">注册用户每天有免费提取次数（默认 5 次，以页面显示为准）。同一视频全站只提取一次，再次打开命中缓存不重复扣次。</p>
+      <p data-i18n="a2">注册用户每天有免费提取次数（默认 5 次，以页面显示为准）；用完后按页面单价使用账户余额，失败退回，命中缓存不重复收费。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="q3">我的链接会发给第三方吗？</summary>
@@ -130,7 +130,7 @@ const I18N = { en: {
   q1:"What is Douyin transcript extraction?",
   a1:"It turns a video's speech into text and keeps the post's title and caption — built for collecting scripts and content analysis. Speech-to-text is an opt-in async job, usually done in 1–3 minutes.",
   q2:"Is transcript extraction free?",
-  a2:"Signed-in users get a free daily quota (5/day by default, as shown on the page). Each video is extracted only once site-wide; reopening a cached result costs nothing.",
+  a2:"Signed-in users get a free daily quota (5/day by default, as shown on the page). After that, the displayed price is charged to your account balance. Failures are refunded and cached results cost nothing.",
   q3:"Is my link sent to a third party?",
   a3:"Public post links are sent to the configured third-party content parsing service; missing Douyin information is supplemented through official interfaces on the server. Basic parsing does not request a speech transcript by default. Speech-to-text is requested only when you actively turn on Transcript. Only result metadata is kept — never the video file.",
   q4:"How long does it take?",

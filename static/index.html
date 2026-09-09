@@ -771,7 +771,7 @@ footer{
     </details>
     <details class="faq-item">
       <summary data-i18n="faq_q8">怎么提取视频文案（语音转文字）？</summary>
-      <p data-i18n-html="faq_a8">解析后打开结果卡上的<strong>「获取文案（语音转文字）」</strong>开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，注册用户每天有免费提取次数；同一视频全站只提取一次，命中缓存不重复扣次。详见<a href="/transcript">文案提取</a>。</p>
+      <p data-i18n-html="faq_a8">解析后打开结果卡上的<strong>「获取文案（语音转文字）」</strong>开关即可自动提取，通常 1–3 分钟完成，可复制全文或试听音频。该功能需要登录，每天免费次数用完后按页面显示的单价使用账户余额；失败退回，命中缓存不重复收费。详见<a href="/transcript">文案提取</a>。</p>
     </details>
   </div>
   </details>
@@ -826,7 +826,7 @@ const I18N = {
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
     faq_q5:"Is there an API for bulk use?", faq_a5:"Yes. After signing in, create a key in the API console and submit links in bulk via the async API, billed per request.",
-    faq_q8:"How do I extract the transcript of a Douyin video (speech to text)?", faq_a8:"After parsing, switch on <strong>“Transcript (speech to text)”</strong> on the result card — extraction usually takes 1–3 minutes, and you can copy the full text or listen to the audio. Sign-in is required; signed-in users get a free daily quota, and each video is extracted only once site-wide (cached results cost nothing). See the <a href=\"/transcript\">transcript page</a>.",
+    faq_q8:"How do I extract the transcript of a Douyin video (speech to text)?", faq_a8:"After parsing, switch on <strong>“Transcript (speech to text)”</strong> on the result card — extraction usually takes 1–3 minutes, and you can copy the full text or listen to the audio. Sign-in is required. After daily free uses, your balance is charged at the displayed price. Failures are refunded and cached results cost nothing. See the <a href=\"/transcript\">transcript page</a>.",
     footer1:"For personal use and authorized backups · Copyright belongs to creators",
     footer2:"No video or image files stored",
     footer_version:"Version",
@@ -960,13 +960,25 @@ function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_anonId)
 /* 登录态与文案提取额度（refreshQuota/refreshUser 维护，结果卡开关用） */
 let _loggedIn = false;
 let _atc = {enabled:false, daily:0, remaining:0};
+let _billing = {wallet:null,parse_price_cents:3,transcript_price_cents:3};
+
+function billingHint(billing, purpose='parse'){
+  if(!billing?.wallet)return '';
+  const money=c=>'¥'+(Number(c||0)/100).toFixed(2);
+  const wallet=billing.wallet,price=purpose==='transcript'?billing.transcript_price_cents:billing.parse_price_cents;
+  const reserve=wallet.reserved_cents>0?(LANG==='en'?` · Reserved ${money(wallet.reserved_cents)}`:` · 预留 ${money(wallet.reserved_cents)}`):'';
+  return LANG==='en'
+    ? ` · Balance ${money(wallet.balance_cents)}${reserve} · After free uses: ${money(price)}/use; failures refunded`
+    : ` · 余额 ${money(wallet.balance_cents)}${reserve} · 免费用完后 ${money(price)}/次，失败退回`;
+}
 
 async function refreshQuota(){
   try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
-    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily);
+    if(q.billing)_billing=q.billing;
+    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily)+billingHint(_billing);
     if (q.transcript || q.atc) _atc = q.transcript || q.atc;
-    if (q.user) _loggedIn = true;
+    _loggedIn = Boolean(q.user);
     syncTranscriptUI();
   } catch {}
 }
@@ -1447,7 +1459,7 @@ function syncTranscriptUI(){
   if (!_atc.enabled){ box.style.display = 'none'; return; }
   box.style.display = '';
   note.textContent = _loggedIn
-    ? (t('ts_quota') || ((r,d)=>`今日剩余 ${r}/${d} 次`))(_atc.remaining, _atc.daily)
+    ? (t('ts_quota') || ((r,d)=>`今日剩余 ${r}/${d} 次`))(_atc.remaining, _atc.daily)+billingHint(_billing,'transcript')+(LANG==='en'?' · Cached transcripts are free':' · 已缓存文案免费')
     : (t('ts_need_login') || `登录后可用 · 每天 ${_atc.daily || 5} 次`);
 }
 result.addEventListener('click', (e) => {
@@ -1513,8 +1525,8 @@ async function pollTranscript(itemId, box, n){
     if (!box.isConnected) return;
     try {
       const d = await (await fetch('/api/transcript?item_id=' + encodeURIComponent(itemId))).json();
-      if (d.state === 'ready'){ renderTranscript(box, d); return; }
-      if (d.state === 'failed'){ _tsSetBusy(box, false);
+      if (d.state === 'ready'){ renderTranscript(box, d); refreshQuota(); return; }
+      if (d.state === 'failed'){ _tsSetBusy(box, false); refreshQuota();
         box.querySelector('.ts-body').innerHTML =
         `<span class="ts-note">${esc(d.error || '提取失败，请稍后重试')}</span>`; return; }
       pollTranscript(itemId, box, n + 1);

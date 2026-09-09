@@ -1,5 +1,8 @@
 {
   "en": {
+    "今日免费次数已用完，账户余额不足，请联系管理员充值后重试": "Your daily free uses are exhausted and your balance is insufficient. Contact the administrator to add funds.",
+    "免费次数及账户余额不足，未解析": "Not parsed: insufficient free uses and account balance.",
+    "账户余额已变化，请刷新后重试": "The account balance has changed. Refresh it and try again.",
     "下载": "Download",
     "下载视频": "Download video",
     "⬇ 下载视频": "⬇ Download video",

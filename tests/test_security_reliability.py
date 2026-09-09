@@ -2090,14 +2090,15 @@ class AtcEnhancementTests(unittest.TestCase):
             "SELECT COUNT(*) FROM atc_jobs WHERE item_id='7003'", (), "one")[0]
         self.assertEqual(n, 0)
 
-    def test_daily_limit_and_429(self):
+    def test_daily_limit_without_wallet_balance_returns_402(self):
         self._enable(daily="2")
         for i in range(2):
             r = self.client.post("/api/atc/transcript",
                                  json={"item_id": f"71{i}"})
             self.assertEqual(r.status_code, 200)
         r = self.client.post("/api/atc/transcript", json={"item_id": "7199"})
-        self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.status_code, 402)
+        self.assertIn("余额不足", r.json()["error"])
         # 超限不产生新任务
         n = server.db_exec(
             "SELECT COUNT(*) FROM atc_jobs WHERE item_id='7199'", (), "one")[0]

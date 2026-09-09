@@ -50,13 +50,13 @@ from urllib import request as urlreq
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response, StreamingResponse)
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 # ---------------------------------------------------------------- 常量与存储
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.26.0"
+APP_VERSION = "1.27.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -212,6 +212,13 @@ CREATE TABLE IF NOT EXISTS users(
 CREATE TABLE IF NOT EXISTS user_sessions(
   token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
   created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS wallet_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+  event TEXT NOT NULL, event_key TEXT NOT NULL, request_hash TEXT,
+  balance_delta INTEGER DEFAULT 0, reserved_delta INTEGER DEFAULT 0,
+  spent_delta INTEGER DEFAULT 0, note TEXT DEFAULT '',
+  UNIQUE(user_id,event_key)
 );
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
@@ -448,7 +455,15 @@ with _db_lock:
     _ensure_columns("share_events", (
         ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER"),
         ("next_src", "TEXT"), ("event_key", "TEXT")))
-    _ensure_columns("users", (("api_trial_granted_cents", "INTEGER DEFAULT 0"),))
+    _ensure_columns("users", (
+        ("api_trial_granted_cents", "INTEGER DEFAULT 0"),
+        ("balance_cents", "INTEGER NOT NULL DEFAULT 0"),
+        ("reserved_cents", "INTEGER NOT NULL DEFAULT 0"),
+        ("spent_cents", "INTEGER NOT NULL DEFAULT 0"),
+        ("wallet_version", "INTEGER NOT NULL DEFAULT 0")))
+    _ensure_columns("quota_reservations", (
+        ("user_id", "INTEGER"), ("free_units", "INTEGER"),
+        ("price_cents", "INTEGER NOT NULL DEFAULT 0")))
     _ensure_columns("api_keys", (
         ("reserved_cents", "INTEGER DEFAULT 0"), ("deleted_at", "INTEGER")))
     _ensure_columns("jobs", (
@@ -471,7 +486,8 @@ with _db_lock:
         ("ready_at", "INTEGER")))
     _ensure_columns("atc_cache", (("work_url", "TEXT"),))
     _ensure_columns("atc_jobs", (
-        ("lease_owner", "TEXT"), ("lease_until", "INTEGER")))
+        ("lease_owner", "TEXT"), ("lease_until", "INTEGER"),
+        ("quota_reservation_id", "TEXT")))
     _c.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_idem ON jobs(key,request_id) "
         "WHERE request_id IS NOT NULL")
@@ -641,6 +657,37 @@ def quota_status(request: Request):
     return limit, used, max(0, limit - used)
 
 
+def _web_price_in_conn(conn, purpose: str = "parse") -> int:
+    key = "transcript_price_cents" if purpose == "transcript" else "web_parse_price_cents"
+    row = conn.execute("SELECT v FROM app_settings WHERE k=?", (key,)).fetchone()
+    try:
+        return max(0, min(100000, int(row[0]))) if row else 3
+    except (TypeError, ValueError):
+        return 3
+
+
+def _wallet_change(conn, uid: int, event: str, event_key: str,
+                   balance: int = 0, reserved: int = 0, spent: int = 0,
+                   note: str = "", request_hash: str = "") -> None:
+    """仅在写事务内调用；余额与不可重复的流水一起提交。"""
+    changed = conn.execute(
+        "UPDATE users SET balance_cents=balance_cents+?,reserved_cents=reserved_cents+?,"
+        "spent_cents=spent_cents+?,wallet_version=wallet_version+1 "
+        "WHERE id=? AND balance_cents+?>=0 AND reserved_cents+?>=0 AND spent_cents+?>=0",
+        (balance, reserved, spent, uid, balance, reserved, spent)).rowcount
+    if changed != 1:
+        raise ApiError(409, "账户余额已变化，请刷新后重试")
+    conn.execute(
+        "INSERT INTO wallet_ledger(user_id,ts,event,event_key,request_hash,"
+        "balance_delta,reserved_delta,spent_delta,note) VALUES(?,?,?,?,?,?,?,?,?)",
+        (uid, int(time.time()), event, event_key, request_hash, balance, reserved, spent, note))
+
+
+def _wallet_public(row) -> dict:
+    return {k: int(row[k] or 0) for k in
+            ("balance_cents", "reserved_cents", "spent_cents", "wallet_version")}
+
+
 def _reserve_quota_in_conn(conn, day: int, subjects: list[str], limit: int,
                            n: int = 1, partial: bool = False,
                            endpoint: str = "web") -> dict:
@@ -651,25 +698,42 @@ def _reserve_quota_in_conn(conn, day: int, subjects: list[str], limit: int,
         (day, *subjects)).fetchall()
     used = max((int(r[0]) for r in rows), default=0)
     available = max(0, limit - used)
-    take = min(n, available) if partial else (n if n <= available else 0)
+    # 同一事务读取价格和余额：免费优先，余额只为超出免费部分预授权。
+    subject = subjects[0] if len(subjects) == 1 else ""
+    match = re.fullmatch(r"(?:atc:)?user:(\d+)", subject)
+    uid = int(match[1]) if match else None
+    user = conn.execute("SELECT * FROM users WHERE id=? AND disabled=0", (uid,)).fetchone() if uid else None
+    price = _web_price_in_conn(conn, "transcript" if endpoint == "atc_transcript" else "parse")
+    affordable = (int(user["balance_cents"]) // price if price else n) if user else 0
+    capacity = available + affordable
+    take = min(n, capacity) if partial else (n if n <= capacity else 0)
+    free = min(take, available)
+    charge = (take - free) * price
     reservation_id = ""
     if take:
         for subject in subjects:
             conn.execute(
                 "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,?) "
                 "ON CONFLICT(day,subject) DO UPDATE SET count=count+excluded.count",
-                (day, subject, take))
+                (day, subject, free))
         reservation_id = "qr_" + secrets.token_urlsafe(12)
         now = int(time.time())
         conn.execute(
             "INSERT INTO quota_reservations("
-            "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
-            ") VALUES(?,?,?,?,0,'pending',?,?,?)",
+            "id,day,subjects,units,committed_units,status,endpoint,created,lease_until,"
+            "user_id,free_units,price_cents"
+            ") VALUES(?,?,?,?,0,'pending',?,?,?,?,?,?)",
             (reservation_id, day, json.dumps(subjects, ensure_ascii=False),
-             take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL))
+             take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL,
+             uid if user else None, free, price))
+        if charge:
+            _wallet_change(conn, uid, "reserve", reservation_id + ":reserve",
+                           balance=-charge, reserved=charge)
     return {"ok": take == n, "reserved": take, "limit": limit,
-            "used_before": used, "used_after": used + take,
-            "remaining": max(0, limit - used - take),
+            "used_before": used, "used_after": used + free,
+            "remaining": max(0, limit - used - free),
+            "free_units": free, "price_cents": price, "reserved_cents": charge,
+            "insufficient_balance": bool(uid and take < n),
             "day": day, "subjects": subjects, "id": reservation_id}
 
 
@@ -706,11 +770,17 @@ def _settle_quota_in_conn(conn, reservation_id: str,
         return None
     units = int(row["units"])
     committed = min(units, max(0, int(committed_units)))
-    refund = units - committed
+    free = units if row["free_units"] is None else int(row["free_units"])
+    refund = free - min(free, committed)
     for subject in json.loads(row["subjects"] or "[]"):
         conn.execute(
             "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
             (refund, int(row["day"]), subject))
+    held = (units - free) * int(row["price_cents"])
+    cost = max(0, committed - free) * int(row["price_cents"])
+    if held:
+        _wallet_change(conn, row["user_id"], "settle", reservation_id + ":settle",
+                       balance=held - cost, reserved=-held, spent=cost)
     status = "settled" if committed else "refunded"
     conn.execute(
         "UPDATE quota_reservations SET committed_units=?,status=?,settled=? "
@@ -730,10 +800,15 @@ def _admin_refund_quota_in_conn(conn, reservation_id: str) -> Optional[int]:
     if not row:
         return None
     committed = int(row["committed_units"] or 0)
+    free = int(row["units"]) if row["free_units"] is None else int(row["free_units"])
+    cost = max(0, committed - free) * int(row["price_cents"])
     for subject in json.loads(row["subjects"] or "[]"):
         conn.execute(
             "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
-            (committed, int(row["day"]), subject))
+            (min(free, committed), int(row["day"]), subject))
+    if cost:
+        _wallet_change(conn, row["user_id"], "refund", reservation_id + ":admin_refund",
+                       balance=cost, spent=-cost)
     changed = conn.execute(
         "UPDATE quota_reservations SET committed_units=0,status='refunded',settled=? "
         "WHERE id=? AND status='settled' AND COALESCE(committed_units,0)>0",
@@ -784,17 +859,13 @@ def _refund_stale_quota_reservations() -> int:
                 "WHERE status='pending' AND lease_until<? "
                 "AND NOT EXISTS(SELECT 1 FROM shares s "
                 "WHERE s.quota_reservation_id=quota_reservations.id "
-                "AND s.parse_status IN ('pending','processing'))",
+                "AND s.parse_status IN ('pending','processing')) "
+                "AND NOT EXISTS(SELECT 1 FROM atc_jobs j "
+                "WHERE j.quota_reservation_id=quota_reservations.id "
+                "AND j.status IN ('pending','submitting','submitted'))",
                 (now,)).fetchall()
             for row in rows:
-                for subject in json.loads(row["subjects"] or "[]"):
-                    conn.execute(
-                        "UPDATE usage_daily SET count=MAX(0,count-?) "
-                        "WHERE day=? AND subject=?",
-                        (int(row["units"]), int(row["day"]), subject))
-                conn.execute(
-                    "UPDATE quota_reservations SET committed_units=0,status='refunded',settled=? "
-                    "WHERE id=? AND status='pending'", (now, row["id"]))
+                _settle_quota_in_conn(conn, row["id"], 0)
                 refunded += 1
             conn.commit()
         except Exception:
@@ -5653,7 +5724,7 @@ def api_share_create_async(body: AsyncShareBody, request: Request):
                     conn, _today(), subjects, limit, 1, False,
                     "share_parse_async")
                 if not reservation["ok"]:
-                    raise _quota_error(limit)
+                    raise _quota_error(limit, reservation)
                 conn.execute(
                     "INSERT INTO shares("
                     "id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
@@ -5734,7 +5805,7 @@ def api_share_create(body: ShareBody, request: Request):
             raise ApiError(400, "解析结果已过期，请重新粘贴链接后再生成分享页")
         reservation = reserve_quota(request, 1, endpoint="share_parse")
         if not reservation["ok"]:
-            raise _quota_error(reservation["limit"])
+            raise _quota_error(reservation["limit"], reservation)
         try:
             data = _parse_cached(body.text)
         except Exception:
@@ -7254,7 +7325,8 @@ def _atc_url_fresh(row: Optional[dict], ttl: int) -> bool:
     return 0 <= age < max(0.0, lifetime)
 
 
-def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> bool:
+def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play",
+                 quota_reservation_id: str = "") -> bool:
     """入队一个 ATC 任务。幂等：同 item_id 有在途任务或缓存仍新鲜 → 不再入队。"""
     cfg = _atc_cfg()
     if not cfg["enabled"] or not item_id:
@@ -7295,9 +7367,9 @@ def _atc_enqueue(item_id: str, work_url: str = "", purpose: str = "play") -> boo
                 conn.rollback()
                 return False
             conn.execute(
-                "INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
-                "VALUES(?,?,?,'pending',?,?)",
-                (item_id, saved_work_url[:1000], purpose, now, now))
+                "INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated,quota_reservation_id) "
+                "VALUES(?,?,?,'pending',?,?,?)",
+                (item_id, saved_work_url[:1000], purpose, now, now, quota_reservation_id or None))
             conn.commit()
             return True
         except Exception:
@@ -7452,10 +7524,25 @@ def _atc_claim_update(job: dict, status: str, *, task_id: str = "",
     fields.append("error=?")
     values.append(str(error)[:300] if error else None)
     values.extend([job["id"], job["lease_owner"]])
-    return bool(db_exec(
-        f"UPDATE atc_jobs SET {','.join(fields)} WHERE id=? "
-        "AND status IN ('submitting','submitted') AND lease_owner=?",
-        tuple(values), "rowcount"))
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                f"UPDATE atc_jobs SET {','.join(fields)} WHERE id=? "
+                "AND status IN ('submitting','submitted') AND lease_owner=?",
+                tuple(values)).rowcount
+            if changed and status in ("done", "failed"):
+                row = conn.execute("SELECT quota_reservation_id FROM atc_jobs WHERE id=?",
+                                   (job["id"],)).fetchone()
+                _settle_quota_in_conn(conn, row[0], 1 if status == "done" else 0)
+            conn.commit()
+            return bool(changed)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 def _atc_store_job_result(job: dict, data: dict) -> None:
@@ -7612,6 +7699,11 @@ def _prepare_atc_jobs() -> None:
                 "lease_owner=NULL,lease_until=NULL WHERE status IN "
                 "('pending','submitting','submitted') AND created<?",
                 (now, now - ATC_JOB_TIMEOUT))
+            for row in conn.execute(
+                    "SELECT j.quota_reservation_id,j.status FROM atc_jobs j "
+                    "JOIN quota_reservations q ON q.id=j.quota_reservation_id "
+                    "WHERE j.status IN ('done','failed') AND q.status='pending'").fetchall():
+                _settle_quota_in_conn(conn, row[0], 1 if row[1] == "done" else 0)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -7652,6 +7744,8 @@ def _stop_atc_workers() -> None:
 
 def _atc_cleanup() -> int:
     """缓存按保留期清理；终态任务记录保留 7 天。由 _sweeper 调用。"""
+    # 服务关闭或 worker 停止时，也必须释放超时文案的预留金额。
+    _prepare_atc_jobs()
     now = int(time.time())
     n = db_exec("DELETE FROM atc_cache WHERE updated<?",
                 (now - DATA_RETENTION_DAYS * 86400,), "rowcount") or 0
@@ -7724,42 +7818,21 @@ def _atc_transcript_status(user_id: int) -> tuple[int, int, int]:
 
 
 def _atc_transcript_reserve(user_id: int) -> dict:
-    """原子预占一次文案提取额度（与 reserve_quota 同款 BEGIN IMMEDIATE 模式）。"""
     cfg = _atc_cfg()
-    day = _today()
-    subject = f"atc:user:{user_id}"
     with _db_lock:
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT count FROM usage_daily WHERE day=? AND subject=?",
-                (day, subject)).fetchone()
-            used = int(row[0]) if row else 0
-            take = 1 if used < cfg["transcript_daily"] else 0
-            reservation_id = ""
-            if take:
-                conn.execute(
-                    "INSERT INTO usage_daily(day,subject,count) VALUES(?,?,1) "
-                    "ON CONFLICT(day,subject) DO UPDATE SET count=count+1",
-                    (day, subject))
-                reservation_id = "qr_" + secrets.token_urlsafe(12)
-                now = int(time.time())
-                conn.execute(
-                    "INSERT INTO quota_reservations("
-                    "id,day,subjects,units,committed_units,status,endpoint,created,lease_until"
-                    ") VALUES(?,?,?,1,0,'pending','atc_transcript',?,?)",
-                    (reservation_id, day, json.dumps([subject]), now,
-                     now + QUOTA_RESERVATION_TTL))
+            reservation = _reserve_quota_in_conn(
+                conn, _today(), [f"atc:user:{user_id}"], cfg["transcript_daily"],
+                endpoint="atc_transcript")
             conn.commit()
+            return reservation
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
-    return {"ok": bool(take), "id": reservation_id,
-            "limit": cfg["transcript_daily"], "used_after": used + take,
-            "remaining": max(0, cfg["transcript_daily"] - used - take)}
 
 
 class AtcTranscriptBody(BaseModel):
@@ -7787,11 +7860,16 @@ def api_atc_transcript(body: AtcTranscriptBody, request: Request):
                 "audio_url": cached.get("audio_url") or "",
                 "duration": cached.get("duration"), "cached": True,
                 "remaining": remaining, "daily": limit}
+    if db_exec("SELECT id FROM atc_jobs WHERE item_id=? AND purpose='transcript' "
+               "AND status IN ('pending','submitting','submitted')", (item_id,), "one"):
+        limit, used, remaining = _atc_transcript_status(u["id"])
+        return {"state": "processing", "cached": False, "remaining": remaining, "daily": limit}
     reservation = _atc_transcript_reserve(u["id"])
     if not reservation["ok"]:
-        raise ApiError(429, f"今日文案提取次数已用完（每天 {reservation['limit']} 次）")
+        raise (_quota_error(reservation["limit"], reservation) if reservation.get("insufficient_balance")
+               else ApiError(429, f"今日文案提取次数已用完（每天 {reservation['limit']} 次）"))
     try:
-        enqueued = _atc_enqueue(item_id, purpose="transcript")
+        enqueued = _atc_enqueue(item_id, purpose="transcript", quota_reservation_id=reservation["id"])
     except Exception:
         release_quota(reservation)
         raise
@@ -7807,8 +7885,14 @@ def api_atc_transcript(body: AtcTranscriptBody, request: Request):
             limit, used, remaining = _atc_transcript_status(u["id"])
             return {"state": "processing", "cached": False,
                     "remaining": remaining, "daily": limit}
+        cached = _atc_cache_get(item_id)
+        if cached and cached.get("text_content"):
+            limit, used, remaining = _atc_transcript_status(u["id"])
+            return {"state": "ready", "text": cached["text_content"], "cached": True,
+                    "audio_url": cached.get("audio_url") or "", "duration": cached.get("duration"),
+                    "remaining": remaining, "daily": limit}
         raise ApiError(503, "文案任务暂时无法提交，请稍后重试")
-    settle_quota(reservation, 1)
+    # 由任务成功/失败终态原子结算；提交成功只预占，不提前收费。
     return {"state": "processing", "cached": False,
             "remaining": reservation["remaining"], "daily": reservation["limit"]}
 
@@ -7851,7 +7935,9 @@ class ParseBody(BaseModel):
     text: str = Field(min_length=1, max_length=PARSE_TEXT_MAX)
 
 
-def _quota_error(limit: int):
+def _quota_error(limit: int, reservation: Optional[dict] = None):
+    if reservation and reservation.get("insufficient_balance"):
+        return ApiError(402, "今日免费次数已用完，账户余额不足，请联系管理员充值后重试")
     return ApiError(429, f"今日免费次数已用完（每天 {limit} 次）。注册登录后每天可用 "
                          f"{FREE_USER_DAILY} 次，或使用开放 API 按量调用。")
 
@@ -7860,7 +7946,7 @@ def _quota_error(limit: int):
 def api_parse(body: ParseBody, request: Request):
     reservation = reserve_quota(request, 1, endpoint="parse")
     if not reservation["ok"]:
-        raise _quota_error(reservation["limit"])
+        raise _quota_error(reservation["limit"], reservation)
     try:
         data = _parse_cached(body.text)
     except Exception:
@@ -8591,7 +8677,7 @@ def api_parse_batch(body: BatchBody, request: Request):
     reservation = reserve_quota(
         request, len(uniq), partial=True, endpoint="parse_batch")
     if reservation["reserved"] <= 0:
-        raise _quota_error(reservation["limit"])
+        raise _quota_error(reservation["limit"], reservation)
     limit = reservation["limit"]
     process = uniq[:reservation["reserved"]]
     over = uniq[reservation["reserved"]:]   # 超额部分不解析
@@ -8610,7 +8696,8 @@ def api_parse_batch(body: BatchBody, request: Request):
             log_request(request, "web", l, False)
     for l in over:
         out.append({"ok": False, "link": l,
-                    "error": f"今日免费次数不足未解析（每天 {limit} 次，登录后 {FREE_USER_DAILY} 次）"})
+                    "error": ("免费次数及账户余额不足，未解析" if reservation.get("insufficient_balance")
+                              else f"今日免费次数不足未解析（每天 {limit} 次，登录后 {FREE_USER_DAILY} 次）")})
     settle_quota(reservation, spent)
     remaining = quota_status(request)[2]
     return {"count": len(out), "results": out,
@@ -9640,8 +9727,10 @@ def admin_analytics(request: Request):
     uv_today = one("SELECT COUNT(DISTINCT ip) FROM page_views WHERE ts>=?", (day0,))
     web_today = one("SELECT COUNT(*) FROM request_logs WHERE ok=1 AND ts>=?", (day0,))
     api_today = one("SELECT COUNT(*) FROM api_logs WHERE ok=1 AND ts>=?", (day0,))
-    rev_today = one("SELECT COALESCE(SUM(cost_cents),0) FROM api_logs WHERE ts>=?", (day0,))
-    rev_total = one("SELECT COALESCE(SUM(cost_cents),0) FROM api_logs")
+    rev_today = (one("SELECT COALESCE(SUM(cost_cents),0) FROM api_logs WHERE ts>=?", (day0,))
+                 + one("SELECT COALESCE(SUM(spent_delta),0) FROM wallet_ledger WHERE ts>=?", (day0,)))
+    rev_total = (one("SELECT COALESCE(SUM(cost_cents),0) FROM api_logs")
+                 + one("SELECT COALESCE(SUM(spent_cents),0) FROM users"))
     # 回访率：注册后又回来过（last_login 比注册晚 1 天以上）
     returned = one("SELECT COUNT(*) FROM users WHERE last_login-created_at>=86400")
     retention = round(returned / total_users * 100, 1) if total_users else 0.0
@@ -9660,7 +9749,9 @@ def admin_analytics(request: Request):
             "uv": _series("SELECT ts/86400, COUNT(DISTINCT ip) FROM page_views WHERE ts>=? GROUP BY 1"),
             "parses": _series("SELECT ts/86400, COUNT(*) FROM request_logs WHERE ok=1 AND ts>=? GROUP BY 1"),
             "api_calls": _series("SELECT ts/86400, COUNT(*) FROM api_logs WHERE ok=1 AND ts>=? GROUP BY 1"),
-            "revenue": _series("SELECT ts/86400, COALESCE(SUM(cost_cents),0) FROM api_logs WHERE ts>=? GROUP BY 1"),
+            "revenue": _series("SELECT ts/86400, COALESCE(SUM(cost),0) FROM "
+                               "(SELECT ts,cost_cents AS cost FROM api_logs UNION ALL "
+                               "SELECT ts,spent_delta AS cost FROM wallet_ledger) WHERE ts>=? GROUP BY 1"),
         },
     }
 
@@ -9670,11 +9761,117 @@ def admin_users(request: Request, limit: int = 100):
     _require_admin(request)
     rows = db_exec(
         "SELECT u.id,u.email,u.created_at,u.last_login,u.disabled,u.reg_ip,"
+        "u.balance_cents,u.reserved_cents,u.spent_cents,u.wallet_version,"
+        "MAX(0,? - COALESCE((SELECT count FROM usage_daily d "
+        "WHERE d.day=? AND d.subject='user:'||u.id),0)) AS free_remaining,"
         "(SELECT COUNT(*) FROM request_logs r WHERE r.user_id=u.id AND r.ok=1) AS parses,"
         "(SELECT COALESCE(SUM(spent_cents),0) FROM api_keys k WHERE k.user_id=u.id) AS spent,"
         "(SELECT COUNT(*) FROM api_keys k WHERE k.user_id=u.id) AS keys "
-        "FROM users u ORDER BY u.created_at DESC LIMIT ?", (min(limit, 500),), "all")
+        "FROM users u ORDER BY u.created_at DESC LIMIT ?",
+        (FREE_USER_DAILY, _today(), max(1, min(limit, 500))), "all")
     return {"users": [dict(r) for r in rows]}
+
+
+class WalletEditBody(BaseModel):
+    mode: str
+    cents: StrictInt = Field(ge=0, le=1000000000)
+    expected_version: StrictInt = Field(ge=0)
+    request_id: str = Field(min_length=8, max_length=80)
+    note: str = Field(default="", max_length=200)
+
+
+@app.get("/api/admin/users/{uid}/wallet")
+def admin_user_wallet(uid: int, request: Request):
+    _require_admin(request)
+    row = db_exec("SELECT * FROM users WHERE id=?", (uid,), "one")
+    if not row:
+        raise ApiError(404, "用户不存在")
+    logs = db_exec("SELECT ts,event,balance_delta,reserved_delta,spent_delta,note "
+                   "FROM wallet_ledger WHERE user_id=? ORDER BY id DESC LIMIT 30", (uid,), "all")
+    return {"user_id": uid, "email": row["email"], **_wallet_public(row),
+            "ledger": [dict(r) for r in logs]}
+
+
+@app.post("/api/admin/users/{uid}/wallet")
+def admin_edit_wallet(uid: int, body: WalletEditBody, request: Request):
+    _require_admin(request)
+    if body.mode not in ("add", "set") or (body.mode == "add" and body.cents == 0):
+        raise ApiError(400, "请输入有效的余额调整方式和金额")
+    request_hash = hashlib.sha256(json.dumps(
+        [body.mode, body.cents, body.expected_version, body.note], ensure_ascii=False).encode()).hexdigest()
+    event_key = "admin:" + body.request_id
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise ApiError(404, "用户不存在")
+            previous = conn.execute("SELECT request_hash FROM wallet_ledger WHERE user_id=? AND event_key=?",
+                                    (uid, event_key)).fetchone()
+            if previous:
+                if previous[0] != request_hash:
+                    raise ApiError(409, "请刷新余额后重新提交")
+                conn.commit()
+                return {"ok": True, **_wallet_public(row)}
+            if row["wallet_version"] != body.expected_version:
+                raise ApiError(409, "账户余额已变化，请刷新后重试")
+            delta = body.cents if body.mode == "add" else body.cents - row["balance_cents"]
+            if row["balance_cents"] + delta > 1000000000:
+                raise ApiError(400, "余额超过可设置上限")
+            _wallet_change(conn, uid, "adjust", event_key, balance=delta,
+                           note=body.note, request_hash=request_hash)
+            updated = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            conn.commit()
+            return {"ok": True, **_wallet_public(updated)}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+class BillingPriceBody(BaseModel):
+    parse_price_cents: StrictInt = Field(ge=0, le=100000)
+    transcript_price_cents: StrictInt = Field(ge=0, le=100000)
+
+
+def _web_billing_status(user_id: Optional[int] = None) -> dict:
+    with _db_lock:
+        conn = _db()
+        try:
+            prices = {"parse_price_cents": _web_price_in_conn(conn),
+                      "transcript_price_cents": _web_price_in_conn(conn, "transcript")}
+            row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone() if user_id else None
+            return {**prices, "wallet": _wallet_public(row) if row else None}
+        finally:
+            conn.close()
+
+
+@app.get("/api/admin/billing-prices")
+def admin_billing_prices(request: Request):
+    _require_admin(request)
+    return _web_billing_status()
+
+
+@app.post("/api/admin/billing-prices")
+def admin_save_billing_prices(body: BillingPriceBody, request: Request):
+    _require_admin(request)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for key, value in (("web_parse_price_cents", body.parse_price_cents),
+                               ("transcript_price_cents", body.transcript_price_cents)):
+                conn.execute("INSERT INTO app_settings(k,v) VALUES(?,?) "
+                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, str(value)))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"ok": True, **_web_billing_status()}
 
 
 class UserToggleBody(BaseModel):
@@ -10980,6 +11177,7 @@ def api_quota(request: Request):
         # 匿名也返回真实每日上限（前端提示"登录后每天 N 次"要用），剩余恒 0
         atc_limit, atc_remaining = (cfg["transcript_daily"] if atc_on else 0), 0
     return {"limit": limit, "used": used, "remaining": remaining,
+            "billing": _web_billing_status(u["id"] if u else None),
             "user_daily": FREE_USER_DAILY,
             "user": {"email": u["email"]} if u else None,
             "transcript": {"enabled": atc_on,
@@ -11045,7 +11243,8 @@ def auth_me(request: Request):
     u = current_user(request)
     if not u:
         return {"user": None}
-    return {"user": {"email": u["email"], "id": u["id"], "created_at": u["created_at"]}}
+    return {"user": {"email": u["email"], "id": u["id"], "created_at": u["created_at"]},
+            "billing": _web_billing_status(u["id"])}
 
 
 class RegisterBody(BaseModel):

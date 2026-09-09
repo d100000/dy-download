@@ -12,7 +12,7 @@ PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
 .venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
-.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence tests.test_function_checks   # 后端测试套件（TestClient）
+.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence tests.test_function_checks tests.test_wallet_billing   # 后端测试套件（TestClient）
 .venv/bin/python -m unittest tests.test_security_reliability.DurableBillingTests   # 单跑一个类（加 .方法名 可单跑一个用例）
 node --test tests/*.js                     # 前端逻辑测试；必须写 *.js 且在仓库根目录跑（文件名不匹配默认 glob，裸目录会报错）
 swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位图（1200×630，macOS/AppKit）
@@ -119,6 +119,9 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 关键边界：滑块签发的 `pass_token` **只保护 `/api/auth/register` 与 `/api/auth/login`**，由 `_do_auth_guard()` 一次性消费。`/api/parse`、`/api/parse/batch` 与 `/api/share` 不经过滑块；网页解析靠原子免费额度预占保护，开放 API `/api/v1/*` 则用 API Key 原子计费。新增注册/登录入口必须复用滑块令牌；新增解析入口必须复用额度预占与失败退款，不能把两套门禁混在一起。验证码接口本身有 `_captcha_rate_ok()` 限频，防的是生成图片的 CPU-DoS。
 
 ### 配额与计费
+
+- **网页余额**：`users.balance_cents/reserved_cents/spent_cents/wallet_version` 与 `wallet_ledger` 保存整数分及流水。`_reserve_quota_in_conn()` 先预留免费次数，再按事务内读取的 `web_parse_price_cents` / `transcript_price_cents`（各默认 3）预留余额；`quota_reservations.free_units/price_cents/user_id` 锁定计费方式。结算只保留成功数，优先使用免费次数，其余退款。旧预留 `free_units IS NULL` 按全免费兼容。不得把网页余额和现有 API Key 余额混用。
+- **文案结算**：`atc_jobs.quota_reservation_id` 与任务入队一起保存；`_atc_claim_update()` 把终态与结算原子提交，启动恢复也结算过期/终态任务。普通预留清理不能退掉尚在队列中的分享或文案。缓存和在途文案重复请求不收费。管理员调整余额必须使用版本校验及 request_id 幂等键，设置的是可用余额，不动预留。`tests/test_wallet_billing.py` 与 `tests/test_wallet_ui.js` 覆盖财务回归。
 
 - **网页免费配额**：`usage_daily` 表按 subject 计数，登录用户按 `user:{id}`（`FREE_USER_DAILY`），匿名按用途化 HMAC 后的 `ip:` + 30 天随机第一方匿名 ID `fp:`（取最大值，`FREE_ANON_DAILY`）。解析前必须通过 `reserve_quota()` 在 `BEGIN IMMEDIATE` 事务里原子预占；成功用 `settle_quota()` 结算实际条数，失败或未处理部分必须 `release_quota()` / 结算退款，过期预占由后台清理。
 - **开放 API 计费**（分为单位）：创建 `/api/v1/jobs` 时在同一个 `BEGIN IMMEDIATE` 事务里快照单价、整批扣减 `balance_cents`、增加 `reserved_cents`，并写入 `jobs`、逐条 `job_items` 与 `api_ledger reserve`；余额不够则整批拒绝。`Idempotency-Key` 可安全重放。非 daemon 的有界 worker 通过 `_claim_job_item()` 获取数据库租约，`_finish_job_item()` 用 CAS 在同一事务里把成功项从 reserved 转入 spent/calls，失败项精确退回 balance，同时写账本和唯一 `api_logs`。启动时 `_recover_legacy_api_jobs()`、`_reconcile_api_job_accounts()` 恢复旧任务并对账，重启不会丢任务或重复计费。`job_items` 是事实源，`jobs` 只是聚合/结果快照；不要退回“一请求一条 daemon 线程”的实现。
