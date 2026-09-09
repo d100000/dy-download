@@ -454,6 +454,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function retryMedia(){
+  if (S.state === 'ok') { prepareShareMedia(true); return; }
   _statusNotice = '';
   _statusFailures = 0;
   pollShareStatus();
@@ -548,7 +549,7 @@ function render(){
   const d = S.data || {};
   const isNote = S.kind === 'note';
   const hasMedia = !isNote && d.video &&
-    (d.video.url || d.video.atc_url || d.video.proxy_url);
+    (d.video.url || d.video.atc_url || d.video.proxy_url || d.video.download_refresh_url);
   const canDownload = !isNote && d.video &&
     (videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video.download_url || d.video.proxy_url);
   const wide = d.video && d.video.width && d.video.height && d.video.width > d.video.height;
@@ -633,6 +634,19 @@ function render(){
 let _playSession = 0;
 // Keep the playback state machine self-contained: the same block is exercised
 // by the lightweight browser regression harness as well as the full page.
+// 同一页面的预检、播放和重复点击共用刷新请求；失败后短暂冷却。
+const _playbackRefreshes = new WeakMap();
+function refreshVideoForPlayback(video, failedUrl){
+  const old = _playbackRefreshes.get(video);
+  if (old && (old.pending || Date.now() - old.at < 30000)) return old.promise;
+  const state = {pending: true, at: Date.now()};
+  state.promise = refreshVideoDownloadLink(video, failedUrl).finally(() => {
+    state.pending = false; state.at = Date.now();
+  });
+  _playbackRefreshes.set(video, state);
+  return state.promise;
+}
+
 function syncPlayerRatio(video){
   const width = Math.round(Number(video?.videoWidth || video?.width
     || video?.dataset?.videoWidth) || 0);
@@ -661,8 +675,50 @@ function syncPlayerMetadata(video){
   if (hasDuration) data.duration_ms = Math.round(duration * 1000);
   target.innerHTML = metadataBlock(data);
 }
+// 打开时只加载媒体元数据；有效地址不重新解析，缺失/失效才请求后台续期。
+let _mediaProbe = 0;
+let _mediaPreparing = null;
+function prepareShareMedia(force = false){
+  if (S.state !== 'ok' || S.kind === 'note' || !S.data?.video?.download_refresh_url) return;
+  if (_mediaPreparing) return _mediaPreparing;
+  const video = S.data.video;
+  const primary = ['parser','atc'].includes(video.source || S.data.source);
+  const src = video.direct_url || video.atc_url || video.url || (!primary && video.proxy_url);
+  const probeId = ++_mediaProbe;
+  _mediaPreparing = (async () => {
+    const valid = src && !force && await new Promise(resolve => {
+      const probe = document.createElement('video');
+      let done = false;
+      const finish = ok => {
+        if (done) return;
+        done = true; clearTimeout(timer);
+        probe.removeAttribute('src'); probe.load(); resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), 12000);
+      probe.preload = 'metadata'; probe.muted = true;
+      probe.addEventListener('loadedmetadata', () => finish(true), {once:true});
+      probe.addEventListener('error', () => finish(false), {once:true});
+      probe.src = src; probe.load();
+    });
+    if (valid || probeId !== _mediaProbe || S.state !== 'ok') return;
+    const loading = document.getElementById('loading');
+    if (loading && !document.getElementById('player')) {
+      loading.textContent = uiText('正在更新视频地址…'); loading.style.display = 'block';
+    }
+    try { await refreshVideoForPlayback(video, video.direct_url || video.atc_url || video.url || ''); }
+    catch { if (!document.getElementById('player')) toast(uiText('视频地址更新失败，请点击播放重试')); }
+    finally { if (loading && !document.getElementById('player')) loading.style.display = 'none'; }
+  })().finally(() => { _mediaPreparing = null; });
+  return _mediaPreparing;
+}
 function startPlay(){
   const d = S.data || {};
+  if (d.video?.download_refresh_url && !(d.video.url || d.video.atc_url || d.video.proxy_url)) {
+    prepareShareMedia().then(() => {
+      if (d.video.url || d.video.atc_url || d.video.proxy_url) startPlay();
+    });
+    return;
+  }
   if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)){
     toast(uiText('视频正在准备中，请稍候'));
     retryMedia();
@@ -719,7 +775,7 @@ function startPlay(){
   syncPlayerRatio(v);
   const poster = document.getElementById('poster'); if (poster) poster.style.display = 'none';
 
-  let idx = -1, t0 = 0, timer = 0, settled = false, hs = null, attempt = 0;
+  let idx = -1, t0 = 0, timer = 0, settled = false, hs = null, attempt = 0, refreshed = false;
   const successEvents = ['loadeddata', 'canplay', 'playing', 'timeupdate'];
   const isCurrent = () =>
     session === _playSession && document.getElementById('player') === v;
@@ -756,6 +812,19 @@ function startPlay(){
   function next(){
     stop();
     if (!isCurrent() || settled) return;
+    // 主线路失败时先续期一次，再尝试原有备用线路；无有效地址同样可恢复。
+    if (!refreshed && d.video.download_refresh_url &&
+        (idx >= 0 && routes[idx].source === 'atc' || idx + 1 >= routes.length)) {
+      refreshed = true;
+      ld.textContent = uiText('正在更新视频地址…');
+      refreshVideoForPlayback(d.video, d.video.direct_url || d.video.atc_url || d.video.url || '')
+        .then(url => {
+          if (!isCurrent() || settled) return;
+          routes.splice(idx + 1, 0, {source:'atc', src:url, wait:directWait, tip:uiText('加载中…')});
+          next();
+        }).catch(() => { if (isCurrent() && !settled) next(); });
+      return;
+    }
     if (idx + 1 >= routes.length){ giveUp(); return; }
     idx++;
     const myAttempt = ++attempt;
@@ -794,6 +863,8 @@ function startPlay(){
       if (!isCurrent() || settled || myAttempt !== attempt) return;
       if (isActuallyPlaying()){ onOK(myAttempt); return; }
       settled = true; stop(); ld.style.display = 'none';
+      v.remove(); btn.style.display = '';
+      if (poster) poster.style.display = '';
       track('play_fail', {source:'', stage:'giveup',
         detail:'all ' + routes.length + ' routes failed'});
       // 自动探测失败不能弹阻断遮罩：微信/X5 可能已经在原生视频层播放，
@@ -931,6 +1002,12 @@ async function refreshVideoDownloadLink(video, failedUrl){
       if (!url) throw new Error(uiText('暂未获取到可用的下载链接，请稍后重试'));
       // 只更新媒体，保留原来的标题、作者、互动数与文件名。
       video.url = video.direct_url = url;
+      video.source = 'parser';
+      video.media_available = true;
+      // 旧官方备用端点不能与新的主服务地址混用。
+      delete video.alt_url;
+      delete video.proxy_url;
+      delete video.download_url;
       if (video.atc_url) video.atc_url = url;
       for (const key of ['download_refresh_url', 'download_url', 'proxy_url'])
         if (typeof data[key] === 'string') video[key] = data[key];
@@ -1303,7 +1380,7 @@ if (!S || !S.state || S.state !== 'ok') {
   if (S && (S.state === 'pending' || S.state === 'processing'))
     scheduleStatusPoll(nextStatusPollDelay(S.poll_after_ms, 0));
 } else {
-  render(); setupWxShare();
+  render(); setupWxShare(); prepareShareMedia();
 
 }
 </script>

@@ -40,6 +40,7 @@ class FakeVideo {
   }
 
   setAttribute() {}
+  remove() {}
   load() {}
   play() { return this.playResult; }
   addEventListener(name, fn) {
@@ -123,6 +124,7 @@ function createHarness(options = {}) {
   }
 
   return {
+    context,
     startPlay: context.startPlay,
     elements,
     videos,
@@ -282,16 +284,17 @@ test('custom share titles keep the full original caption and tags available', ()
   assert.match(c.extraBlock({tags}), /#tag11/);
 });
 
-test('ready shares never poll or fetch metadata, including unavailable media', () => {
+test('ready shares read metadata snapshots and separately check media availability', () => {
   const start = html.indexOf('/* ---------------- 入口 ---------------- */');
   for (const available of [true, false]) {
     const calls = [];
     vm.runInNewContext(html.slice(start, html.indexOf('</script>', start)), {
       S: {state: 'ok', kind: 'video', media_available: available},
       render: () => calls.push('render'), setupWxShare: () => calls.push('wx'),
+      prepareShareMedia: () => calls.push('media'),
       scheduleStatusPoll: () => { throw Error('ready shares must not poll'); },
     });
-    assert.deepEqual(calls, ['render', 'wx']);
+    assert.deepEqual(calls, ['render', 'wx', 'media']);
   }
 });
 
@@ -355,4 +358,79 @@ test('share playback displays actual file dimensions and duration without changi
   assert.match(target.innerHTML, /Resolution/);
   assert.match(target.innerHTML, /720 × 1280/);
   assert.equal(JSON.stringify(data), original);
+});
+
+
+test('opening a healthy share checks metadata without refreshing or autoplaying', async () => {
+  const h = createHarness({video:{source:'parser', url:'https://v3.douyinvod.com/good.mp4', download_refresh_url:'/signed'}});
+  h.context.S.state = 'ok'; h.context.S.kind = 'video';
+  let refreshes = 0;
+  h.context.refreshVideoDownloadLink = async () => { refreshes++; throw Error('unexpected'); };
+  FakeVideo.prototype.removeAttribute = function() {};
+  const prepared = h.context.prepareShareMedia();
+  assert.equal(h.videos.length, 1);
+  assert.equal(h.videos[0].preload, 'metadata');
+  h.videos[0].dispatch('loadedmetadata');
+  await prepared;
+  assert.equal(refreshes, 0);
+  assert.equal(h.elements.player, undefined);
+});
+
+test('opening an expired share and concurrent checks renew once and retain metadata', async () => {
+  const video = {source:'parser', url:'https://v3.douyinvod.com/expired.mp4', download_refresh_url:'/signed'};
+  const h = createHarness({video});
+  h.context.S.state = 'ok'; h.context.S.kind = 'video';
+  h.context.S.title = 'saved'; h.context.S.data.stats = {digg:0,comment:12};
+  let refreshes = 0;
+  h.context.refreshVideoDownloadLink = async (model) => { refreshes++; model.url='https://v3.douyinvod.com/fresh.mp4'; return model.url; };
+  const first = h.context.prepareShareMedia();
+  const second = h.context.prepareShareMedia();
+  assert.equal(first, second);
+  h.videos[0].dispatch('error');
+  await first;
+  assert.equal(refreshes, 1);
+  assert.equal(video.url, 'https://v3.douyinvod.com/fresh.mp4');
+  assert.equal(h.context.S.title, 'saved');
+  assert.deepEqual(h.context.S.data.stats, {digg:0,comment:12});
+  assert.equal(h.elements.player, undefined);
+});
+
+test('missing address on open refreshes once without a media probe', async () => {
+  const video = {source:'parser',proxy_url:'/proxy',download_refresh_url:'/signed'};
+  const h = createHarness({video});
+  Object.assign(h.context.S,{state:'ok',kind:'video'});
+  let refreshes = 0;
+  h.context.refreshVideoDownloadLink = async model => { refreshes++; model.url='https://v3.douyinvod.com/new.mp4'; return model.url; };
+  await h.context.prepareShareMedia();
+  assert.equal(refreshes,1);
+  assert.equal(h.videos.length,0);
+});
+
+test('playback renews failed primary once then can use the fallback', async () => {
+  const h = createHarness({video:{source:'parser',url:'https://v3.douyinvod.com/old.mp4',proxy_url:'/proxy',download_refresh_url:'/signed'}});
+  let refreshes = 0;
+  h.context.refreshVideoDownloadLink = async () => { refreshes++; return 'https://v3.douyinvod.com/new.mp4'; };
+  h.startPlay();
+  const player = h.videos[0]; player.dispatch('error');
+  await new Promise(setImmediate);
+  assert.equal(refreshes,1);
+  assert.equal(player.src,'https://v3.douyinvod.com/new.mp4');
+  player.dispatch('error');
+  assert.equal(player.src,'/proxy');
+  player.currentTime = 1; player.dispatch('timeupdate');
+  h.runAllTimers();
+  assert.equal(refreshes,1);
+  assert.equal(h.toasts.length,0);
+});
+
+test('renewal failure stays bounded and does not prevent backup playback', async () => {
+  const h = createHarness({video:{source:'parser',url:'https://v3.douyinvod.com/old.mp4',proxy_url:'/proxy',download_refresh_url:'/signed'}});
+  let refreshes=0;
+  h.context.refreshVideoDownloadLink=async()=>{refreshes++;throw Error('unavailable');};
+  h.startPlay(); h.videos[0].dispatch('error');
+  await new Promise(setImmediate);
+  assert.equal(h.videos[0].src,'/proxy');
+  h.videos[0].dispatch('error'); h.runAllTimers();
+  assert.equal(refreshes,1);
+  assert.equal(h.elements.playBtn.style.display,'');
 });

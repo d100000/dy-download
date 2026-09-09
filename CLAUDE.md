@@ -58,11 +58,11 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 
 `/api/admin/checks` 及其 `/run`、`/shares/{sid}/repair` 仅管理员可访问。GET 只读配置与最近 100 份有效分享；真实上游调用只由显式 POST 启动，全局一项异步任务，完成冷却 10 秒，结果在内存中保存。报告只允许有限状态/错误分类和公开元数据，禁止异常原文、签名媒体链接或凭据。媒体预检仅检查 1 字节，不能宣称完整下载/微信播放已验证。
 
-`_metadata_missing()` 判断核心展示字段，不把有效的 0 当缺失。主服务抖音缓存缺少元数据时，`_retry_cached_metadata()` 每作品最多每 60 秒重试官方补全，不重复提交主解析。成功解析的 `_remember_parse_result()` 同步补齐同作品至多 500 份旧分享的缺失字段，保留已有计数、媒体线路、自定义标题、有效期和下架状态；更新缓存别名时保留原过期时间。`_merge_metadata_snapshot()` 必须校验 item_id/kind/platform。分享 GET 不补数据、不请求上游。新增回归在 `tests/test_function_checks.py`，修改本链路须加入常规后端测试命令。
+`_metadata_missing()` 判断核心展示字段，不把有效的 0 当缺失。主服务抖音缓存缺少元数据时，`_retry_cached_metadata()` 每作品最多每 60 秒重试官方补全，不重复提交主解析。成功解析的 `_remember_parse_result()` 同步补齐同作品至多 500 份旧分享的缺失字段，保留已有计数、媒体线路、自定义标题、有效期和下架状态；更新缓存别名时保留原过期时间。`_merge_metadata_snapshot()` 必须校验 item_id/kind/platform。分享 GET 不补数据、不请求上游；浏览器打开后预检媒体元数据，仅缺失/失效时通过签名 POST 续期。新增回归在 `tests/test_function_checks.py`，修改本链路须加入常规后端测试命令。
 
 ### 流量分工：解析服务地址与同源流式媒体
 
-新主服务响应使用 `source: parser`、`video.direct_url` 与 `/api/media/video/{item_id}`；官方补充媒体使用 `/api/douyin/video/{item_id}`。解析页、批量与分享页通过 `videoDirectDownloadURL()` 选主服务原片（兼容旧 `atc_url`），浏览器 CORS 下载、显示进度，校验 200/媒体类型/非空/已知长度后保存 Blob；不得把官方接口重定向地址当主服务原片。主服务地址缺失/过期或直连失败时，点击下载才 POST `video.download_refresh_url`（`/api/media/video/{item_id}/download-link`，独立 `download_link` HMAC）。返回 202 时显示加载并有界轮询，后台复用 `atc_jobs` 的 `download` 任务，用 `atc_cache.work_url` 保存的来源重新提交普通解析；不调用官方补全、不覆盖信息快照、不重复扣解析配额。任务创建原子去重、最多 32 个在途、30 秒冷却和 5 分钟超时。新地址重新缓存并更新前端媒体；失败后才预检同源备用流，服务器默认代理优先，空代理池或全部失败后直接连接；管理员可显式开启严格代理模式。媒体路径必须与缓存来源匹配；旧 `/api/atc/video` 路由仅作兼容。同源下载保留签名、白名单、Range 与并发校验。
+新主服务响应使用 `source: parser`、`video.direct_url` 与 `/api/media/video/{item_id}`；官方补充媒体使用 `/api/douyin/video/{item_id}`。解析页、批量与分享页通过 `videoDirectDownloadURL()` 选主服务原片（兼容旧 `atc_url`），浏览器 CORS 下载、显示进度，校验 200/媒体类型/非空/已知长度后保存 Blob；不得把官方接口重定向地址当主服务原片。主服务地址缺失/过期或直连失败时，下载和播放恢复均 POST `video.download_refresh_url`（`/api/media/video/{item_id}/download-link`，独立 `download_link` HMAC）。返回 202 时显示加载并有界轮询，后台复用 `atc_jobs` 的 `download` 任务，优先用 `parse_snapshots.canonical_url/source_url`、有效分享的 `source_url`，再回退 `atc_cache.work_url` 保存的来源重新提交普通解析；不调用官方补全、不覆盖信息快照、不重复扣解析配额。任务创建原子去重、最多 32 个在途、30 秒冷却和 5 分钟超时。新地址重新缓存并更新前端媒体；失败后才预检同源备用流，服务器默认代理优先，空代理池或全部失败后直接连接；管理员可显式开启严格代理模式。媒体路径必须与缓存来源匹配；旧 `/api/atc/video` 路由仅作兼容。同源下载保留签名、白名单、Range 与并发校验。
 
 ATC 的 `duration_ms`、`video.width`、`video.height` 可能为空。首页不得用 `0:00`、`720P` 等看似真实的值兜底；单条结果通过 `<video preload="metadata">` 的 `loadedmetadata` / `durationchange` 从媒体链接补全，失败显示「暂未读取」。批量列表为避免一次解析触发几十条媒体请求，只在用户打开视频预览时读取并回填对应行。
 
@@ -134,6 +134,12 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 - 默认部署必须关闭 Uvicorn/Nginx access log；不得让原始 IP、完整 UA/Referer、媒体签名、下载文件名或 API Key 进入 URL/日志。开放 API 只从 `X-API-Key` 读取密钥，吊销和充值等管理操作把密钥放 JSON body。
 - 站内账号是可选功能；注册会保存邮箱与加盐密码哈希，账号资料随账号保留。服务器不落地保存视频或图片文件，媒体线路只做流式转发；公开作品链接优先提交给已配置的内容解析服务，抖音缺失字段由官方接口补全。普通解析不请求语音文案，主动文案任务才传 `taskType=TEXT`；浏览器直连媒体时，媒体源会收到请求方的网络与浏览器信息。
 - 对外文案不得使用“零隐私采集”“不采集任何数据”“不记录账号”等绝对说法。中英文页面与 README 应明确以上数据范围、保留期和第三方直连边界。
+
+### 来源存储与播放续期
+
+`parse_snapshots.source_url/canonical_url` 单独保存从原输入提取的分享链接与可用的原平台作品链接，抖音作品规范化到无追踪参数的 video/note URL；不保存整段分享文案。公开 payload 继续移除内部来源与临时媒体签名。解析快照保留 24 小时，创建分享时把来源复制到 `shares.source_url`，随分享自身有效期保留；启动迁移从旧 `atc_cache.work_url` 补空来源。`_saved_source_in_conn()` 只恢复有效记录，刷新只改媒体缓存，不延长分享有效期、不重新计费、不清空完整元数据。
+
+分享页 `prepareShareMedia()` 打开时仅加载媒体元数据，有效不调用解析；无地址、error 或 12 秒未读到元数据时复用有界下载刷新任务。播放错误先续期一次，再走已有备用线路。首页/批量预览同样按需续期，不能自动播放原本暂停的视频，也不能让迟到响应修改已替换的视频元素。中英提示使用 `uiText()`，新状态测试在 `test_playback_refresh.js` 与 `test_share_playback.js`。
 
 ### 状态存储与部署约束
 

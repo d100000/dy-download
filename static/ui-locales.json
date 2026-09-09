@@ -241,6 +241,8 @@
     "共": "Total",
     "成功": "Succeeded",
     "失败": "Failed",
-    "解析失败（HTTP {status}），请稍后重试": "Parsing failed (HTTP {status}). Please try again."
+    "解析失败（HTTP {status}），请稍后重试": "Parsing failed (HTTP {status}). Please try again.",
+    "正在更新视频地址…": "Refreshing video link…",
+    "视频地址更新失败，请点击播放重试": "Could not refresh the video link. Tap play to retry."
   }
 }

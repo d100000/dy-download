@@ -1267,6 +1267,7 @@ function openPlayer(i){
         : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}</div>`;
   }
   wireVideoMetadata(body);
+  wireVideoPlayback(body);
   m.classList.add('show'); document.body.style.overflow='hidden';
 }
 function closePlayer(){ const m=$('#playerModal'); if(m){ m.classList.remove('show'); m.querySelector('video')?.pause(); document.body.style.overflow=''; } }
@@ -1458,6 +1459,7 @@ function render(d){
   _shareSrc[d.item_id] = input.value;      // 解析缓存过期时用它重新解析
   revealRenderedResult();
   wireVideoMetadata(result);
+  wireVideoPlayback(result);
   wireAvatar(result, d.item_id);
   maybeRegTip();
 }
@@ -1746,6 +1748,12 @@ async function refreshVideoDownloadLink(video, failedUrl){
       if (!url) throw new Error(uiText('暂未获取到可用的下载链接，请稍后重试'));
       // 只更新媒体，保留原来的标题、作者、互动数与文件名。
       video.url = video.direct_url = url;
+      video.source = 'parser';
+      video.media_available = true;
+      // 旧官方备用端点不能与新的主服务地址混用。
+      delete video.alt_url;
+      delete video.proxy_url;
+      delete video.download_url;
       if (video.atc_url) video.atc_url = url;
       for (const key of ['download_refresh_url', 'download_url', 'proxy_url'])
         if (typeof data[key] === 'string') video[key] = data[key];
@@ -1968,6 +1976,19 @@ function sharePageSupported(d){
   return !d?.platform || d.platform === 'douyin' || (d.platform === 'tiktok' && d.kind !== 'note');
 }
 
+// 同一页面的预检、播放和重复点击共用刷新请求；失败后短暂冷却。
+const _playbackRefreshes = new WeakMap();
+function refreshVideoForPlayback(video, failedUrl){
+  const old = _playbackRefreshes.get(video);
+  if (old && (old.pending || Date.now() - old.at < 30000)) return old.promise;
+  const state = {pending: true, at: Date.now()};
+  state.promise = refreshVideoDownloadLink(video, failedUrl).finally(() => {
+    state.pending = false; state.at = Date.now();
+  });
+  _playbackRefreshes.set(video, state);
+  return state.promise;
+}
+
 function videoPlaySrc(v){
   return videoPlayRoutes(v)[0] || '';
 }
@@ -1990,6 +2011,28 @@ function videoDatasetHTML(v){
 function videoProxyFallback(v){
   // 每条线路最多尝试一次；即使同源代理先失败，仍可回退官方直链。
   if (v.currentTime > 0) return;
+  if (v.dataset.refreshing === '1') return;
+  const model = v.dataset.itemId ? _videos[v.dataset.itemId]
+    : (/^\d+$/.test(v.dataset.batchIndex || '') ? _batch[Number(v.dataset.batchIndex)]?.video : null);
+  if (model?.download_refresh_url && v.dataset.refreshTried !== '1') {
+    v.dataset.refreshTried = '1'; v.dataset.refreshing = '1';
+    const playing = !v.paused;
+    const scope = videoMetadataScope(v);
+    setVideoMetadataValue(scope, '[data-video-status]', uiText('正在更新视频地址…'));
+    refreshVideoForPlayback(model, model.direct_url || model.atc_url || model.url || '')
+      .then(url => {
+        if (v.isConnected === false) return;
+        Object.assign(v.dataset, {direct:url, atc:'', alt:'', source:model.source,
+          proxy:model.proxy_url || '', playIndex:'0'});
+        v.src = url; v.load();
+        if (playing) v.play?.()?.catch?.(()=>{});
+      }).catch(() => { if (v.isConnected !== false) { v.dataset.refreshing = '0'; videoProxyFallback(v); } })
+      .finally(() => {
+        v.dataset.refreshing = '0';
+        setVideoMetadataValue(scope, '[data-video-status]', uiText('视频时长与分辨率会在加载原片后自动读取'));
+      });
+    return;
+  }
   const routes = videoPlayRoutes({
     url:v.dataset.direct, atc_url:v.dataset.atc, alt_url:v.dataset.alt,
     proxy_url:v.dataset.proxy, source:v.dataset.source
@@ -1997,7 +2040,21 @@ function videoProxyFallback(v){
   const nextIndex = Number(v.dataset.playIndex || 0) + 1;
   if (!routes[nextIndex]){ markVideoMetadataUnavailable(v); return; }
   v.dataset.playIndex = String(nextIndex);
-  v.src = routes[nextIndex]; v.load(); v.play?.();
+  const playing = !v.paused;
+  v.src = routes[nextIndex]; v.load();
+  if (playing) v.play?.()?.catch?.(()=>{});
+}
+
+function wireVideoPlayback(scope){
+  scope.querySelectorAll('video[data-read-metadata]').forEach(v => {
+    if (v.dataset.playbackWired === '1') return;
+    v.dataset.playbackWired = '1';
+    const timer = setTimeout(() => {
+      if (v.isConnected && v.readyState < 1) videoProxyFallback(v);
+    }, 12000);
+    v.addEventListener('loadedmetadata', () => clearTimeout(timer), {once:true});
+    v.addEventListener('error', () => clearTimeout(timer), {once:true});
+  });
 }
 
 function useProxyFallback(el){
@@ -2062,7 +2119,7 @@ function videoHTML(d){
           </div>
           <div class="ts-body" style="display:none"></div>
         </div>
-        <div class="tip" data-ui="视频时长与分辨率会在加载原片后自动读取">视频时长与分辨率会在加载原片后自动读取</div>
+        <div class="tip" data-video-status role="status" aria-live="polite" data-ui="视频时长与分辨率会在加载原片后自动读取">视频时长与分辨率会在加载原片后自动读取</div>
       </div>
     </div>
   </div>`;

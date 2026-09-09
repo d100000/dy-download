@@ -293,6 +293,8 @@ class DownloadRefreshTests(unittest.TestCase):
         patcher = mock.patch.object(server, '_atc_cfg', return_value=self.cfg)
         patcher.start()
         self.addCleanup(patcher.stop)
+        for table in ('parse_snapshots', 'shares'):
+            server.db_exec(f'DELETE FROM {table} WHERE item_id=?', (self.item_id,))
         self.endpoint = server._video_download_refresh_url(self.item_id)
         server._atc_save_result(self.item_id, {'videoUrl': self.old_url}, work_url=self.work_url)
 
@@ -329,6 +331,84 @@ class DownloadRefreshTests(unittest.TestCase):
         self.assertTrue(server._atc_url_fresh(server._atc_cache_get(self.item_id), 3600))
         self.assertNotIn(self.work_url, response.text)
         self.assertNotIn('test-secret', response.text)
+
+    def save_snapshot(self):
+        data = {'item_id': self.item_id, 'kind': 'video', 'platform': 'douyin',
+                'source': 'parser', 'title': '已保存的标题', 'author': '作者',
+                'stats': {'digg': 0, 'comment': 12}, 'video': {'source': 'parser',
+                'url': self.old_url, 'filename': 'original.mp4'}}
+        return server._remember_parse_result('分享文案 ' + self.work_url, data, time.time())
+
+    def test_saved_source_survives_media_cache_clear_and_is_not_public(self):
+        self.save_snapshot()
+        server.db_exec('DELETE FROM atc_cache WHERE item_id=?', (self.item_id,))
+        server._cache.clear()
+        with mock.patch.object(server, 'reserve_quota', side_effect=AssertionError('no charge')):
+            response = self.submit()
+        self.assertEqual(response.status_code, 202)
+        job = server.db_exec('SELECT * FROM atc_jobs WHERE item_id=?', (self.item_id,), 'one')
+        self.assertEqual(job['work_url'], self.work_url)
+        self.finish_job()
+        saved = server._get_parse_snapshot(self.item_id)
+        self.assertEqual(saved['stats'], {'digg': 0, 'comment': 12})
+        self.assertEqual(saved['title'], '已保存的标题')
+        self.assertNotIn(self.work_url, json.dumps(saved))
+        self.assertNotIn(self.old_url, json.dumps(saved))
+        self.assertEqual(self.submit().json()['url'], self.new_url)
+
+    def test_share_keeps_source_beyond_parse_snapshot_and_media_cache(self):
+        data = self.save_snapshot()
+        share = server._share_create(make_request(), data, '自定义标题')
+        row = server.db_exec('SELECT * FROM shares WHERE id=?', (share['sid'],), 'one')
+        self.assertEqual(row['source_url'], self.work_url)
+        for table in ('parse_snapshots', 'atc_cache'):
+            server.db_exec(f'DELETE FROM {table} WHERE item_id=?', (self.item_id,))
+        with mock.patch.object(server, '_atc_extract', side_effect=AssertionError('GET is read only')):
+            view = server.api_share_get(share['sid'], make_request())
+        self.assertEqual(view['title'], '自定义标题')
+        self.assertEqual(view['data']['stats']['comment'], 12)
+        self.assertNotIn(self.work_url, json.dumps(view))
+        self.assertEqual(self.submit().status_code, 202)
+
+    def test_official_snapshot_reuses_refreshed_primary_media_on_next_visit(self):
+        data = self.save_snapshot()
+        data['source'] = data['video']['source'] = 'douyin_direct'
+        share = server._share_create(make_request(), data)
+        server._atc_save_result(self.item_id, {'videoUrl': self.new_url}, work_url=self.work_url)
+        with mock.patch.object(server, '_parse_share', side_effect=AssertionError('read only')):
+            view = server.api_share_get(share['sid'], make_request())
+        self.assertEqual(view['data']['video']['source'], 'parser')
+        self.assertEqual(view['data']['video']['direct_url'], self.new_url)
+        self.assertEqual(view['data']['stats']['digg'], 0)
+
+    def test_expired_snapshots_and_shares_cannot_restore_source(self):
+        data = self.save_snapshot()
+        share = server._share_create(make_request(), data)
+        for table in ('shares', 'parse_snapshots'):
+            server.db_exec(f'UPDATE {table} SET expires_at=1 WHERE item_id=?', (self.item_id,))
+        server.db_exec('DELETE FROM atc_cache WHERE item_id=?', (self.item_id,))
+        self.assertEqual(self.submit().status_code, 404)
+        self.assertEqual(server.db_exec('SELECT COUNT(*) AS n FROM atc_jobs', fetch='one')['n'], 0)
+
+    def test_refresh_with_sparse_metadata_does_not_erase_saved_counts(self):
+        data = self.save_snapshot()
+        data.update(title='', author='', stats={'digg': None})
+        result = server._remember_parse_result(self.work_url, data, time.time())
+        self.assertEqual(result['title'], '已保存的标题')
+        self.assertEqual(result['stats']['digg'], 0)
+        self.assertEqual(result['stats']['comment'], 12)
+
+    def test_canonical_source_is_used_without_tracking_parameters(self):
+        data = self.save_snapshot()
+        data['_link'] = 'https://www.douyin.com/jingxuan?modal_id=7682023366300556537&private=secret'
+        server._save_parse_snapshot(data)
+        server.db_exec('DELETE FROM atc_cache WHERE item_id=?', (self.item_id,))
+        self.assertEqual(self.submit().status_code, 202)
+        job = server.db_exec('SELECT * FROM atc_jobs WHERE item_id=?', (self.item_id,), 'one')
+        self.assertEqual(job['work_url'], 'https://www.douyin.com/video/7682023366300556537/')
+        saved = server.db_exec('SELECT * FROM parse_snapshots WHERE item_id=?', (self.item_id,), 'one')
+        self.assertEqual(saved['source_url'], self.work_url)
+        self.assertNotIn('private=secret', saved['canonical_url'])
 
     def test_browser_failure_refreshes_even_when_ttl_has_not_expired(self):
         self.assertEqual(self.submit(self.old_url).status_code, 202)

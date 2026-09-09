@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.28.0"
+APP_VERSION = "1.29.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -278,10 +278,11 @@ CREATE TABLE IF NOT EXISTS shares(
 );
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_item ON shares(item_id);
--- 成功解析的临时元数据快照；不保存输入文案或短时媒体签名。
+-- 成功解析的临时快照；来源独立保存，不向分享访客公开。
 CREATE TABLE IF NOT EXISTS parse_snapshots(
   item_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
-  created INTEGER NOT NULL, expires_at INTEGER NOT NULL
+  created INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  source_url TEXT, canonical_url TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_parse_snapshots_expiry ON parse_snapshots(expires_at);
 CREATE TABLE IF NOT EXISTS share_submissions(
@@ -485,6 +486,14 @@ with _db_lock:
         ("assigned_origin", "TEXT"), ("updated", "INTEGER"),
         ("ready_at", "INTEGER")))
     _ensure_columns("atc_cache", (("work_url", "TEXT"),))
+    _ensure_columns("parse_snapshots", (("source_url", "TEXT"), ("canonical_url", "TEXT")))
+    # 升级时把旧媒体缓存的来源转存到元数据记录，后续清理媒体缓存不丢刷新依据。
+    for _table in ("parse_snapshots", "shares"):
+        _c.execute(
+            f"UPDATE {_table} SET source_url=(SELECT work_url FROM atc_cache "
+            f"WHERE atc_cache.item_id={_table}.item_id) WHERE COALESCE(source_url,'')='' "
+            f"AND EXISTS(SELECT 1 FROM atc_cache WHERE atc_cache.item_id={_table}.item_id "
+            "AND COALESCE(work_url,'')<>'')")
     _ensure_columns("atc_jobs", (
         ("lease_owner", "TEXT"), ("lease_until", "INTEGER"),
         ("quota_reservation_id", "TEXT")))
@@ -4561,8 +4570,7 @@ def _parse_share(text: str) -> dict:
 
 def _parse_item(kind: str, item_id: str) -> dict:
     """按真实来源刷新：主服务优先，抖音缺失信息走官方补充。"""
-    cached = _atc_cache_get(item_id)
-    work_url = (cached or {}).get("work_url") or ""
+    work_url = _saved_parse_source(item_id)
     numeric_item = bool(re.fullmatch(r"\d{8,30}", item_id or ""))
     # 有明确来源链接时以来源为准：其他平台也可能使用纯数字作品 ID，
     # 不能因为 ID 看起来像 aweme_id 就把它误送到抖音官方页。旧版本没有
@@ -4582,12 +4590,19 @@ def _remember_parse_result(key: str, data: dict, now: float) -> dict:
     data["snapshot_at"] = int(now)
     detail = _snapshot_author(data)
     previous = _get_parse_snapshot(str(data.get("item_id") or "")) or {}
+    if previous:
+        try:
+            data = _merge_metadata_snapshot(data, previous)
+        except ApiError:
+            pass
     previous_author = previous.get("author_detail")
     if isinstance(previous_author, dict):
         detail = _merge_missing_fields(detail, previous_author)
     if detail:
         data["author_detail"] = detail
-    _save_parse_snapshot(data)
+    if data.get("kind") == "video" and re.fullmatch(r"[\w-]{8,40}", str(data.get("item_id") or "")):
+        data.setdefault("video", {})["download_refresh_url"] = _video_download_refresh_url(data["item_id"])
+    _save_parse_snapshot(data, source_text=key)
     _backfill_share_metadata(data)
     _cache_put(key, data, now)
     _cache_put(data["item_id"], data, now)
@@ -4922,6 +4937,11 @@ def _share_view(row: dict, origin: str = "") -> dict:
         or (is_note and data.get("source") in ("douyin_direct", "douyin_web")))
     is_atc = bool(video and (
         video.get("source") in ("atc", "parser") or data.get("source") in ("atc", "parser")))
+    # 原先走官方兜底的快照，完成主地址续期后也复用持久媒体缓存。
+    if (state == "ok" and is_douyin_direct and video
+            and _atc_url_fresh(_atc_cache_get(row["item_id"]), cfg["url_ttl"])):
+        data["source"] = video["source"] = "parser"
+        is_atc, is_douyin_direct = True, False
     # v1.20 之前的分享快照可能把抖音数字作品保存成 ``douyin`` 或
     # ``atc``。只要能确认来源是抖音且 ID 是标准 aweme_id，就在内存中
     # 迁移到官方链路；这样存量链接不会再次进入第三方播放任务。
@@ -5066,6 +5086,8 @@ def _share_view(row: dict, origin: str = "") -> dict:
     if state == "ok":
         data["play_priority"] = (["proxy", "dy1", "dy2"]
                                   if is_douyin_direct else cfg["play_priority"])
+        if video is not None and re.fullmatch(r"[\w-]{8,40}", str(row["item_id"] or "")):
+            video["download_refresh_url"] = _video_download_refresh_url(row["item_id"])
     # 分享页只公开展示字段和服务端生成的相对端点。内部来源链接、兼容
     # 服务工作 URL 等可能含有追踪参数或凭据，不能随 payload 回传给访客。
     for private_key in ("_link", "work_url", "source_url"):
@@ -5151,14 +5173,15 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
             conn.execute(
                 "INSERT INTO shares(id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
                 "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
-                "refreshed_at,status,created,quota_reservation_id) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "refreshed_at,status,created,quota_reservation_id,source_url) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, item_id, kind, vid, u["id"] if u else None, "", "",
                  (data.get("title") or "")[:300], (data.get("author") or "")[:100],
                  data.get("avatar", ""), data.get("cover", ""),
                  json.dumps(stored_data, ensure_ascii=False), (custom_title or "")[:300],
                  "link", now + share_ttl, now, "ok", now,
-                 reservation_id))
+                 reservation_id, _saved_source_in_conn(conn, item_id)
+                 or _normalize_parse_source(data.get("_link") or data.get("original_url") or "")))
             if reservation_id:
                 committed = _settle_quota_in_conn(conn, reservation_id, 1)
                 if committed != 1:
@@ -5462,7 +5485,50 @@ def _record_metadata_failure(stage: str) -> None:
         _metadata_last_failure.update(at=int(time.time()), stage=stage, code=code)
 
 
-def _save_parse_snapshot(data: dict) -> None:
+def _normalize_parse_source(text: str) -> str:
+    """只保留可重解析的公开作品链接，不保存分享文案或无关抖音追踪参数。"""
+    links = _extract_supported_work_urls(text, 1)
+    if not links:
+        return ""
+    link = links[0]
+    kind, item_id = _douyin_item_from_url(link)
+    if item_id:
+        return _douyin_work_url(kind, item_id)
+    parsed = urlparse.urlsplit(link)
+    if (parsed.hostname == "v.douyin.com"
+            or (parsed.hostname or "").endswith("tiktok.com")):
+        return urlparse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    return link
+
+
+def _saved_source_in_conn(conn, item_id: str) -> str:
+    """媒体缓存清理或进程重启后，从有效快照/分享恢复来源；只读数据库。"""
+    now = int(time.time())
+    row = conn.execute(
+        "SELECT canonical_url,source_url FROM parse_snapshots WHERE item_id=? AND expires_at>?",
+        (item_id, now)).fetchone()
+    candidates = [row["canonical_url"], row["source_url"]] if row else []
+    rows = conn.execute(
+        "SELECT source_url FROM shares WHERE item_id=? AND status='ok' "
+        "AND COALESCE(parse_status,'ready')='ready' AND (expires_at=0 OR expires_at>?) "
+        "AND source_url IS NOT NULL ORDER BY created DESC LIMIT 20", (item_id, now)).fetchall()
+    candidates.extend(row["source_url"] for row in rows)
+    cached = conn.execute("SELECT work_url FROM atc_cache WHERE item_id=?", (item_id,)).fetchone()
+    if cached:
+        candidates.append(cached["work_url"])
+    return next((link for value in candidates if (link := _normalize_parse_source(value))), "")
+
+
+def _saved_parse_source(item_id: str) -> str:
+    with _db_lock:
+        conn = _db()
+        try:
+            return _saved_source_in_conn(conn, item_id)
+        finally:
+            conn.close()
+
+
+def _save_parse_snapshot(data: dict, source_text: str = "") -> None:
     item_id = str(data.get("item_id") or "")
     if not item_id:
         return
@@ -5470,10 +5536,15 @@ def _save_parse_snapshot(data: dict) -> None:
     stored = _share_storage_payload(data)
     stored.setdefault("snapshot_at", now)
     db_exec(
-        "INSERT INTO parse_snapshots(item_id,payload,created,expires_at) VALUES(?,?,?,?) "
+        "INSERT INTO parse_snapshots(item_id,payload,created,expires_at,source_url,canonical_url) "
+        "VALUES(?,?,?,?,?,?) "
         "ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload,"
-        "created=excluded.created,expires_at=excluded.expires_at",
-        (item_id, json.dumps(stored, ensure_ascii=False), now, now + PARSE_SNAPSHOT_TTL))
+        "created=excluded.created,expires_at=excluded.expires_at,"
+        "source_url=COALESCE(NULLIF(excluded.source_url,''),parse_snapshots.source_url),"
+        "canonical_url=COALESCE(NULLIF(excluded.canonical_url,''),parse_snapshots.canonical_url)",
+        (item_id, json.dumps(stored, ensure_ascii=False), now, now + PARSE_SNAPSHOT_TTL,
+         _normalize_parse_source(source_text),
+         _normalize_parse_source(data.get("_link") or data.get("original_url") or "")))
 
 
 def _get_parse_snapshot(item_id: str) -> Optional[dict]:
@@ -8890,8 +8961,7 @@ def _open_atc_video_upstream(item_id: str, headers: dict, validator=None):
     except ApiError as primary_error:
         if primary_error.status == 416:
             raise
-        cached = _atc_cache_get(item_id) or {}
-        work_url = cached.get("work_url") or ""
+        work_url = _saved_parse_source(item_id)
         if not work_url and re.fullmatch(r"\d{8,30}", item_id):
             work_url = _douyin_work_url("video", item_id)
         if not _is_douyin_work_url(work_url):
@@ -9334,13 +9404,7 @@ def _request_download_link(item_id: str, failed_url: str) -> dict:
                 raise ApiError(502, "暂时无法更新下载链接，请稍后重试", {"Retry-After": "30"})
             if not cfg["enabled"]:
                 raise ApiError(503, "下载链接更新服务暂不可用，请稍后重试")
-            source = cached.get("work_url") or ""
-            if not source:
-                saved = conn.execute(
-                    "SELECT source_url FROM shares WHERE item_id=? AND status='ok' "
-                    "AND (expires_at=0 OR expires_at>?) AND source_url IS NOT NULL "
-                    "ORDER BY created DESC LIMIT 1", (item_id, now)).fetchone()
-                source = saved["source_url"] if saved else ""
+            source = _saved_source_in_conn(conn, item_id)
             links = _extract_supported_work_urls(source, 1)
             if not links:
                 raise ApiError(404, "原分享链接已失效，请重新粘贴分享内容解析")
