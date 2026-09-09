@@ -1666,7 +1666,7 @@ async function downloadResponseError(resp){
   } catch {}
   if (message) return message;
   if (resp.status === 401 || resp.status === 403)
-    return '下载地址已过期，请重新解析后再试';
+    return '下载请求未通过验证，请刷新页面后再试';
   if (resp.status === 429)
     return '下载请求过于频繁，请稍后再试';
   return '下载线路暂时不可用（HTTP ' + resp.status + '），请稍后重试';
@@ -1782,7 +1782,7 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
   try {
     const fallback = downloadFallbackURL(fallbackUrl, filename);
     if (requireFallback && !fallback)
-      throw new Error('下载地址已过期，请重新解析后再试');
+      throw new Error('暂未获取到可用的下载线路，请重新解析后再试');
     if (fallback){
       if (btn) btn.textContent = '检查下载线路…';
       await preflightVideoDownload(fallback);

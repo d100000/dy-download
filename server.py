@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.22.0"
+APP_VERSION = "1.22.1"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -1237,6 +1237,7 @@ ALLOWED_HOST_SUFFIXES = (
     "douyinpic.com", "douyinvod.com", "iesdouyin.com", "snssdk.com",
     "douyinstatic.com", "byteimg.com", "ibytedtos.com", "amemv.com",
     "zjcdn.com", "douyincdn.com", "bytecdn.cn", "douyin.com", "pstatp.com",
+    "365yg.com",  # 抖音解析可能返回的字节系视频 CDN（如 v26-default）
 )
 
 CACHE_TTL = 1800      # 解析结果缓存 30 分钟
@@ -6786,7 +6787,8 @@ def _merge_missing_fields(primary: dict, extra: dict) -> dict:
         old = merged.get(key)
         if isinstance(old, dict) and isinstance(value, dict):
             merged[key] = _merge_missing_fields(old, value)
-        elif old is None or old == "" or old == "（无标题）":
+        elif (old is None or old == "" or old == "（无标题）"
+              or (key == "title" and str(old).strip() in ("暂无标题", "无标题"))):
             merged[key] = value
     return merged
 
@@ -6802,7 +6804,7 @@ def _result_has_media(result: dict) -> bool:
 def _douyin_needs_supplement(result: dict) -> bool:
     if not _result_has_media(result):
         return True
-    if any(not result.get(key) or result.get(key) == "（无标题）"
+    if any(not result.get(key) or result.get(key) in ("（无标题）", "暂无标题", "无标题")
            for key in ("title", "author", "avatar", "author_url", "cover")):
         return True
     if any((result.get("stats") or {}).get(key) is None

@@ -95,6 +95,25 @@ class ParserFallbackTests(unittest.TestCase):
         self.assertEqual(result['duration_ms'], 12000)
         self.assertEqual((result['video']['width'], result['video']['height']), (1280, 720))
 
+    def test_placeholder_title_is_replaced_by_official_caption(self):
+        for title in ('暂无标题', '无标题', '（无标题）'):
+            self.primary['title'] = title
+            result = server._parse_share(self.work_url)
+            self.assertEqual(result['title'], '官方补充标题')
+            self.assertEqual(result['video']['url'], self.primary['videoUrl'])
+
+    def test_byte_video_cdn_keeps_signed_download_when_supplement_fails(self):
+        self.primary.update(title='暂无标题', author={},
+                            videoUrl='https://v26-default.365yg.com/test/video/')
+        self.primary.pop('workId')
+        self.direct.side_effect = TimeoutError('official unavailable')
+        result = server._parse_share(self.work_url)
+        self.assertTrue(result['item_id'].startswith('item_'))
+        self.assertEqual(result['video']['url'], self.primary['videoUrl'])
+        self.assertIn('/api/media/video/', result['video']['download_url'])
+        query = server.urlparse.parse_qs(server.urlparse.urlsplit(result['video']['download_url']).query)
+        server._require_media_token('atc_video', result['item_id'], int(query['exp'][0]), query['sig'][0])
+
     def test_primary_failure_falls_back(self):
         self.extract.side_effect = server.ApiError(503, '视频解析服务暂时不可用')
         result = server._parse_share(self.work_url)

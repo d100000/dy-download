@@ -42,7 +42,7 @@ function response(status, body, contentType = 'video/mp4') {
   };
 }
 
-function createHarness(fetchImpl) {
+function createHarness(fetchImpl, file = files[0]) {
   const fetches = [];
   const clicks = [];
   const errors = [];
@@ -106,6 +106,10 @@ function createHarness(fetchImpl) {
     showOk(message) {
       successes.push(message);
     },
+    toast(message) {
+      if (message.startsWith('下载已开始')) successes.push(message);
+      else errors.push(message);
+    },
     window: {
       open(...args) {
         opened.push(args);
@@ -116,7 +120,13 @@ function createHarness(fetchImpl) {
       return 1;
     },
   };
-  vm.runInNewContext(source, context, {filename: 'static/index.html'});
+  let js = source;
+  if (file === 'static/share.html') {
+    const share = fs.readFileSync(file, 'utf8');
+    js = share.slice(share.indexOf('function downloadTarget'), share.indexOf('function imgFail'))
+      + '\nthis.browserDownload = browserDownload;';
+  }
+  vm.runInNewContext(js, context, {filename: file});
   return {
     browserDownload: context.browserDownload,
     fetches,
@@ -214,21 +224,38 @@ test('502 stays in-page, retries once, and never clicks or navigates', async () 
   assert.equal(button.disabled, false);
 });
 
-test('expired payload without a signed endpoint fails before network access', async () => {
-  const harness = createHarness(async () => {
-    throw new Error('fetch must not be called');
-  });
+test('missing signed download routes are not reported as expired links', async () => {
+  for (const file of files.slice(0, 2)) {
+    const harness = createHarness(async () => {
+      throw new Error('fetch must not be called');
+    }, file);
 
-  const ok = await harness.browserDownload(
-    'https://aweme.snssdk.com/aweme/v1/play/?video_id=private',
-    '作品.mp4',
-    null,
-    '',
-    true);
+    const ok = await harness.browserDownload(
+      'https://aweme.snssdk.com/aweme/v1/play/?video_id=private',
+      '作品.mp4',
+      {innerHTML: '下载', disabled: false},
+      '',
+      true);
 
-  assert.equal(ok, false);
-  assert.equal(harness.fetches.length, 0);
-  assert.equal(harness.clicks.length, 0);
-  assert.equal(harness.opened.length, 0);
-  assert.match(harness.errors[0], /重新解析/);
+    assert.equal(ok, false);
+    assert.equal(harness.fetches.length, 0);
+    assert.equal(harness.clicks.length, 0);
+    assert.equal(harness.opened.length, 0);
+    assert.match(harness.errors[0], /重新解析/);
+    assert.match(harness.errors[0], /下载线路/);
+    assert.doesNotMatch(harness.errors[0], /已过期/);
+  }
+});
+
+test('share CDN downloads use the signed same-origin route and a one-byte preflight', async () => {
+  const harness = createHarness(async () => response(206, 'x'), 'static/share.html');
+  const ok = await harness.browserDownload('https://v26-default.365yg.com/video/test/',
+    '视频.mp4', {innerHTML: '下载', disabled: false},
+    '/api/media/video/item_bytecdn?exp=123&sig=abc', true);
+  assert.equal(ok, true);
+  assert.equal(harness.fetches.length, 1);
+  assert.equal(harness.fetches[0].options.headers.Range, 'bytes=0-0');
+  assert.match(harness.clicks[0].href, /^\/api\/media\/video\//);
+  assert.equal(harness.clicks[0].target, 'nativeDownloadTarget');
+  assert.equal(harness.errors.length, 0);
 });

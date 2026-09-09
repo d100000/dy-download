@@ -943,6 +943,15 @@ class MediaSecurityTests(unittest.TestCase):
             server._media_hits.clear()
             server._media_active.clear()
 
+    def test_byte_video_cdn_allowlist_rejects_lookalikes_and_unsafe_urls(self):
+        self.assertTrue(server._host_allowed('https://v26-default.365yg.com/video/'))
+        for url in ('https://365yg.com.evil.example/video/',
+                    'https://evil365yg.com/video/', 'https://365yg.com@127.0.0.1/video/',
+                    'https://user:secret@v26-default.365yg.com/video/',
+                    'https://v26-default.365yg.com:8080/video/',
+                    'file://v26-default.365yg.com/video/'):
+            self.assertFalse(server._host_allowed(url), url)
+
     def test_signed_video_token_rejects_tamper_and_expiry(self):
         vid = "video_id_12345"
         exp, sig = server._media_token("video", vid, 300)
@@ -2184,6 +2193,27 @@ class AtcEnhancementTests(unittest.TestCase):
         job = server.db_exec(
             "SELECT purpose,status FROM atc_jobs WHERE item_id='7300'", (), "one")
         self.assertIsNone(job)
+
+    def test_existing_byte_cdn_share_gets_download_route_without_reparsing(self):
+        item_id = 'item_byte_cdn_existing_snapshot'
+        url = 'https://v26-default.365yg.com/video/test/'
+        now = int(time.time())
+        server._atc_save_result(item_id, {'videoUrl': url})
+        row = {'id': 'bytecdn', 'item_id': item_id, 'kind': 'video', 'vid': '',
+               'title': '暂无标题', 'author': '', 'avatar': '', 'cover': '',
+               'custom_title': '', 'payload': json.dumps({'source': 'parser',
+                   'video': {'source': 'parser', 'filename': 'video.mp4'}}),
+               'expires_at': now + 86400, 'status': 'ok', 'views': 0,
+               'plays': 0, 'downloads': 0, 'created': now}
+        with mock.patch.object(server, '_parse_share', side_effect=AssertionError('no parse')), \
+                mock.patch.object(server, '_atc_enqueue', side_effect=AssertionError('no enqueue')):
+            view = server._share_view(row)
+        video = view['data']['video']
+        self.assertTrue(video['media_available'])
+        self.assertEqual(video['direct_url'], url)
+        self.assertTrue(video['download_url'].startswith('/api/media/video/' + item_id))
+        query = urlparse.parse_qs(urlparse.urlsplit(video['download_url']).query)
+        server._require_media_token('atc_video', item_id, int(query['exp'][0]), query['sig'][0])
 
     def test_share_view_does_not_enqueue_when_media_cache_is_missing(self):
         import json as _json
