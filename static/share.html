@@ -33,14 +33,16 @@ body{
 button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
 a{color:inherit; text-decoration:none}
 img{max-width:100%; display:block}
-.wrap{max-width:540px; margin:0 auto; padding:14px 14px 0}
+.wrap{max-width:640px; margin:0 auto; padding:18px 14px 0}
+:focus-visible{outline:2px solid var(--accent); outline-offset:4px}
+.slogan{margin:4px 0 18px; color:var(--muted); font-size:14px; line-height:1.6}
 
 /* ---------- 头 ---------- */
 .top{display:flex; align-items:center; justify-content:space-between; margin-bottom:12px}
 .brand{display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--muted)}
 .brand b{color:var(--text); font-weight:600}
-.logo{width:24px; height:24px; border-radius:7px; background:linear-gradient(135deg,var(--accent),#8B5CF6);
-  display:grid; place-items:center; color:#fff; font-size:12px; font-weight:700}
+.logo{width:24px; height:24px; border-radius:7px; background:var(--text);
+  display:grid; place-items:center; color:var(--surface); font-size:12px; font-weight:700}
 .top .mini{font-size:12.5px; color:var(--faint); border:1px solid var(--border);
   padding:5px 10px; border-radius:999px}
 
@@ -73,21 +75,49 @@ img{max-width:100%; display:block}
 .btn:disabled{opacity:.48; cursor:not-allowed}
 @media (prefers-reduced-motion:reduce){.media-pending .spinner{animation:none}}
 
-.body{padding:15px 15px 17px}
+.body{padding:20px}
 .badge{display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--ok);
   background:color-mix(in srgb, var(--ok) 12%, transparent); border-radius:999px;
   padding:4px 10px; margin-bottom:9px}
-.title{font-size:17px; font-weight:650; line-height:1.45; letter-spacing:-.01em;
-  display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden}
+.title{font-size:18px; font-weight:650; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere}
 .author{display:flex; align-items:center; gap:10px; margin-top:13px; padding-top:13px; border-top:1px solid var(--border)}
 .author img,.author .ph{width:40px; height:40px; border-radius:50%; object-fit:cover; background:var(--surface-2); flex:0 0 auto}
 .author .n{font-weight:600; font-size:14.5px}
+.author .identity{min-width:0; overflow-wrap:anywhere}
 .author .s{font-size:12px; color:var(--faint)}
 .author .go{margin-left:auto; font-size:12.5px; color:var(--accent); border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
   padding:5px 11px; border-radius:999px; white-space:nowrap}
 .extra{margin-top:11px; font-size:12.5px; color:var(--muted); display:flex; flex-direction:column; gap:5px}
 .tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:9px}
 .tag{font-size:11.5px; color:var(--muted); background:var(--surface-2); padding:3px 9px; border-radius:999px}
+.tag,.extra{overflow-wrap:anywhere}
+.engagement{--columns:4; display:grid; grid-template-columns:repeat(var(--columns),minmax(0,1fr));
+  gap:1px; margin-top:18px; background:var(--border); border:1px solid var(--border); border-radius:12px; overflow:hidden}
+.engagement[data-count="1"]{--columns:1}.engagement[data-count="2"]{--columns:2}.engagement[data-count="3"]{--columns:3}
+.engagement>div{display:flex; flex-direction:column; gap:2px; padding:12px 16px; background:var(--surface-2)}
+.engagement dt{font-size:12px; color:var(--muted)}
+.engagement dd{order:-1; font-size:21px; font-weight:700; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; line-height:1.4}
+.metadata{display:flex; flex-wrap:wrap; gap:14px 24px; margin-top:18px; padding:14px 0; border-block:1px solid var(--border)}
+.metadata dt,.profile-data dt{font-size:12px; color:var(--muted)}
+.metadata dd{font-size:13px; font-weight:550; font-variant-numeric:tabular-nums}
+.metadata+.author{padding-top:0; border-top:0}
+.profile{margin-top:12px; font-size:13px; border-bottom:1px solid var(--border); padding-bottom:12px}
+.profile summary{cursor:pointer; color:var(--muted); width:fit-content}
+.profile-data{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 20px; margin-top:12px}
+.profile-data dd{overflow-wrap:anywhere; font-variant-numeric:tabular-nums}
+.signature{white-space:pre-wrap; overflow-wrap:anywhere; margin-top:12px}
+.snapshot-note{font-size:11.5px; color:var(--muted); margin-top:14px}
+.caption-tools{display:flex; flex-wrap:wrap; gap:16px; margin-top:14px; font-size:13px}
+.caption-tools button,.caption-tools a{color:var(--accent); min-height:32px; display:inline-flex; align-items:center}
+.original-caption{margin-top:12px; font-size:13px; color:var(--muted)}
+.original-caption p{white-space:pre-wrap; overflow-wrap:anywhere; margin-top:8px; color:var(--text)}
+@media(max-width:480px){
+  .body{padding:16px}
+  .engagement[data-count="3"],.engagement[data-count="4"]{--columns:2}
+  .engagement[data-count="3"]>div:last-child{grid-column:1/-1}
+  .engagement>div{padding:10px 12px}.engagement dd{font-size:20px}
+  .top{gap:10px}.brand{font-size:12.5px}.top .mini{white-space:nowrap}
+}
 
 /* ---------- 图集 ---------- */
 .album{display:grid; grid-template-columns:repeat(2,1fr); gap:6px; padding:6px}
@@ -103,7 +133,7 @@ img{max-width:100%; display:block}
   padding:10px 14px calc(10px + env(safe-area-inset-bottom));
   background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(14px);
   border-top:1px solid var(--border)}
-.bar .in{max-width:540px; margin:0 auto; display:flex; gap:9px; width:100%}
+.bar .in{max-width:612px; margin:0 auto; display:flex; gap:9px; width:100%}
 .btn{flex:1; border-radius:13px; padding:13px 10px; font-size:15px; font-weight:600; text-align:center}
 .btn.p{background:var(--accent); color:#fff}
 .btn.p:active{background:var(--accent-hover)}
@@ -229,6 +259,11 @@ async function copyText(text){
 }
 const fmtDate = (ts) => { if(!ts) return ''; const d = new Date(ts*1000);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+const fmtTimestamp = (ts) => {
+  if (!Number.isFinite(Number(ts)) || Number(ts) <= 0) return '';
+  const date = new Date(Number(ts) * 1000);
+  return Number.isNaN(date.getTime()) ? '' : fmtDate(ts) + ' ' + String(date.getHours()).padStart(2,'0') + ':' + String(date.getMinutes()).padStart(2,'0');
+};
 
 function mediaDimensions(video){
   const width = Math.round(Number(video?.videoWidth || video?.width
@@ -241,10 +276,8 @@ function playerInlineStyle(video){
   const dims = mediaDimensions(video);
   if (!dims) return '';
   const ratio = dims.width / dims.height;
-  const maxHeight = Math.max(160, window.innerHeight * .7);
-  const available = Math.max(160, Math.min(window.innerWidth - 28, 560));
-  const width = Math.max(160, Math.min(available, maxHeight * ratio));
-  return `--video-ratio:${dims.width} / ${dims.height};--player-width:${Math.round(width)}px`;
+  // 使用 CSS 视口单位，后台标签初始尺寸为 0 或窗口调整后也会自动适配。
+  return `--video-ratio:${dims.width} / ${dims.height};--player-width:${ratio * 70}vh`;
 }
 /* 埋点：sendBeacon 不阻塞页面。extra 用于播放诊断（source/stage/detail/ms） */
 function track(kind, extra){
@@ -383,19 +416,6 @@ async function pollShareStatus(){
     _statusFailures = 0;
     _statusNotice = '';
     if (d.status === 'ready'){
-      // Metadata may be ready a little before the short-lived media URL. Keep
-      // the page in place and wait for the persisted refresh job instead of
-      // reloading forever with a dead play/download button.
-      if (d.media_available === false && S.kind !== 'note'){
-        S.state = 'ok';
-        S.media_available = false;
-        S.media_pending = true;
-        _statusNotice = '媒体正在准备中，页面会自动重试。';
-        render();
-        _statusPollRound += 1;
-        scheduleStatusPoll(nextStatusPollDelay(d.media_poll_after_ms || 0, 0));
-        return;
-      }
       clearTimeout(_statusTimer); _statusTimer = null;
       location.reload();
       return;
@@ -422,7 +442,7 @@ async function pollShareStatus(){
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){ clearTimeout(_statusTimer); _statusTimer = null; return; }
   if (S.state === 'pending' || S.state === 'processing') scheduleStatusPoll(100);
-  else if (S.state === 'ok' && S.media_available === false) scheduleStatusPoll(100);
+
 });
 
 function retryMedia(){
@@ -432,16 +452,66 @@ function retryMedia(){
 }
 
 /* ---------------- 正常页 ---------------- */
+function publicLink(value){
+  try {
+    const url = new URL(String(value || ''));
+    return ['https:','http:'].includes(url.protocol) && !url.username && !url.password ? url.href : '';
+  } catch { return ''; }
+}
+function countValue(value){
+  if (typeof value !== 'number' && !(typeof value === 'string' && /^\d+$/.test(value.trim()))) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+function countRows(data, labels){
+  return labels.flatMap(([key,label]) => {
+    const value = countValue(data?.[key]);
+    return value === null ? [] : [`<div><dt>${label}</dt><dd>${value.toLocaleString('zh-CN')}</dd></div>`];
+  });
+}
+function engagementBlock(d){
+  const items = countRows(d.stats, [['digg','点赞'],['comment','评论'],['share','分享'],['collect','收藏']]);
+  return items.length ? `<dl class="engagement" data-count="${items.length}" aria-label="作品互动数据">${items.join('')}</dl>` : '';
+}
+function metadataBlock(d){
+  const items = [];
+  const add = (label,value) => { if (value) items.push(`<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`); };
+  const video = d.video || {};
+  const ms = Number(d.duration_ms || video.duration_ms);
+  if (S.kind !== 'note' && Number.isFinite(ms) && ms > 0){
+    const seconds = Math.floor(ms / 1000);
+    const hours = Math.floor(seconds / 3600);
+    add('时长', (hours ? hours + ':' : '') + String(hours ? Math.floor(seconds / 60) % 60 : Math.floor(seconds / 60)).padStart(hours ? 2 : 1,'0') + ':' + String(seconds % 60).padStart(2,'0'));
+  }
+  if (S.kind !== 'note' && countValue(video.width) > 0 && countValue(video.height) > 0)
+    add('分辨率', video.width + ' × ' + video.height);
+  const format = String(video.format || video.filename?.split('.').pop() || '');
+  if (S.kind !== 'note' && /^[a-zA-Z0-9]{2,6}$/.test(format)) add('格式', format.toUpperCase());
+  if (countValue(d.create_time) > 0) add('发布于', fmtTimestamp(d.create_time));
+  return items.length ? `<dl class="metadata" aria-label="作品信息">${items.join('')}</dl>` : '';
+}
+function profileBlock(d){
+  const profile = d.author_detail || {};
+  const items = countRows(profile, [['follower_count','粉丝'],['total_favorited','获赞'],['following_count','关注'],['aweme_count','作品']]);
+  const id = profile.unique_id || profile.douyin_id || profile.short_id;
+  if (id) items.unshift(`<div><dt>抖音号</dt><dd>${esc(id)}</dd></div>`);
+  if (!items.length && !profile.signature) return '';
+  return `<details class="profile"><summary>作者资料</summary>
+    ${items.length ? `<dl class="profile-data">${items.join('')}</dl>` : ''}
+    ${profile.signature ? `<p class="signature">${esc(profile.signature)}</p>` : ''}</details>`;
+}
 function authorBlock(d){
-  const av = S.avatar ? `<img src="${esc(S.avatar)}" alt="" referrerpolicy="no-referrer">` : '<div class="ph"></div>';
-  const home = d.author_url || '';
+  const profile = d.author_detail || {};
+  const avatar = publicLink(S.avatar || profile.avatar);
+  const av = avatar ? `<img src="${esc(avatar)}" alt="" referrerpolicy="no-referrer">` : '<div class="ph"></div>';
+  const home = publicLink(d.author_url || profile.author_url);
   return `<div class="author">
     ${av}
-    <div>
-      <div class="n">${esc(S.author) || '未知作者'}</div>
-      <div class="s">${d.create_time ? '发布于 ' + fmtDate(d.create_time) : '抖音创作者'}</div>
+    <div class="identity">
+      <div class="n">${esc(S.author || profile.nickname) || '未知作者'}</div>
+      <div class="s">抖音创作者</div>
     </div>
-    ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener">原作品 ›</a>` : ''}
+    ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener noreferrer">作者主页 ↗</a>` : ''}
   </div>`;
 }
 function extraBlock(d){
@@ -450,8 +520,20 @@ function extraBlock(d){
   if (d.location) h += `<div>📍 ${esc(d.location)}</div>`;
   const ex = h ? `<div class="extra">${h}</div>` : '';
   const tg = (d.tags && d.tags.length)
-    ? `<div class="tags">${d.tags.slice(0,8).map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}</div>` : '';
+    ? `<div class="tags">${d.tags.map(t=>`<span class="tag">#${esc(t)}</span>`).join('')}</div>` : '';
   return ex + tg;
+}
+function captionBlock(d){
+  const original = /^\d{8,30}$/.test(S.item_id || '')
+    ? 'https://www.douyin.com/' + (S.kind === 'note' ? 'note/' : 'video/') + S.item_id : '';
+  const caption = d.title || S.title || '';
+  return `${caption && caption !== S.title ? `<details class="original-caption"><summary>原作品文案</summary><p>${esc(caption)}</p></details>` : ''}
+    <div class="caption-tools">${caption ? '<button type="button" onclick="copyCaption()">复制文案</button>' : ''}
+    ${original ? `<a href="${esc(original)}" target="_blank" rel="noopener noreferrer">查看原作品 ↗</a>` : ''}</div>
+    ${fmtTimestamp(S.snapshot_at) ? `<p class="snapshot-note">数据获取于 ${esc(fmtTimestamp(S.snapshot_at))} · 互动数以获取时为准</p>` : ''}`;
+}
+function copyCaption(){
+  copyText(S.data?.title || S.title || '').then(ok => toast(ok ? '文案已复制' : '复制失败，请重试'));
 }
 
 function render(){
@@ -475,7 +557,7 @@ function render(){
         ${S.cover ? `<img class="poster" id="poster" src="${esc(S.cover)}" alt="" referrerpolicy="no-referrer">` : ''}
         ${hasMedia
           ? `<button class="playbtn" id="playBtn" type="button" aria-label="播放视频" onclick="startPlay()"><i aria-hidden="true"></i></button>`
-          : `<div class="media-pending" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><p>${esc(_statusNotice || '视频正在准备中，请稍候…')}</p><button type="button" onclick="retryMedia()">重新检查</button></div>`}
+          : `<div class="media-pending" role="status" aria-live="polite"><p>视频暂时无法播放，已获取的作品信息仍可查看。</p><button type="button" onclick="retryMedia()">重新检查</button></div>`}
         <div class="loading" id="loading">加载中…</div>
       </div>`;
 
@@ -485,14 +567,19 @@ function render(){
       <a class="brand" href="/"><span class="logo">↓</span><b>抖音无水印</b>· 分享页</a>
       <a class="mini" href="/">生成我的 →</a>
     </div>
+    <p class="slogan">分享抖音视频，微信点开就能看</p>
 
     <div class="card">
       ${media}
       <div class="body">
         <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'}</span>
-        <div class="title">${esc(S.title)}</div>
+        <h1 class="title">${esc(S.title)}</h1>
+        ${engagementBlock(d)}
+        ${metadataBlock(d)}
         ${authorBlock(d)}
+        ${profileBlock(d)}
         ${extraBlock(d)}
+        ${captionBlock(d)}
       </div>
     </div>
 
@@ -543,11 +630,8 @@ function syncPlayerRatio(video){
   const box = document.getElementById('playerBox');
   if (!(width > 0 && height > 0) || !box || !box.style?.setProperty) return;
   const ratio = `${width} / ${height}`;
-  const maxHeight = Math.max(160, window.innerHeight * .7);
-  const available = Math.max(160, Math.min(window.innerWidth - 28, 560));
-  const boxWidth = Math.max(160, Math.min(available, maxHeight * width / height));
   box.style.setProperty('--video-ratio', ratio);
-  box.style.setProperty('--player-width', `${Math.round(boxWidth)}px`);
+  box.style.setProperty('--player-width', `${width / height * 70}vh`);
   box.classList.toggle('wide', width / height > 1.05);
 }
 function startPlay(){
@@ -1088,8 +1172,7 @@ if (!S || !S.state || S.state !== 'ok') {
     scheduleStatusPoll(nextStatusPollDelay(S.poll_after_ms, 0));
 } else {
   render(); setupWxShare();
-  if (S.kind !== 'note' && S.media_available === false)
-    scheduleStatusPoll(nextStatusPollDelay(S.media_poll_after_ms, 0));
+
 }
 </script>
 </body>

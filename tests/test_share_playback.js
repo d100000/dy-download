@@ -187,7 +187,7 @@ test('loaded metadata changes the player box to the real landscape ratio', () =>
   video.videoHeight = 1080;
   video.dispatch('loadedmetadata');
   assert.equal(h.elements.playerBox.style.values['--video-ratio'], '1920 / 1080');
-  assert.match(h.elements.playerBox.style.values['--player-width'], /px$/);
+  assert.match(h.elements.playerBox.style.values['--player-width'], /vh$/);
 });
 
 test('a resolved play promise alone does not report playback success', () => {
@@ -216,15 +216,83 @@ test('players use metadata-driven aspect ratios and stay centered', () => {
   assert.doesNotMatch(portrait, /aspect-ratio:9\/16/);
 });
 
-test('share page hides interaction counts and backend provider details', () => {
-  assert.doesNotMatch(html, /function statsBlock/);
-  assert.doesNotMatch(html, /class="stats"/);
-  assert.doesNotMatch(html, /class="stat"/);
-  assert.doesNotMatch(html, /\[['"]点赞['"],/);
-  assert.doesNotMatch(html, /❤.*💬.*★/);
+test('share page hides backend provider details', () => {
   assert.doesNotMatch(html, /AnyToCopy/i);
   assert.doesNotMatch(html, /直连优先 · 兼容线路兜底/);
   assert.match(html, /第三方内容解析服务/);
+});
+
+function metadataHarness(data = {}, share = {}) {
+  const context = {
+    S: {kind: 'video', title: '分享标题', author: '作者', item_id: '7682023366300556537', data, ...share},
+    URL,
+    esc: value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
+    fmtDate: () => '2026-09-09',
+    fmtTimestamp: ts => ts ? '2026-09-09 12:30' : '',
+  };
+  const start = html.indexOf('function publicLink');
+  const end = html.indexOf('function render(){', start);
+  vm.runInNewContext(html.slice(start, end), context);
+  return context;
+}
+
+test('share snapshot counts preserve zero and hide all missing or invalid values', () => {
+  const c = metadataHarness();
+  const content = c.engagementBlock({stats: {digg: 93774, comment: 0, share: null, collect: '6792'}});
+  assert.match(content, /<dt>点赞<\/dt><dd>93,774<\/dd>/);
+  assert.match(content, /<dt>评论<\/dt><dd>0<\/dd>/);
+  assert.match(content, /<dt>收藏<\/dt><dd>6,792<\/dd>/);
+  assert.doesNotMatch(content, /<dt>分享/);
+  for (const value of [undefined, null, '', ' ', false, -1, 1.2, NaN, Infinity, {}, [], '1万', '<img>']) {
+    assert.equal(c.engagementBlock({stats: {digg: value}}), '');
+  }
+});
+
+test('share metadata only renders available video fields and supports albums', () => {
+  const c = metadataHarness();
+  assert.equal(c.metadataBlock({}), '');
+  const content = c.metadataBlock({duration_ms: 3672000, video: {width: 1920, height: 1080, filename: 'test.mp4'}});
+  assert.match(content, /1:01:12/);
+  assert.match(content, /1920 × 1080/);
+  assert.match(content, /MP4/);
+  c.S.kind = 'note';
+  assert.equal(c.metadataBlock({duration_ms: 1000, video: {width: 1920, height: 1080}}), '');
+});
+
+test('author profile uses saved fields, escapes text and rejects unsafe profile links', () => {
+  const c = metadataHarness();
+  assert.equal(c.profileBlock({}), '');
+  const profile = c.profileBlock({author_detail: {follower_count: 0, total_favorited: 620201, signature: '<script>evil</script>'}});
+  assert.match(profile, /<dt>粉丝<\/dt><dd>0<\/dd>/);
+  assert.match(profile, /620,201/);
+  assert.match(profile, /&lt;script&gt;/);
+  assert.doesNotMatch(profile, /<script>/);
+  assert.doesNotMatch(c.authorBlock({author_url: 'javascript:alert(1)'}), /href=/);
+  assert.doesNotMatch(c.authorBlock({author_url: 'https://user:secret@example.com'}), /href=/);
+  assert.match(c.authorBlock({author_url: 'https://www.douyin.com/user/abc'}), /作者主页/);
+});
+
+test('custom share titles keep the full original caption and tags available', () => {
+  const c = metadataHarness();
+  const title = '完整文案'.repeat(200) + '<img>';
+  assert.match(c.captionBlock({title}), /原作品文案/);
+  assert.ok(c.captionBlock({title}).includes('完整文案'.repeat(200)));
+  assert.doesNotMatch(c.captionBlock({title}), /<img>/);
+  const tags = Array.from({length: 12}, (_, i) => 'tag' + i);
+  assert.match(c.extraBlock({tags}), /#tag11/);
+});
+
+test('ready shares never poll or fetch metadata, including unavailable media', () => {
+  const start = html.indexOf('/* ---------------- 入口 ---------------- */');
+  for (const available of [true, false]) {
+    const calls = [];
+    vm.runInNewContext(html.slice(start, html.indexOf('</script>', start)), {
+      S: {state: 'ok', kind: 'video', media_available: available},
+      render: () => calls.push('render'), setupWxShare: () => calls.push('wx'),
+      scheduleStatusPoll: () => { throw Error('ready shares must not poll'); },
+    });
+    assert.deepEqual(calls, ['render', 'wx']);
+  }
 });
 
 

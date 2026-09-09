@@ -736,6 +736,136 @@ class AsyncShareTests(unittest.TestCase):
         self.assertEqual(invalid.exception.status, 422)
 
 
+class ParseSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self.item_id = '7990000012345678901'
+        self.link = f'https://www.douyin.com/video/{self.item_id}'
+        self.request = make_request('/api/share', client_ip='203.0.113.149')
+        self.data = {
+            'item_id': self.item_id, 'kind': 'video', 'source': 'douyin_direct',
+            'title': '完整文案' * 100, 'author': '测试作者', 'platform': 'douyin',
+            '_link': self.link + '?private=tracking', 'duration_ms': 752000,
+            'stats': {'digg': 0, 'comment': 2545, 'share': 15996, 'collect': None},
+            'video': {'source': 'douyin_direct', 'width': 1920, 'height': 1080,
+                      'url': 'https://v3.douyinvod.com/test.mp4?signature=private',
+                      'proxy_url': '/api/douyin/video/old?sig=old', 'filename': 'test.mp4'},
+        }
+        self.clean()
+        self.addCleanup(self.clean)
+
+    def clean(self):
+        for key in (self.link, self.item_id):
+            server._cache.pop(key, None)
+        server._author_cache.pop(self.item_id, None)
+        server._share_hits.clear()
+        server.db_exec('DELETE FROM shares WHERE item_id=?', (self.item_id,))
+        server.db_exec('DELETE FROM parse_snapshots WHERE item_id=?', (self.item_id,))
+        server.db_exec('DELETE FROM blocked_share_items WHERE item_id=?', (self.item_id,))
+
+    def save(self):
+        server._author_cache[self.item_id] = (time.time(), {
+            'nickname': '测试作者', 'follower_count': 0, 'following_count': None,
+            'signature': '已获取的作者简介', 'sec_uid': 'not-a-public-field',
+        })
+        with mock.patch.object(server, '_parse_share', return_value=self.data):
+            return server._parse_cached(self.link)
+
+    def create(self):
+        return server.api_share_create(server.ShareBody(item_id=self.item_id), self.request)
+
+    def test_success_persists_complete_metadata_without_signed_media_or_input(self):
+        result = self.save()
+        stored = server._get_parse_snapshot(self.item_id)
+        self.assertEqual(stored['stats'], self.data['stats'])
+        self.assertEqual(stored['title'], self.data['title'])
+        self.assertEqual(stored['author_detail']['follower_count'], 0)
+        self.assertEqual(stored['video']['width'], 1920)
+        self.assertEqual(stored['snapshot_at'], result['snapshot_at'])
+        raw = json.dumps(stored)
+        for private in ('private=tracking', 'signature=private', 'sig=old', 'sec_uid'):
+            self.assertNotIn(private, raw)
+        self.assertIn('signature=private', result['video']['url'])
+
+    def test_restart_can_create_and_read_share_without_network_or_quota(self):
+        result = self.save()
+        server._cache.pop(self.item_id, None)
+        server._cache.pop(self.link, None)
+        server._author_cache.pop(self.item_id, None)
+        with mock.patch.object(server, '_parse_share', side_effect=AssertionError('no parse')), \
+                mock.patch.object(server, '_atc_enqueue', side_effect=AssertionError('no queue')), \
+                mock.patch.object(server, '_refresh_share', side_effect=AssertionError('no refresh')), \
+                mock.patch.object(server, '_fetch_user_info', side_effect=AssertionError('no author fetch')), \
+                mock.patch.object(server, 'open_url', side_effect=AssertionError('no outbound')), \
+                mock.patch.object(server, 'reserve_quota', side_effect=AssertionError('no extra quota')):
+            share = self.create()
+            for _ in range(2):
+                view = server.api_share_get(share['sid'], self.request)
+                self.assertEqual(view['title'], self.data['title'])
+                self.assertEqual(view['data']['stats']['digg'], 0)
+                self.assertEqual(view['snapshot_at'], result['snapshot_at'])
+                self.assertTrue(view['media_available'])
+                self.assertIn('proxy_url', view['data']['video'])
+                self.assertNotIn('url', view['data']['video'])
+                self.assertEqual(server.share_page(share['sid'], self.request).status_code, 200)
+                status = server.api_share_status(share['sid'], self.request)['data']
+                self.assertEqual(status['status'], 'ready')
+                self.assertFalse(status['media_pending'])
+            self.assertEqual(server.api_author(self.item_id)['follower_count'], 0)
+
+    def test_expired_snapshot_is_rejected_and_cleaned_without_extending_share(self):
+        self.save()
+        share = self.create()
+        server.db_exec('UPDATE parse_snapshots SET expires_at=? WHERE item_id=?',
+                       (int(time.time()) - 1, self.item_id))
+        self.assertIsNone(server._get_parse_snapshot(self.item_id))
+        server._cleanup_retained_data(force=True)
+        self.assertIsNone(server.db_exec('SELECT * FROM parse_snapshots WHERE item_id=?',
+                                        (self.item_id,), 'one'))
+        self.assertEqual(server.api_share_get(share['sid'], self.request)['expires_at'], share['expires_at'])
+
+    def test_author_enrichment_updates_saved_snapshots_without_overwriting_zero(self):
+        self.save()
+        share = self.create()
+        before = server.db_exec('SELECT expires_at FROM parse_snapshots WHERE item_id=?',
+                                (self.item_id,), 'one')[0]
+        server._author_cache[self.item_id][1]['sec_uid'] = 'author-sec'
+        with mock.patch.object(server, '_fetch_user_info', return_value={
+                'follower_count': 99, 'following_count': 12, 'total_favorited': 3456}):
+            server.api_author(self.item_id)
+        stored = server._get_parse_snapshot(self.item_id)
+        shared = server.api_share_get(share['sid'], self.request)['data']
+        for data in (stored, shared):
+            self.assertEqual(data['author_detail']['follower_count'], 0)
+            self.assertEqual(data['author_detail']['following_count'], 12)
+            self.assertEqual(data['author_detail']['total_favorited'], 3456)
+        after = server.db_exec('SELECT expires_at FROM parse_snapshots WHERE item_id=?',
+                               (self.item_id,), 'one')[0]
+        self.assertEqual(before, after)
+        # 再次解析的基础作者字段较少时，保留此前已经获取并保存的资料。
+        server._cache.pop(self.link, None)
+        self.save()
+        self.assertEqual(server._get_parse_snapshot(self.item_id)[
+            'author_detail']['total_favorited'], 3456)
+
+    def test_saved_snapshot_cannot_bypass_takedown(self):
+        self.save()
+        server._cache.pop(self.item_id, None)
+        server.db_exec('INSERT INTO blocked_share_items(kind,item_id,created) VALUES(?,?,?)',
+                       ('video', self.item_id, int(time.time())))
+        with self.assertRaises(server.ApiError) as caught:
+            self.create()
+        self.assertEqual(caught.exception.status, 451)
+
+    def test_legacy_share_with_no_media_never_triggers_repair_on_page_read(self):
+        self.save()
+        share = self.create()
+        server.db_exec('UPDATE shares SET payload=? WHERE id=?',
+                       (json.dumps({'title': '历史数据', 'video': {}}), share['sid']))
+        with mock.patch.object(server, '_refresh_share', side_effect=AssertionError('no repair')):
+            response = server.share_page(share['sid'], self.request)
+        self.assertEqual(response.status_code, 200)
+
+
 class SyncShareLockTests(unittest.TestCase):
     """同步分享页在登录会话下不能递归获取全局数据库锁。"""
 
@@ -2045,7 +2175,7 @@ class AtcEnhancementTests(unittest.TestCase):
         view = server._share_view(row)
         self.assertEqual(view["data"]["video"].get("direct_url"),
                          "https://v3.douyinvod.com/x.mp4")
-        # 过期：不注入且惰性入队
+        # 过期：不注入，也不因读取而入队
         server.db_exec(
             "UPDATE atc_cache SET url_fetched_at=? WHERE item_id='7300'",
             (now - 100000,))
@@ -2053,9 +2183,9 @@ class AtcEnhancementTests(unittest.TestCase):
         self.assertNotIn("atc_url", view["data"]["video"])
         job = server.db_exec(
             "SELECT purpose,status FROM atc_jobs WHERE item_id='7300'", (), "one")
-        self.assertEqual(tuple(job), ("play", "pending"))
+        self.assertIsNone(job)
 
-    def test_share_view_enqueues_when_atc_cache_is_missing(self):
+    def test_share_view_does_not_enqueue_when_media_cache_is_missing(self):
         import json as _json
         self._enable()
         row = {"id": "atc-missing", "item_id": "7301", "kind": "video", "vid": "",
@@ -2071,10 +2201,9 @@ class AtcEnhancementTests(unittest.TestCase):
         self.assertNotIn("url", view["data"]["video"])
         self.assertNotIn("_link", view["data"])
         self.assertNotIn("work_url", view["data"])
-        enqueue.assert_called_once_with(
-            "7301", work_url="https://v.douyin.com/missing/", purpose="play")
+        enqueue.assert_not_called()
 
-    def test_video_share_page_queues_refresh_without_blocking_on_extraction(self):
+    def test_video_share_page_reads_snapshot_without_refresh(self):
         import json as _json
         self._enable()
         sid = "atc-page-refresh"
@@ -2096,8 +2225,7 @@ class AtcEnhancementTests(unittest.TestCase):
                 response = server.share_page(
                     sid, make_request(f"/s/{sid}"))
             self.assertEqual(response.status_code, 200)
-            enqueue.assert_called_once_with(
-                "7304", work_url="https://v.douyin.com/page-refresh/", purpose="play")
+            enqueue.assert_not_called()
         finally:
             server.db_exec("DELETE FROM shares WHERE id=?", (sid,))
 

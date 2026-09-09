@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.21.3"
+APP_VERSION = "1.22.0"
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -259,6 +259,12 @@ CREATE TABLE IF NOT EXISTS shares(
 );
 CREATE INDEX IF NOT EXISTS idx_shares_owner ON shares(owner_user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_item ON shares(item_id);
+-- 成功解析的临时元数据快照；不保存输入文案或短时媒体签名。
+CREATE TABLE IF NOT EXISTS parse_snapshots(
+  item_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+  created INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_parse_snapshots_expiry ON parse_snapshots(expires_at);
 CREATE TABLE IF NOT EXISTS share_submissions(
   sid TEXT PRIMARY KEY, ts INTEGER, owner_scope TEXT, ip_scope TEXT,
   user_id INTEGER
@@ -1172,6 +1178,7 @@ def _cleanup_retained_data(force: bool = False) -> None:
             # 覆盖小时窗口和跨日边界，同时避免审计摘要无限增长。
             conn.execute("DELETE FROM share_submissions WHERE ts<?",
                          (int(now) - 2 * 86400,))
+            conn.execute("DELETE FROM parse_snapshots WHERE expires_at<=?", (int(now),))
             expired_shares = conn.execute(
                 "SELECT quota_reservation_id FROM shares "
                 "WHERE expires_at>0 AND expires_at<?", (int(now),)).fetchall()
@@ -1233,6 +1240,7 @@ ALLOWED_HOST_SUFFIXES = (
 )
 
 CACHE_TTL = 1800      # 解析结果缓存 30 分钟
+PARSE_SNAPSHOT_TTL = 86400  # 成功元数据暂存 24 小时；分享页另按自身有效期保存
 
 # 代理测试目标
 TEST_URL_IP = "https://api.ipify.org?format=json"     # 出口 IP
@@ -4348,6 +4356,23 @@ def _parse_item(kind: str, item_id: str) -> dict:
     return _atc_parse_work_url(work_url, item_id_hint=item_id, kind_hint=kind)
 
 
+def _remember_parse_result(key: str, data: dict, now: float) -> dict:
+    """成功后先持久化展示快照，再返回结果；网页、批量和开放 API 共用。"""
+    data = dict(data)
+    data["snapshot_at"] = int(now)
+    detail = _snapshot_author(data)
+    previous = _get_parse_snapshot(str(data.get("item_id") or "")) or {}
+    previous_author = previous.get("author_detail")
+    if isinstance(previous_author, dict):
+        detail = _merge_missing_fields(detail, previous_author)
+    if detail:
+        data["author_detail"] = detail
+    _save_parse_snapshot(data)
+    _cache_put(key, data, now)
+    _cache_put(data["item_id"], data, now)
+    return data
+
+
 def _parse_cached(text: str) -> dict:
     key = text.strip()
     if not key:
@@ -4384,9 +4409,7 @@ def _parse_cached(text: str) -> dict:
                         item_id_hint=item_id,
                         kind_hint=cached_data.get("kind") or "video",
                     )
-                    _cache_put(key, refreshed, now)
-                    _cache_put(refreshed.get("item_id", key), refreshed, now)
-                    return refreshed
+                    return _remember_parse_result(key, refreshed, time.time())
                 except Exception:
                     # 刷新失败时只返回元数据和可再刷新的同源端点，
                     # 不能回退为结果缓存里已过期的 CDN 签名 URL。
@@ -4418,9 +4441,7 @@ def _parse_cached(text: str) -> dict:
                     return safe
             return cached_data
     data = _parse_share(text)
-    _cache_put(key, data, now)
-    _cache_put(data["item_id"], data, now)
-    return data
+    return _remember_parse_result(key, data, time.time())
 
 
 # ---------------------------------------------------------------- 分享页
@@ -4433,7 +4454,6 @@ def _parse_cached(text: str) -> dict:
 
 SHARE_TTL_ANON = int(os.environ.get("SHARE_TTL_ANON_DAYS", "7")) * 86400
 SHARE_TTL_USER = int(os.environ.get("SHARE_TTL_USER_DAYS", "30")) * 86400
-SHARE_REFRESH_TTL = 12 * 3600          # 图集直链超过这个时长就在下次访问时刷新
 SHARE_MAX_PER_HOUR = 30                # 匿名创建限频（每 IP）
 SHARE_PARSE_WORKERS = _clamped_env_int("SHARE_PARSE_WORKERS", 2, 1, 4)
 SHARE_PARSE_LEASE_SECONDS = _clamped_env_int(
@@ -4793,16 +4813,10 @@ def _share_view(row: dict, origin: str = "") -> dict:
                     row["item_id"], filename)
                 video["media_available"] = True
         else:
-            # 缓存缺失和缓存过期都走同一条惰性刷新路径。优先使用分享
-            # 快照中的原始链接，避免旧数据只能拿 item_id 时无法入队。
-            # 旧同步分享快照把原始链接保存在 shares.source_url，而新快照
-            # 可能暂存于 payload._link；两者都只用于后台入队，绝不公开。
+            # 展示只读快照与已有媒体缓存，不能因访问/轮询创建解析任务。
+            # 抖音签名地址在用户点击播放或下载后由同源媒体端点按需刷新。
             source_link = (data.get("_link") or data.get("work_url")
                            or row.get("source_url") or "")
-            if source_link:
-                _atc_enqueue(row["item_id"], work_url=source_link, purpose="play")
-            else:
-                _atc_enqueue(row["item_id"], purpose="play")
             # 主媒体缓存缺失时，抖音仍可通过同源端点按真实来源进行补充。
             fallback_link = source_link or (cached or {}).get("work_url") or ""
             if (_is_douyin_work_url(fallback_link)
@@ -4819,13 +4833,11 @@ def _share_view(row: dict, origin: str = "") -> dict:
             _safe_name(row["title"] or "", row["item_id"]) + ".mp4")
         data["video"]["filename"] = filename
         data["video"]["download_url"] = _video_download_url(row["vid"], filename)
-        # 旧分享页可附加 ATC 地址；过期则后台惰性重新入队，本次走旧线路。
+        # 旧分享页只附加已有的新鲜地址；访问本身不再入队。
         if cfg["enabled"] and cfg["play_enhance"]:
             cached = _atc_cache_get(row["item_id"])
             if _atc_url_fresh(cached, cfg["url_ttl"]):
                 data["video"]["atc_url"] = cached["video_url"]
-            elif cached:
-                _atc_enqueue(row["item_id"], purpose="play")
     # 官方签名地址由服务端出口生成，微信/访客优先走同源代理。
     if state == "ok":
         data["play_priority"] = (["proxy", "dy1", "dy2"]
@@ -4841,7 +4853,7 @@ def _share_view(row: dict, origin: str = "") -> dict:
         "sid": row["id"],
         "kind": row["kind"],
         "item_id": row["item_id"],
-        "title": row["custom_title"] or row["title"] or (
+        "title": row["custom_title"] or data.get("title") or row["title"] or (
             "视频正在准备中" if state in ("pending", "processing") else "（无标题）"),
         "author": row["author"] or "",
         "avatar": row["avatar"] or "",
@@ -4849,6 +4861,7 @@ def _share_view(row: dict, origin: str = "") -> dict:
         # 社交分享用的封面（无签名 JPEG、不过期）——JS-SDK 卡片图与海报都用它
         "card_cover": _card_cover(row["cover"] or ""),
         "created": row["created"],
+        "snapshot_at": data.get("snapshot_at") or row.get("ready_at") or row["created"],
         "expires_at": row["expires_at"],
         "state": state,
         "ready": state == "ok",
@@ -4864,9 +4877,7 @@ def _share_view(row: dict, origin: str = "") -> dict:
         media_available = bool(
             current_video.get("media_available")
             or current_video.get("url") or current_video.get("proxy_url"))
-    media_pending = bool(
-        state in ("pending", "processing")
-        or (state == "ok" and not media_available and is_atc))
+    media_pending = state in ("pending", "processing")
     view.update({
         "media_available": media_available,
         "media_pending": media_pending,
@@ -4900,6 +4911,7 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
     kind = str(data.get("kind") or "video")
     reservation_id = (reservation or {}).get("id") or None
     stored_data = _share_storage_payload(data)
+    stored_data.setdefault("snapshot_at", now)
     vid = ""
     if data.get("video", {}).get("url"):
         vm = re.search(r"video_id=([\w-]+)", data["video"]["url"])
@@ -4935,13 +4947,6 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
             raise
         finally:
             conn.close()
-    # 视频地址只从 ATC 缓存按需补充；创建事务本身不阻塞等待上游。
-    if (data.get("kind") != "note" and data.get("item_id")
-            and data.get("source") in ("atc", "parser")):
-        try:
-            _atc_enqueue(data["item_id"], purpose="play")
-        except Exception:
-            pass
     return _share_view(row, _share_origin(request))      # 新链接按域名池分配
 
 
@@ -5063,6 +5068,78 @@ def _share_item_key(data: dict) -> tuple[str, str]:
     return (str(data.get("kind") or "video"), str(data.get("item_id") or ""))
 
 
+def _snapshot_author(data: dict) -> dict:
+    """只取已获取的公开作者字段，不在保存/展示路径请求作者接口。"""
+    detail = data.get("author_detail")
+    detail = dict(detail) if isinstance(detail, dict) else {}
+    cached = (_author_cache.get(str(data.get("item_id") or "")) or (0, {}))[1]
+    detail = _merge_missing_fields(detail, cached)
+    fields = ("nickname", "author", "avatar", "author_url", "unique_id",
+              "short_id", "douyin_id", "signature", "follower_count",
+              "total_favorited", "following_count", "aweme_count")
+    return {key: detail[key] for key in fields
+            if detail.get(key) is not None and detail[key] != ""}
+
+
+def _save_parse_snapshot(data: dict) -> None:
+    item_id = str(data.get("item_id") or "")
+    if not item_id:
+        return
+    now = int(time.time())
+    stored = _share_storage_payload(data)
+    stored.setdefault("snapshot_at", now)
+    db_exec(
+        "INSERT INTO parse_snapshots(item_id,payload,created,expires_at) VALUES(?,?,?,?) "
+        "ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload,"
+        "created=excluded.created,expires_at=excluded.expires_at",
+        (item_id, json.dumps(stored, ensure_ascii=False), now, now + PARSE_SNAPSHOT_TTL))
+
+
+def _get_parse_snapshot(item_id: str) -> Optional[dict]:
+    row = db_exec("SELECT payload FROM parse_snapshots WHERE item_id=? AND expires_at>?",
+                  (item_id, int(time.time())), "one")
+    if not row:
+        return None
+    try:
+        data = json.loads(row["payload"])
+        return data if isinstance(data, dict) and data.get("item_id") == item_id else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_author_snapshot(item_id: str, detail: dict) -> None:
+    """作者详情获取成功后补入已保存的快照；不延长保留期，不覆盖已有计数。"""
+    public = _snapshot_author({"item_id": item_id, "author_detail": detail})
+    if not public:
+        return
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for table, key, condition in (
+                ("parse_snapshots", "item_id", "expires_at>?"),
+                ("shares", "id", "status='ok' AND COALESCE(parse_status,'ready')='ready' "
+                 "AND (expires_at=0 OR expires_at>?)"),
+            ):
+                rows = conn.execute(
+                    f"SELECT {key},payload FROM {table} WHERE item_id=? AND {condition}",
+                    (item_id, now)).fetchall()
+                for row in rows:
+                    data = json.loads(row["payload"] or "{}")
+                    old = data.get("author_detail")
+                    data["author_detail"] = _merge_missing_fields(
+                        old if isinstance(old, dict) else {}, public)
+                    conn.execute(f"UPDATE {table} SET payload=? WHERE {key}=?",
+                                 (json.dumps(data, ensure_ascii=False), row[key]))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 def _share_storage_payload(data: dict) -> dict:
     """保存分享快照前移除短时媒体地址。
 
@@ -5073,6 +5150,11 @@ def _share_storage_payload(data: dict) -> dict:
         stored = json.loads(json.dumps(data or {}, ensure_ascii=False))
     except (TypeError, ValueError):
         stored = dict(data or {}) if isinstance(data, dict) else {}
+    detail = _snapshot_author(stored)
+    if detail:
+        stored["author_detail"] = detail
+    for key in ("_link", "work_url", "source_url"):
+        stored.pop(key, None)
     video = stored.get("video")
     source = str(
         stored.get("source")
@@ -5089,6 +5171,8 @@ def _share_storage_payload(data: dict) -> dict:
         stored["media_available"] = False
     if not isinstance(video, dict):
         return stored
+    for key in ("work_url", "source_url"):
+        video.pop(key, None)
     if source in _LEGACY_DIRECT_SOURCES or source in ("atc", "parser"):
         for key in ("url", "atc_url", "direct_url", "proxy_url",
                     "download_url", "alt_url"):
@@ -5344,9 +5428,14 @@ def api_share_create(body: ShareBody, request: Request):
         if hit and time.time() - hit[0] < CACHE_TTL:
             data = hit[1]
         else:
-            # 缓存已过期：本站已有该作品的分享页时可直接复用快照，仍然零解析成本
+            data = _get_parse_snapshot(body.item_id.strip())
+        if data is None:
+            # 内存和临时快照已过期：只复用仍在有效期内的已完成分享。
             row = db_exec("SELECT * FROM shares WHERE item_id=? AND status='ok' "
-                          "ORDER BY created DESC LIMIT 1", (body.item_id.strip(),), "one")
+                          "AND COALESCE(parse_status,'ready')='ready' "
+                          "AND (expires_at=0 OR expires_at>?) "
+                          "ORDER BY created DESC LIMIT 1",
+                          (body.item_id.strip(), int(time.time())), "one")
             if row:
                 data = json.loads(dict(row)["payload"] or "{}")
     if data is None:
@@ -8105,9 +8194,13 @@ def api_author(item_id: str):
     """
     hit = _author_cache.get(item_id)
     if not hit:
+        snapshot = _get_parse_snapshot(item_id)
+        if snapshot and snapshot.get("author_detail"):
+            return snapshot["author_detail"]
         raise ApiError(404, "作者信息不存在或已过期，请重新解析该视频")
     detail = hit[1]
     if detail.get("enriched") and time.time() - hit[0] < 600:
+        _save_author_snapshot(item_id, detail)
         return detail
     sec = detail.get("sec_uid")
     if sec:
@@ -8117,9 +8210,11 @@ def api_author(item_id: str):
                 merged[key] = _douyin_number(merged.get(key))
             merged["enriched"] = True
             _author_cache[item_id] = (time.time(), merged)
+            _save_author_snapshot(item_id, merged)
             return merged
         except Exception:
             pass                         # 富化失败就返回基础字段，不影响头像浮层
+    _save_author_snapshot(item_id, detail)
     return detail
 
 
@@ -9835,7 +9930,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "faq": [
                 ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。公开作品链接会提交给已配置的第三方内容解析服务，抖音缺失信息由服务器通过官方接口补全；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
-                ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面只保存作品的标题封面等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
+                ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面保存作品文案、互动数据和已获取的作者资料等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录源平台账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
                 ("解析得到的视频有水印吗？", "本站优先展示可获取的无水印原片，也不会加入本站自己的二次水印；实际可提取内容以源平台和作品类型为准。"),
                 ("支持图集（图片作品）下载吗？", "支持。图集作品会自动识别，可逐张下载原图，也可批量下载。"),
@@ -9853,7 +9948,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "faq": [
                 ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
-                ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page only stores the post's title and cover; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
+                ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page stores the post’s metadata, including its caption, engagement counts and available author details; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
                 ("Do downloaded videos have a watermark?", "No. You get the original video with no watermark, and we never add our own."),
                 ("Can I download photo galleries (image posts)?", "Yes. Image posts are detected automatically; download each original image or batch-download them."),
@@ -10028,26 +10123,7 @@ def share_page(sid: str, request: Request):
     view = None
     if row:
         row = dict(row)
-        # 统一解析返回的临时签名链过期时，按作品 ID 惰性刷新。
-        try:
-            stored = json.loads(row["payload"] or "{}")
-        except ValueError:
-            stored = {}
-        stored_video = stored.get("video") or {}
-        is_atc = (stored_video.get("source") in ("atc", "parser")
-                  or stored.get("source") in ("atc", "parser"))
-        is_douyin_direct = (
-            stored_video.get("source") in ("douyin_direct", "douyin_web")
-            or stored.get("source") in ("douyin_direct", "douyin_web"))
-        # 分享页请求必须保持非阻塞：签名媒体过期时由 _share_view 的惰性
-        # 入队逻辑或 /api/douyin/video 的同源端点处理，不能在 HTML 请求里
-        # 再次调用上游解析器（否则微信访问会被 502/超时拖住）。
-        should_repair_video = (
-            row["kind"] != "note" and not row["vid"]
-            and not is_atc and not is_douyin_direct)
-        if (_share_state(row) == "ok"
-                and should_repair_video):
-            row = _refresh_share(row)
+        # 页面只读已保存的快照；媒体端点在播放/下载时处理地址过期。
         view = _share_view(row, origin)
         # pending 页面完成后会自动 reload；只在终态记录一次，避免单次访问被算成 2 次。
         if view["state"] not in ("pending", "processing"):
@@ -10281,7 +10357,7 @@ def llms_txt(request: Request):
 ## 常见问答
 - 会处理和保留哪些数据？——不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
 - 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
-- 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，仅保存标题封面等元数据，不存储视频文件。
+- 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，保存文案、互动统计及作者公开资料等元数据，不存储视频文件。
 - 需要登录或装软件吗？——无需登录源平台或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。
 - 下载的视频有水印吗？——没有，是无水印原片，也不加本站二次水印。
 - 支持图集吗？——支持，自动识别并可批量下载原图。
