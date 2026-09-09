@@ -810,8 +810,6 @@ const I18N = {
     platform_kuaishou:"Kuaishou", platform_bilibili:"Bilibili", platform_pinduoduo:"Pinduoduo Video",
     platform_toutiao:"Toutiao", platform_shipinhao:"WeChat Channels", platform_weibo:"Weibo", platform_more:"More platforms",
     err_link:"Paste a public post link from a supported platform.",
-    quota_login_cta:"Sign in for 10/day →",
-    reg_tip:"Create an account: 10 free parses/day, 30-day share pages",
     reg_tip_cta:"Sign up free",
     ts_quota:(r,d)=>`${r}/${d} left today`,
     ts_need_login:"Sign in to use",
@@ -835,10 +833,10 @@ const I18N = {
     auth_math:"Quick math check", auth_math_ph:"Answer", auth_math_refresh:"New question",
     auth_math_hint:"Answer correctly to continue to the slider check",
     auth_remember:"Stay signed in for 30 days. Sign out anytime.",
-    quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
+    quota_tpl:(r,l,u,signed)=>`Free today: ${r}/${l} left`+(signed?'':u>0?` · ${u}/day when signed in`:' · Sign in to use your account balance'),
   },
   zh: { btn_parse:"开始解析", btn_loading:"解析中…", err_link:"请粘贴受支持平台的公开作品链接",
-    quota_tpl:(r,l,u)=>`今日免费剩余 ${r}/${l} 次 · 登录后每天 ${u} 次` }
+    quota_tpl:(r,l,u,signed)=>`今日免费剩余 ${r}/${l} 次`+(signed?'':u>0?` · 登录后每天 ${u} 次`:' · 登录后可使用账户余额') }
 };
 function t(key){ const d=I18N[LANG]; return d && d[key]!==undefined ? d[key] : null; }
 const PLATFORM_NAMES = {
@@ -961,6 +959,17 @@ function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_anonId)
 let _loggedIn = false;
 let _atc = {enabled:false, daily:0, remaining:0};
 let _billing = {wallet:null,parse_price_cents:3,transcript_price_cents:3};
+let _userDaily = null;
+
+function quotaSignupText(daily,kind='login'){
+  const known=Number.isInteger(daily)&&daily>=0;
+  if(kind==='register'){
+    if(known&&daily>0)return LANG==='en'?`Create an account: ${daily} free parses/day, 30-day share pages`:`注册账号：每天 ${daily} 次免费解析、分享页 30 天有效`;
+    return LANG==='en'?'Create an account: use your balance and get 30-day share pages':'注册账号：使用账户余额解析、分享页 30 天有效';
+  }
+  if(known&&daily>0)return LANG==='en'?`Sign in for ${daily}/day →`:`登录后每天 ${daily} 次 →`;
+  return LANG==='en'?'Sign in to use your account balance →':'登录后使用账户余额 →';
+}
 
 function billingHint(billing, purpose='parse'){
   if(!billing?.wallet)return '';
@@ -976,7 +985,9 @@ async function refreshQuota(){
   try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
     if(q.billing)_billing=q.billing;
-    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily)+billingHint(_billing);
+    if(Number.isInteger(q.user_daily)&&q.user_daily>=0)_userDaily=q.user_daily;
+    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily,Boolean(q.user))+billingHint(_billing);
+    document.querySelectorAll('[data-quota-signup]').forEach(node=>node.textContent=quotaSignupText(_userDaily,node.dataset.quotaSignup));
     if (q.transcript || q.atc) _atc = q.transcript || q.atc;
     _loggedIn = Boolean(q.user);
     syncTranscriptUI();
@@ -1044,7 +1055,8 @@ function showQuotaError(msg){
   const a = document.createElement('a');
   a.href = 'javascript:void(0)';
   a.style.cssText = 'color:inherit;font-weight:700;text-decoration:underline';
-  a.textContent = t('quota_login_cta') || '登录后每天 10 次 →';
+  a.dataset.quotaSignup='login';
+  a.textContent = quotaSignupText(_userDaily);
   a.onclick = () => openAuth('login');
   alertText.appendChild(a);
   alertBox.classList.remove('ok'); alertBox.classList.add('show'); composer.classList.add('is-error');
@@ -1103,7 +1115,7 @@ function maybeRegTip(){
   } catch { return; }
   const tip = document.createElement('div');
   tip.className = 'reg-tip';
-  tip.innerHTML = `<span>${esc(t('reg_tip') || '注册账号：每天 10 次免费解析、分享页 30 天有效')}</span>`;
+  tip.innerHTML = `<span data-quota-signup="register">${esc(quotaSignupText(_userDaily,'register'))}</span>`;
   const a = document.createElement('a');
   a.href = 'javascript:void(0)';
   a.textContent = t('reg_tip_cta') || '免费注册';

@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.27.0"
+APP_VERSION = "1.28.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -140,7 +140,7 @@ if ADMIN_PASSWORD == "douyin-admin":
 
 # 免费使用配额（防薅羊毛）
 FREE_ANON_DAILY = int(os.environ.get("FREE_ANON_DAILY", "3"))    # 匿名：每天 3 次
-FREE_USER_DAILY = int(os.environ.get("FREE_USER_DAILY", "10"))   # 登录用户：每天 10 次
+FREE_USER_DAILY = int(os.environ.get("FREE_USER_DAILY", "10"))   # 后台未设置时的默认值
 
 
 def _clamped_env_int(name: str, default: int,
@@ -627,11 +627,30 @@ def _log_link(value: str) -> str:
     return _privacy_hash("submitted-link", value)[:26]
 
 
+def _free_user_daily_in_conn(conn) -> int:
+    row = conn.execute("SELECT v FROM app_settings WHERE k='free_user_daily'").fetchone()
+    try:
+        value = int(row[0]) if row else FREE_USER_DAILY
+    except (TypeError, ValueError):
+        value = FREE_USER_DAILY
+    return max(0, min(10000, value))
+
+
+def free_user_daily() -> int:
+    """登录用户的每日免费解析次数；后台保存后立即生效。"""
+    with _db_lock:
+        conn = _db()
+        try:
+            return _free_user_daily_in_conn(conn)
+        finally:
+            conn.close()
+
+
 def _quota_subjects(request: Request):
-    """返回 (计数主体列表, 限额)。登录用户按 user 计（10/天），匿名按指纹+IP（3/天）。"""
+    """登录用户按账户和后台限额计数；匿名按用途摘要和独立限额计数。"""
     u = current_user(request)
     if u:
-        return [f"user:{u['id']}"], FREE_USER_DAILY
+        return [f"user:{u['id']}"], free_user_daily()
     scope = str(_today())
     subs = [f"ip:{_stored_ip(request, 'quota', scope)}"]
     fp = _stored_fp(request, "quota", scope)
@@ -7938,8 +7957,10 @@ class ParseBody(BaseModel):
 def _quota_error(limit: int, reservation: Optional[dict] = None):
     if reservation and reservation.get("insufficient_balance"):
         return ApiError(402, "今日免费次数已用完，账户余额不足，请联系管理员充值后重试")
-    return ApiError(429, f"今日免费次数已用完（每天 {limit} 次）。注册登录后每天可用 "
-                         f"{FREE_USER_DAILY} 次，或使用开放 API 按量调用。")
+    daily = free_user_daily()
+    account_hint = (f"注册登录后每天免费 {daily} 次，超出后可使用账户余额。" if daily
+                    else "注册登录后可使用账户余额继续解析。")
+    return ApiError(429, f"今日免费次数已用完（每天 {limit} 次）。{account_hint}")
 
 
 @app.post("/api/parse")
@@ -8697,7 +8718,7 @@ def api_parse_batch(body: BatchBody, request: Request):
     for l in over:
         out.append({"ok": False, "link": l,
                     "error": ("免费次数及账户余额不足，未解析" if reservation.get("insufficient_balance")
-                              else f"今日免费次数不足未解析（每天 {limit} 次，登录后 {FREE_USER_DAILY} 次）")})
+                              else f"今日免费次数不足未解析（每天 {limit} 次，登录后 {free_user_daily()} 次）")})
     settle_quota(reservation, spent)
     remaining = quota_status(request)[2]
     return {"count": len(out), "results": out,
@@ -9768,7 +9789,7 @@ def admin_users(request: Request, limit: int = 100):
         "(SELECT COALESCE(SUM(spent_cents),0) FROM api_keys k WHERE k.user_id=u.id) AS spent,"
         "(SELECT COUNT(*) FROM api_keys k WHERE k.user_id=u.id) AS keys "
         "FROM users u ORDER BY u.created_at DESC LIMIT ?",
-        (FREE_USER_DAILY, _today(), max(1, min(limit, 500))), "all")
+        (free_user_daily(), _today(), max(1, min(limit, 500))), "all")
     return {"users": [dict(r) for r in rows]}
 
 
@@ -9834,6 +9855,7 @@ def admin_edit_wallet(uid: int, body: WalletEditBody, request: Request):
 class BillingPriceBody(BaseModel):
     parse_price_cents: StrictInt = Field(ge=0, le=100000)
     transcript_price_cents: StrictInt = Field(ge=0, le=100000)
+    user_daily: Optional[StrictInt] = Field(default=None, ge=0, le=10000)
 
 
 def _web_billing_status(user_id: Optional[int] = None) -> dict:
@@ -9841,7 +9863,8 @@ def _web_billing_status(user_id: Optional[int] = None) -> dict:
         conn = _db()
         try:
             prices = {"parse_price_cents": _web_price_in_conn(conn),
-                      "transcript_price_cents": _web_price_in_conn(conn, "transcript")}
+                      "transcript_price_cents": _web_price_in_conn(conn, "transcript"),
+                      "user_daily": _free_user_daily_in_conn(conn)}
             row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone() if user_id else None
             return {**prices, "wallet": _wallet_public(row) if row else None}
         finally:
@@ -9865,6 +9888,9 @@ def admin_save_billing_prices(body: BillingPriceBody, request: Request):
                                ("transcript_price_cents", body.transcript_price_cents)):
                 conn.execute("INSERT INTO app_settings(k,v) VALUES(?,?) "
                              "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, str(value)))
+            if body.user_daily is not None:
+                conn.execute("INSERT INTO app_settings(k,v) VALUES('free_user_daily',?) "
+                             "ON CONFLICT(k) DO UPDATE SET v=excluded.v", (str(body.user_daily),))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -11178,7 +11204,7 @@ def api_quota(request: Request):
         atc_limit, atc_remaining = (cfg["transcript_daily"] if atc_on else 0), 0
     return {"limit": limit, "used": used, "remaining": remaining,
             "billing": _web_billing_status(u["id"] if u else None),
-            "user_daily": FREE_USER_DAILY,
+            "user_daily": limit if u else free_user_daily(),
             "user": {"email": u["email"]} if u else None,
             "transcript": {"enabled": atc_on,
                     "daily": atc_limit, "remaining": atc_remaining}}

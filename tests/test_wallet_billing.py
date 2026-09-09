@@ -23,7 +23,7 @@ class WalletBillingTests(unittest.TestCase):
             conn.execute('DELETE FROM users WHERE id=?', (self.uid,))
             conn.execute('INSERT INTO users(id,email,created_at,balance_cents) VALUES(?,?,?,?)',
                          (self.uid, 'wallet-test@example.test', int(time.time()), 30))
-            conn.execute("DELETE FROM app_settings WHERE k IN ('web_parse_price_cents','transcript_price_cents')")
+            conn.execute("DELETE FROM app_settings WHERE k IN ('web_parse_price_cents','transcript_price_cents','free_user_daily')")
             conn.commit()
             conn.close()
         self.user_patch = mock.patch.object(server, 'current_user', return_value={
@@ -34,13 +34,14 @@ class WalletBillingTests(unittest.TestCase):
     def tearDown(self):
         self.client.close()
         self.user_patch.stop()
+        server.db_exec("DELETE FROM app_settings WHERE k='free_user_daily'")
 
     def wallet(self):
         return dict(server.db_exec('SELECT * FROM users WHERE id=?', (self.uid,), 'one'))
 
     def exhaust(self, text=False):
         subject = ('atc:' if text else '') + f'user:{self.uid}'
-        limit = server._atc_cfg()['transcript_daily'] if text else server.FREE_USER_DAILY
+        limit = server._atc_cfg()['transcript_daily'] if text else server.free_user_daily()
         server.db_exec('INSERT OR REPLACE INTO usage_daily(day,subject,count) VALUES(?,?,?)',
                        (server._today(), subject, limit))
 
@@ -288,6 +289,86 @@ print(json.dumps({'before':before,'after':after}))
         self.assertTrue(all(r['ok'] for r in results))
         self.assertEqual(self.wallet()['balance_cents'],130)
         self.assertEqual(server.db_exec('SELECT COUNT(*) FROM wallet_ledger',(),'one')[0],1)
+
+    def set_daily(self, daily):
+        result=self.admin_post('/api/admin/billing-prices',{
+            'parse_price_cents':3,'transcript_price_cents':3,'user_daily':daily})
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(result.json()['user_daily'],daily)
+
+    def test_admin_daily_limit_applies_immediately_and_preserves_usage(self):
+        r=self.reserve(3);server.settle_quota(r,3)
+        self.set_daily(20)
+        quota=self.client.get('/api/quota').json()
+        self.assertEqual((quota['limit'],quota['used'],quota['remaining'],quota['user_daily']),(20,3,17,20))
+        with mock.patch.object(server,'_require_admin'):
+            users=self.client.get('/api/admin/users').json()['users']
+        user=next(u for u in users if u['id']==self.uid)
+        self.assertEqual(user['free_remaining'],17)
+        self.set_daily(2)
+        self.assertEqual(server.quota_status(make_request()),(2,3,0))
+        paid=self.reserve();server.settle_quota(paid,1)
+        self.assertEqual(self.wallet()['balance_cents'],27)
+
+    def test_zero_daily_limit_uses_balance_from_first_request(self):
+        self.set_daily(0)
+        with mock.patch.object(server,'_parse_cached',return_value={'title':'test'}):
+            result=self.client.post('/api/parse',json={'text':'https://v.douyin.com/test/'})
+        self.assertEqual(result.status_code,200)
+        self.assertEqual((self.wallet()['balance_cents'],self.wallet()['spent_cents']),(27,3))
+        self.assertEqual(server.quota_status(make_request()),(0,0,0))
+
+    def test_limit_change_does_not_reprice_inflight_free_reservation(self):
+        self.set_daily(2)
+        r=self.reserve(2)
+        self.set_daily(0)
+        server.settle_quota(r,2)
+        self.assertEqual(self.wallet()['balance_cents'],30)
+        self.assertEqual(self.wallet()['spent_cents'],0)
+
+    def test_user_limit_does_not_change_anonymous_or_transcript_allowance(self):
+        text_limit=server._atc_cfg()['transcript_daily']
+        self.set_daily(25)
+        with mock.patch.object(server,'current_user',return_value=None):
+            quota=self.client.get('/api/quota').json()
+            self.assertEqual(quota['limit'],server.FREE_ANON_DAILY)
+            self.assertEqual(quota['user_daily'],25)
+        self.assertEqual(server._atc_transcript_status(self.uid)[0],text_limit)
+
+    def test_invalid_daily_limit_rejected_and_old_price_client_preserves_setting(self):
+        self.set_daily(20)
+        for daily in (-1,1.5,True,'10',10001):
+            with self.subTest(daily=daily):
+                result=self.admin_post('/api/admin/billing-prices',{
+                    'parse_price_cents':20,'transcript_price_cents':20,'user_daily':daily})
+                self.assertEqual(result.status_code,422)
+                self.assertEqual(server.free_user_daily(),20)
+                self.assertEqual(server._web_billing_status()['parse_price_cents'],3)
+        self.assertEqual(self.admin_post('/api/admin/billing-prices',{
+            'parse_price_cents':4,'transcript_price_cents':5}).status_code,200)
+        self.assertEqual(server.free_user_daily(),20)
+
+    def test_daily_limit_persists_in_another_process_and_defaults_to_environment(self):
+        with mock.patch.object(server,'FREE_USER_DAILY',12):
+            self.assertEqual(server.free_user_daily(),12)
+        self.set_daily(31)
+        child=subprocess.run([sys.executable,'-c','import server; print(server.free_user_daily())'],
+            text=True,capture_output=True,env=dict(os.environ,DATA_DIR=str(server.DATA_DIR),MIHOMO_OFF='1'),
+            timeout=20,check=True)
+        self.assertEqual(child.stdout.strip(),'31')
+
+    def test_batch_and_async_share_use_configured_daily_limit(self):
+        self.set_daily(1)
+        with mock.patch.object(server,'_parse_cached',return_value={'title':'test'}):
+            result=self.client.post('/api/parse/batch',json={
+                'text':'https://v.douyin.com/test1/ https://v.douyin.com/test2/'})
+        self.assertEqual(result.status_code,200,result.text)
+        self.assertEqual(self.wallet()['spent_cents'],3)
+        self.assertEqual(result.json()['quota']['limit'],1)
+        with mock.patch.object(server,'_share_origin',return_value='https://example.test'):
+            share=self.client.post('/api/shares',json={'text':'https://v.douyin.com/dailyLimit/'})
+        self.assertEqual(share.status_code,202,share.text)
+        self.assertEqual(self.wallet()['reserved_cents'],3)
 
 
 if __name__ == '__main__':

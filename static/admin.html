@@ -454,14 +454,16 @@ th.sortable:hover{color:var(--text)}
     <!-- 用户 -->
     <div class="view" id="v-users" style="display:none">
       <div class="panel">
-        <div class="panel-head"><div><h3 data-wallet="prices">网页计费</h3><div class="desc" data-wallet="policy">先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。</div></div></div>
+        <div class="panel-head"><div><h3 data-wallet="prices">网页额度与计费</h3><div class="desc" data-wallet="policy">先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。</div></div></div>
         <form class="panel-body" id="billingPriceForm">
           <div class="billing-grid">
+            <div class="field"><label for="webUserDaily" data-wallet="userDaily">登录用户每日免费解析次数</label><input id="webUserDaily" type="number" min="0" max="10000" step="1" required disabled aria-describedby="userDailyHint"></div>
             <div class="field"><label for="webParsePrice" data-wallet="parsePrice">解析价格（元/次）</label><input id="webParsePrice" type="number" min="0" max="1000" step="0.01" required disabled></div>
             <div class="field"><label for="webTranscriptPrice" data-wallet="textPrice">语音转文字价格（元/次）</label><input id="webTranscriptPrice" type="number" min="0" max="1000" step="0.01" required disabled></div>
-            <div class="field"><button class="btn btn-primary" id="billingPriceSave" type="submit" disabled data-wallet="savePrices">保存价格</button></div>
+            <div class="field"><button class="btn btn-primary" id="billingPriceSave" type="submit" disabled data-wallet="savePrices">保存设置</button></div>
           </div>
-          <p class="hint" data-wallet="priceHint">0 表示免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。</p>
+          <p class="hint" id="userDailyHint" data-wallet="dailyHint">适用于所有登录用户，保存后立即生效，保留当天已使用次数；0 表示不赠送免费解析次数。</p>
+          <p class="hint" data-wallet="priceHint">价格设为 0 表示该项目免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。</p>
           <p class="wallet-message" id="billingPriceMessage" role="status" aria-live="polite"></p>
         </form>
       </div>
@@ -1220,9 +1222,10 @@ $('#anaRefresh').onclick = loadAnalytics;
 
 /* 用户余额与网页计费 */
 const WALLET_TEXT = {
-  prices:['网页计费','Website billing'],policy:['先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。','Daily free uses come first, then the account balance. Successful tasks are charged; failures are refunded. API key pricing is configured in Open API.'],
-  parsePrice:['解析价格（元/次）','Parsing price (CNY/use)'],textPrice:['语音转文字价格（元/次）','Speech-to-text price (CNY/use)'],savePrices:['保存价格','Save prices'],
-  priceHint:['0 表示免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。','0 means free. New prices apply to new tasks; existing tasks keep their original price. Cached transcripts are free.'],
+  prices:['网页额度与计费','Website quotas and billing'],policy:['先使用每日免费次数，用完后自动扣账户余额；只对成功任务收费，失败退回。API 密钥单价在“开放 API”中设置。','Daily free uses come first, then the account balance. Successful tasks are charged; failures are refunded. API key pricing is configured in Open API.'],
+  userDaily:['登录用户每日免费解析次数','Daily free parses per signed-in user'],dailyHint:['适用于所有登录用户，保存后立即生效，保留当天已使用次数；0 表示不赠送免费解析次数。','Applies to all signed-in users immediately after saving. Today’s usage is retained. 0 means no daily free parses.'],invalidDaily:['请输入 0–10000 之间的整数次数','Enter a whole number from 0 to 10000'],
+  parsePrice:['解析价格（元/次）','Parsing price (CNY/use)'],textPrice:['语音转文字价格（元/次）','Speech-to-text price (CNY/use)'],savePrices:['保存设置','Save settings'],
+  priceHint:['价格设为 0 表示该项目免费。新价格适用于新提交的任务；已提交任务按提交时的价格结算。文案缓存不重复收费。','A price of 0 makes that service free. New prices apply to new tasks; existing tasks keep their original price. Cached transcripts are free.'],
   free:['今日免费剩余','Free uses left'],balance:['账户余额 / 预留','Balance / reserved'],spent:['网页消费','Website spending'],edit:['编辑余额','Edit balance'],
   mode:['调整方式','Adjustment'],add:['增加余额','Add funds'],set:['设置可用余额','Set available balance'],amount:['金额（元）','Amount (CNY)'],note:['调整备注（选填）','Note (optional)'],
   walletHint:['编辑的是可用余额；任务预留金额仍由任务成功结算或失败退回。调整会保留流水。','This edits available funds. Reserved funds are settled or refunded by their tasks. Every adjustment is recorded.'],
@@ -1241,25 +1244,31 @@ function moneyToCents(raw, max=1000000000){
   if(!Number.isSafeInteger(cents)||cents<0||cents>max) throw new Error(walletText('invalid'));
   return cents;
 }
+function parseDailyQuota(raw){
+  const value=String(raw).trim();
+  if(!/^\d+$/.test(value)||Number(value)>10000)throw new Error(walletText('invalidDaily'));
+  return Number(value);
+}
 let billingLoaded=false;
 async function loadBillingPrices(){
   try{
     const d=await api('/api/admin/billing-prices');
+    $('#webUserDaily').value=d.user_daily;
     $('#webParsePrice').value=(d.parse_price_cents/100).toFixed(2);
     $('#webTranscriptPrice').value=(d.transcript_price_cents/100).toFixed(2);
-    for(const id of ['webParsePrice','webTranscriptPrice','billingPriceSave']) $('#'+id).disabled=false;
+    for(const id of ['webUserDaily','webParsePrice','webTranscriptPrice','billingPriceSave']) $('#'+id).disabled=false;
     $('#billingPriceMessage').textContent=''; billingLoaded=true;
   }catch(e){$('#billingPriceMessage').textContent=walletText('loadFailed');}
 }
 $('#billingPriceForm').onsubmit=async e=>{
   e.preventDefault();const btn=$('#billingPriceSave');if(btn.disabled)return;
   try{
-    const data={parse_price_cents:moneyToCents($('#webParsePrice').value,100000),transcript_price_cents:moneyToCents($('#webTranscriptPrice').value,100000)};
-    btn.disabled=true;btn.textContent=walletText('saving');$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=true;
+    const data={user_daily:parseDailyQuota($('#webUserDaily').value),parse_price_cents:moneyToCents($('#webParsePrice').value,100000),transcript_price_cents:moneyToCents($('#webTranscriptPrice').value,100000)};
+    btn.disabled=true;btn.textContent=walletText('saving');$('#webUserDaily').disabled=$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=true;
     await api('/api/admin/billing-prices',{method:'POST',body:JSON.stringify(data)});
-    $('#billingPriceMessage').textContent='';toast(walletText('saved'));
+    $('#billingPriceMessage').textContent='';toast(walletText('saved'));await loadUsers();
   }catch(e){$('#billingPriceMessage').textContent=e.message;}
-  finally{btn.disabled=false;btn.textContent=walletText('savePrices');$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=false;}
+  finally{btn.disabled=false;btn.textContent=walletText('savePrices');$('#webUserDaily').disabled=$('#webParsePrice').disabled=$('#webTranscriptPrice').disabled=false;}
 };
 async function loadUsers(){
   if(!billingLoaded) loadBillingPrices();

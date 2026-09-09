@@ -27,3 +27,18 @@ test('homepage explains both balances, fees and zero pricing in Chinese and Engl
   context.LANG='en';assert.match(context.billingHint(billing,'transcript'),/Balance ¥0.25.*¥0.00\/use; failures refunded/);
   assert.equal(context.billingHint({wallet:null}),'');
 });
+test('daily quota input accepts zero and whole numbers, rejects invalid limits',()=>{
+  const context=vm.createContext({walletText:()=> 'invalid'});
+  vm.runInContext(extract(admin,'function parseDailyQuota','let billingLoaded'),context);
+  for(const n of ['0','20','10000'])assert.equal(context.parseDailyQuota(n),Number(n));
+  for(const n of ['','-1','1.5','1e3','10001','NaN'])assert.throws(()=>context.parseDailyQuota(n));
+});
+test('signup prompts use configured quota and do not promise free uses for zero or unknown',()=>{
+  const context=vm.createContext({LANG:'zh'});
+  vm.runInContext(extract(home,'function quotaSignupText','function billingHint'),context);
+  assert.match(context.quotaSignupText(25),/每天 25 次/);
+  assert.match(context.quotaSignupText(25,'register'),/每天 25 次免费解析/);
+  for(const daily of [0,null,undefined])assert.doesNotMatch(context.quotaSignupText(daily,'register'),/免费解析/);
+  context.LANG='en';assert.match(context.quotaSignupText(25),/25\/day/);
+  assert.doesNotMatch(context.quotaSignupText(0,'register'),/free parses/);
+});
