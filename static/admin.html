@@ -40,7 +40,7 @@ a{color:var(--accent); text-decoration:none}
 .container{max-width:1040px; margin:0 auto; padding:0 20px 60px}
 
 nav{display:flex; align-items:center; justify-content:space-between; padding:20px 0; border-bottom:1px solid var(--border); margin-bottom:24px}
-.brand{display:flex; align-items:center; gap:10px; font-weight:700}
+.brand{display:flex; align-items:center; gap:10px; font-weight:700;white-space:nowrap}
 .logo{width:30px; height:30px; border-radius:8px; background:#000; display:grid; place-items:center; color:#fff;
   box-shadow:-2px 0 0 rgba(37,244,238,.85), 2px 0 0 rgba(254,44,85,.85)}
 .brand .tag{font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; background:var(--surface-2); color:var(--muted); border:1px solid var(--border)}
@@ -169,6 +169,19 @@ th.sortable:hover{color:var(--text)}
 .pager button:hover{border-color:var(--border-strong)}
 .pager button:disabled{opacity:.4; cursor:not-allowed}
 .group-title{grid-column:1/-1; font-size:12.5px; font-weight:700; color:var(--muted); padding:12px 0 2px}
+.check-list{list-style:none;padding:0;margin:0}
+.check-row{display:grid;grid-template-columns:140px minmax(0,1fr) auto;gap:12px;padding:14px 0;border-bottom:1px solid var(--border);align-items:start}
+.check-row:last-child{border-bottom:0}
+.check-row p{color:var(--muted);font-size:13px;margin:0;overflow-wrap:anywhere}
+.check-row pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0 0;color:var(--text)}
+.check-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}
+.check-form label{display:block;font-size:13px;margin-bottom:6px}
+.check-summary{color:var(--muted);font-size:13px;line-height:1.7;margin-bottom:12px;overflow-wrap:anywhere}
+.check-share{display:flex;gap:12px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border)}
+.check-share>div{min-width:0;overflow-wrap:anywhere}
+.check-share button{flex:none}
+.check-share small{display:block;color:var(--muted);margin-top:4px}
+@media(max-width:640px){nav{flex-wrap:wrap;gap:12px}.check-row{grid-template-columns:minmax(0,1fr) auto}.check-row>div{grid-row:2;grid-column:1/-1}.check-form{grid-template-columns:1fr}.check-form button{width:100%}}
 </style>
 </head>
 <body>
@@ -199,6 +212,7 @@ th.sortable:hover{color:var(--text)}
   <div class="dash" id="dashView">
     <div class="admin-tabs">
       <button class="admin-tab active" data-view="overview">数据概览</button>
+      <button class="admin-tab" data-view="checks">功能检查</button>
       <button class="admin-tab" data-view="proxies">代理列表</button>
       <button class="admin-tab" data-view="proxyset">代理设置</button>
       <button class="admin-tab" data-view="keys">API 密钥</button>
@@ -207,6 +221,22 @@ th.sortable:hover{color:var(--text)}
       <button class="admin-tab" data-view="playlogs">播放日志</button>
       <button class="admin-tab" data-view="atc">视频解析 API</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
+    </div>
+
+    <div class="view" id="v-checks" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><div><h3 data-fc="heading">功能检查</h3><p class="desc" data-fc="intro">检查当前部署的依赖、配置和真实解析链路。</p></div><button class="btn btn-ghost btn-sm" id="checksRefresh" data-fc="refresh">刷新状态</button></div>
+        <div class="panel-body">
+          <div id="checksEnvironment" aria-live="polite"><p class="check-summary" data-fc="loading">正在读取部署状态…</p></div>
+          <form id="checksForm" class="check-form">
+            <div><label for="checksInput" data-fc="inputLabel">抖音 / TikTok 分享文本或链接</label><textarea id="checksInput" rows="2" maxlength="8192" required>https://v.douyin.com/qFnZK0HPwBo/</textarea></div>
+            <button class="btn btn-primary" id="checksRun" type="submit" data-fc="run">开始实测</button>
+          </form>
+          <p class="hint" data-fc="scope">实测会请求主解析服务与源平台，可能消耗上游调用次数；不扣用户免费解析额度。媒体检查只读取 1 字节，完整下载仍需在页面验证。</p>
+        </div>
+      </div>
+      <div class="panel"><div class="panel-head"><h3 data-fc="results">最近一次实测</h3><span id="checksJobBadge" class="badge idle"></span></div><div class="panel-body" id="checksResult" aria-live="polite"><p class="check-summary" data-fc="noRun">尚未实测。仅有配置不能证明功能正常；服务重启后实测记录会清空。</p></div></div>
+      <div class="panel"><div class="panel-head"><h3 data-fc="shares">分享页信息补齐</h3></div><div class="panel-body"><p class="check-summary" data-fc="repairScope">检查最近 100 份有效分享页。优先使用已保存的完整快照；没有可用快照时重新获取作品信息。只补缺失字段，保留已有计数、自定义标题和有效期。</p><div id="checksShares"></div></div></div>
     </div>
 
     <!-- 数据概览 -->
@@ -712,8 +742,100 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
   else if(v==='proxyset') loadMihomo(); else if(v==='keys') loadKeys();
   else if(v==='atc') loadAtc(); else if(v==='playlogs') loadPlayLogs();
+  else if(v==='checks') loadFunctionChecks();
   else if(v==='proxies') load();
 });
+
+/* ---------------- 功能检查 ---------------- */
+const FC_LANG = (new URLSearchParams(location.search).get('lang') || (document.cookie.match(/(?:^|; )lang=([^;]+)/)||[])[1] || document.documentElement.lang).startsWith('en') ? 1 : 0;
+const FC_TEXT = {
+  heading:['功能检查','Function checks'],intro:['检查当前部署的依赖、配置和真实解析链路。','Check dependencies, configuration and the live parsing flow on this deployment.'],
+  refresh:['刷新状态','Refresh status'],loading:['正在读取部署状态…','Loading deployment status…'],inputLabel:['抖音 / TikTok 分享文本或链接','Douyin / TikTok share text or URL'],run:['开始实测','Run live check'],
+  scope:['实测会请求主解析服务与源平台，可能消耗上游调用次数；不扣用户免费解析额度。媒体检查只读取 1 字节，完整下载仍需在页面验证。','Live checks contact the parsing service and source platform and may consume upstream calls, but do not use user parsing quotas. Media checks read one byte; verify complete downloads on the public page.'],
+  results:['最近一次实测','Latest live check'],noRun:['尚未实测。仅有配置不能证明功能正常；服务重启后实测记录会清空。','No live check yet. Configuration alone does not verify functionality. Results reset when the service restarts.'],
+  shares:['分享页信息补齐','Repair share metadata'],repairScope:['检查最近 100 份有效分享页。优先使用已保存的完整快照；没有可用快照时重新获取作品信息。只补缺失字段，保留已有计数、自定义标题和有效期。','Inspect the latest 100 active shares. Use complete saved snapshots first, otherwise fetch metadata again. Fill only missing fields; preserve existing counts, custom titles and expiration.'],
+  repair:['补齐信息','Repair metadata'],none:['本次检查的分享页信息完整。','All inspected shares have complete metadata.'],scanned:['本次检查','Shares inspected'],missing:['缺失','Missing'],updated:['已更新分享页','Shares updated'],recentFailure:['最近补全失败','Latest metadata failure'],error:['状态读取失败，请点击刷新重试。','Unable to load status. Click Refresh to retry.'],checked:['检查时间','Checked at'],
+  pass:['通过','Passed'],fail:['失败','Failed'],warn:['需处理','Needs attention'],pending:['待实测','Not tested'],skipped:['未检查','Skipped'],running:['检查中','Running'],done:['已完成','Completed'],
+  version:['部署版本','Deployment version'],browser:['浏览器依赖','Browser dependency'],parser:['主解析服务','Primary parser'],proxy:['代理策略','Proxy policy'],database:['数据库','Database'],official:['官方补全链路','Official metadata'],metadata:['作品完整性','Metadata completeness'],media:['媒体预检','Media preflight'],snapshot:['快照保存与读取','Snapshot round trip'],result:['执行结果','Execution result'],
+  title:['标题','Title'],author:['作者','Author'],digg:['点赞','Likes'],comment:['评论','Comments'],share:['分享','Shares'],collect:['收藏','Saves'],
+};
+const FC_MESSAGES = {
+  version:['应用版本与前端时间戳','Application version and frontend timestamp'],
+  browser_found:['已发现浏览器，启动能力待实测。','Browser found; launch capability has not been tested.'],
+  browser_missing:['未找到 Chrome/Chromium。请安装浏览器，或使用项目 Docker 镜像；必要时设置 DOUYIN_BROWSER_BIN，重启后再实测。','Chrome/Chromium was not found. Install it or use the project Docker image; set DOUYIN_BROWSER_BIN if needed, then restart and test.'],
+  browser_disabled:['官方浏览器补全已禁用。检查 DOUYIN_BROWSER_ENABLED 并重启服务。','Browser metadata extraction is disabled. Check DOUYIN_BROWSER_ENABLED and restart.'],
+  browser_failed:['浏览器无法正常启动。请检查运行库、执行权限和容器内存，再运行实测。','Browser launch failed. Check system libraries, executable permissions and container memory, then test again.'],
+  browser_running:['正在启动隔离浏览器…','Launching an isolated browser…'],browser_ok:['浏览器已启动并成功读取测试页面。','Browser launched and read the test page successfully.'],
+  parser_configured:['已配置并启用，鉴权与解析能力待实测。','Configured and enabled; authentication and extraction have not been tested.'],
+  parser_unconfigured:['主解析服务未配置完整或未启用。请在“视频解析 API”中检查配置。','Primary parser is disabled or incompletely configured. Check Video Parsing API settings.'],
+  parser_running:['正在提交并等待真实解析任务…','Submitting and awaiting a real extraction task…'],parser_ok:['主解析任务完成。元数据是否完整见下方检查。','Primary extraction completed. See metadata completeness below.'],
+  parser_auth:['解析服务鉴权失败。请核对后台密钥是否有效。','Parser authentication failed. Check the configured credentials.'],parser_entitlement:['解析账号权益或额度不足。请检查账号状态。','Parser account entitlement or quota is insufficient. Check the account status.'],parser_busy:['解析服务繁忙，请稍后重试。','The parser is busy. Try again later.'],request_failed:['请求失败。请检查主解析服务配置、网络和额度后重试。','Request failed. Check parser configuration, network access and quota, then retry.'],
+  proxy_required:['严格代理模式已开启，但没有可用代理。请添加可用代理，或在代理设置中允许服务器直连。','Strict proxy mode is enabled without usable proxies. Add a working proxy or allow direct server connections in proxy settings.'],
+  proxy_strict:['严格代理模式：仅通过代理访问源平台。可用代理数：','Strict proxy mode: source traffic requires a proxy. Available proxies:'],proxy_direct:['优先代理，无可用代理时允许服务器直连。可用代理数：','Prefer proxies; allow direct server access when unavailable. Available proxies:'],
+  database_readable:['分享记录可读取；写入能力在实测中检查。','Share records are readable; writes are tested by the live check.'],database_failed:['数据库读取失败。检查数据目录权限、数据库文件和剩余磁盘空间。','Database read failed. Check data directory permissions, database files and disk space.'],
+  official_running:['正在请求官方作品详情…','Requesting official post metadata…'],official_ok:['官方接口已返回标题、作者和四项互动数据。','Official extraction returned title, author and all four engagement counts.'],official_failed:['官方补全失败。先检查浏览器与代理项目；依赖正常时再检查服务器出站网络或源平台限制。','Official extraction failed. Check browser and proxy results first, then server network access or source restrictions.'],
+  tiktok_primary:['TikTok 通过主解析服务获取详情，当前不使用抖音官方补全。','TikTok metadata comes from the primary parser; Douyin extraction does not apply.'],metadata_unavailable:['未获取到作品信息。','No post metadata was returned.'],metadata_partial:['部分信息仍缺失，未用占位符或 0 冒充真实数据。','Some metadata is still missing. Unknown values remain unknown.'],metadata_ok:['标题、作者与四项互动数据完整。','Title, author and all four engagement counts are present.'],
+  video_only:['当前是图集，未执行视频媒体预检。','This is an image post; video preflight was skipped.'],media_not_supported:['该媒体来源尚不支持服务器预检。','Server preflight is not supported for this media source.'],no_result:['没有解析结果，无法继续检查。','No extraction result; this check could not run.'],media_running:['正在通过服务器出口读取视频首字节…','Reading the first video byte through the server connection…'],media_byte_ok:['媒体类型、响应范围与首字节读取通过。','Media type, response range and first-byte read passed.'],media_failed:['媒体预检失败，地址可能已过期或服务器出口不可达。请重新解析并核对代理策略。','Media preflight failed. The URL may be expired or unreachable from the server. Reparse and check the proxy policy.'],
+  snapshot_running:['正在保存并回读信息快照…','Saving and reading back the metadata snapshot…'],snapshot_ok:['快照已保存，回读的标题、作者和统计与解析结果一致。','Snapshot saved; title, author and counts match the extraction result when read back.'],
+  repair_running:['正在补齐旧分享页信息…','Repairing saved share metadata…'],repair_ok:['分享页信息已完整。','Share metadata is complete.'],repair_partial:['已补入可获取的字段，部分信息仍缺失。','Available fields were filled; some metadata is still missing.'],repair_failed:['补齐未完成。请检查依赖、来源链接、作品身份和分享页状态后重试。','Repair did not complete. Check dependencies, source link, post identity and share status, then retry.'],check_failed:['检查未完成，请核对部署状态后重试。','Check did not complete. Review deployment status and retry.'],
+};
+function fcText(key){return (FC_TEXT[key] || [key,key])[FC_LANG];}
+function fcMessage(key){return (FC_MESSAGES[key] || FC_MESSAGES.check_failed)[FC_LANG];}
+function fcValue(value){
+  if(value == null) return '';
+  if(Array.isArray(value)) return value.length ? fcText('missing')+': '+value.map(fcText).join(' · ') : '';
+  if(typeof value !== 'object') return String(value);
+  const lines=[];
+  for(const key of ['title','author']) if(value[key]) lines.push(fcText(key)+': '+value[key]);
+  if(value.stats) lines.push(['digg','comment','share','collect'].filter(k=>Number.isInteger(value.stats[k])).map(k=>fcText(k)+': '+value.stats[k].toLocaleString(FC_LANG?'en-US':'zh-CN')).join(' · '));
+  if(Number.isInteger(value.updated)) lines.push(fcText('updated')+': '+value.updated);
+  if(value.missing?.length) lines.push(fcValue(value.missing));
+  return lines.filter(Boolean).join('\n');
+}
+function fcRows(rows){return '<ul class="check-list">'+rows.map(row=>{
+  const cls={pass:'ok',fail:'bad',warn:'warn',running:'idle',pending:'idle',skipped:'idle'}[row.status]||'idle';
+  const value=fcValue(row.value);
+  return `<li class="check-row"><b>${esc(fcText(row.id))}</b><div><p>${esc(fcMessage(row.code))}</p>${value?`<pre>${esc(value)}</pre>`:''}</div><span class="badge ${cls}">${esc(fcText(row.status))}</span></li>`;
+}).join('')+'</ul>';}
+let checksTimer=null, checksBusy=false, checksLoading=false;
+function setChecksBusy(busy){checksBusy=busy; $('#checksRun').disabled=busy; $('#checksShares').querySelectorAll('button').forEach(b=>b.disabled=busy);}
+function renderFunctionChecks(data){
+  $('#checksEnvironment').innerHTML=fcRows(data.checks||[]);
+  const failure=data.last_metadata_failure;
+  if(failure?.at) $('#checksEnvironment').insertAdjacentHTML('beforeend',`<p class="hint">${esc(fcText('recentFailure'))} · ${esc(new Date(failure.at*1000).toLocaleString())}<br>${esc(fcMessage(failure.code))}</p>`);
+  const job=data.job||{}, rows=job.checks||[];
+  const outcome=job.state==='running'?'running':rows.some(r=>r.status==='fail')?'fail':rows.some(r=>r.status==='warn')?'warn':rows.length?'pass':'pending';
+  $('#checksJobBadge').textContent=fcText(outcome);
+  $('#checksJobBadge').className='badge '+({pass:'ok',fail:'bad',warn:'warn'}[outcome]||'idle');
+  $('#checksResult').innerHTML=rows.length?`<p class="check-summary">${esc(fcText('checked'))}: ${esc(new Date(job.started_at*1000).toLocaleString())}</p>`+fcRows(rows):`<p class="check-summary">${esc(fcText('noRun'))}</p>`;
+  const shares=data.shares||{items:[],scanned:0};
+  $('#checksShares').innerHTML=`<p class="check-summary">${esc(fcText('scanned'))}: ${Number(shares.scanned)||0} / 100</p>`+(shares.items?.length?shares.items.map(row=>`<div class="check-share"><div><a href="/s/${encodeURIComponent(row.sid)}" target="_blank" rel="noopener">${esc(row.title||row.sid)}</a><small>${esc(row.sid)} · ${esc(fcValue(row.missing))}</small></div><button class="btn btn-ghost btn-sm" data-repair="${esc(row.sid)}">${esc(fcText('repair'))}</button></div>`).join(''):`<p class="check-summary">${esc(fcText('none'))}</p>`);
+  const cooling=job.finished_at && Date.now()/1000-job.finished_at<10;
+  setChecksBusy(job.state==='running'||!!cooling);
+  return checksBusy;
+}
+async function loadFunctionChecks(){
+  if(checksLoading) return;
+  checksLoading=true; clearTimeout(checksTimer);
+  try{
+    const data=await api('/api/admin/checks');
+    const polling=renderFunctionChecks(data);
+    if(polling && $('#v-checks').style.display!=='none') checksTimer=setTimeout(loadFunctionChecks,2000);
+  }catch(e){$('#checksEnvironment').innerHTML=`<p class="check-summary" role="alert">${esc(fcText('error'))}</p>`;}
+  finally{checksLoading=false;}
+}
+async function submitFunctionCheck(path,body){
+  if(checksBusy) return;
+  setChecksBusy(true);
+  try{await api(path,{method:'POST',body:JSON.stringify(body||{})});}
+  catch(e){toast(e.message,true);setChecksBusy(false);}
+  await loadFunctionChecks();
+}
+$('#checksForm').onsubmit=e=>{e.preventDefault();submitFunctionCheck('/api/admin/checks/run',{text:$('#checksInput').value});};
+$('#checksRefresh').onclick=loadFunctionChecks;
+$('#checksShares').onclick=e=>{const button=e.target.closest('button[data-repair]');if(button) submitFunctionCheck('/api/admin/checks/shares/'+encodeURIComponent(button.dataset.repair)+'/repair');};
+document.querySelectorAll('[data-fc]').forEach(el=>el.textContent=fcText(el.dataset.fc));
+document.querySelector('[data-view="checks"]').textContent=fcText('heading');
 
 /* ---------------- 视频解析服务 ---------------- */
 const PRIO_META = {

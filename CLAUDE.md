@@ -12,7 +12,7 @@ PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
 .venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
-.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence   # 后端测试套件（TestClient）
+.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence tests.test_function_checks   # 后端测试套件（TestClient）
 .venv/bin/python -m unittest tests.test_security_reliability.DurableBillingTests   # 单跑一个类（加 .方法名 可单跑一个用例）
 node --test tests/*.js                     # 前端逻辑测试；必须写 *.js 且在仓库根目录跑（文件名不匹配默认 glob，裸目录会报错）
 swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位图（1200×630，macOS/AppKit）
@@ -42,6 +42,8 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 - **模板替换型**：`index.html` / `api-docs.html`（替换 `{{HTMLLANG}}` / `{{SEO_HEAD}}` / `{{ORIGIN}}`）、`share.html`（见分享页一节）。
 - **仅版本注入型**：`admin.html`（`/admin_d`）、`api-console.html`（`/api-console`），不做 SEO。全部页面经 `_frontend_template()` 注入应用/时间戳版本，`_frontend_response()` 禁止持久缓存；本地图标的 `?v=` 与启动时固定的 `FRONTEND_VERSION` 一致时才使用 immutable 长缓存。
 
+首页底部通过 `{{FRONTEND_VERSION}}` 展示同一版本标识，由 `_frontend_template()` 在服务端替换；不要在 HTML 写死版本，也不要另发请求获取版本。中英标签使用首页现有的翻译表。
+
 新增可被搜索引擎收录的页面时，必须走模板 + `_seo_head()`，否则占位符会原样输出到页面。
 
 ### 解析链路（`_parse_share`）
@@ -51,6 +53,12 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 `server.py` 使用主服务优先、抖音官方补全；`oss/server.py` 与 `douyin_dl.py` 是独立的旧实现，不共享主服务配置。
 
 2026-09-09 已核对官方视频文档 `https://www.anytocopy.com/account/api/docs`：POST `/video/extract` 与 GET `/video/query` 均使用 query 参数，鉴权只放请求头。`WAITING` / `PROCESSING` 以及 `FAILED` / `FAILURE` 响应也可能带媒体地址，所有入口必须使用 `_atc_result_complete()`；`_atc_basic_result_ready()` 只表示有媒体，不能作为显式任务状态的替代。仅无状态的旧同步响应兼容立即返回。查询可重试原 taskId，但未知是否受理的 POST 不自动重发；并发拒绝退回队列后至少等 5 秒，各 purpose 都受超时约束。`_ParserServiceError` 的内部分类区分临时网络异常和永久鉴权/权益失败，公开错误不得包含上游名称或原文。`content` 与 `title` 分别保存；`createBy` / `createTime` 是任务元数据，不能映射为作品作者/发布时间。文档没有保证互动数、作者详情和媒体地址 TTL，继续按需补全与点击刷新。
+
+### 部署功能检查与元数据修复
+
+`/api/admin/checks` 及其 `/run`、`/shares/{sid}/repair` 仅管理员可访问。GET 只读配置与最近 100 份有效分享；真实上游调用只由显式 POST 启动，全局一项异步任务，完成冷却 10 秒，结果在内存中保存。报告只允许有限状态/错误分类和公开元数据，禁止异常原文、签名媒体链接或凭据。媒体预检仅检查 1 字节，不能宣称完整下载/微信播放已验证。
+
+`_metadata_missing()` 判断核心展示字段，不把有效的 0 当缺失。主服务抖音缓存缺少元数据时，`_retry_cached_metadata()` 每作品最多每 60 秒重试官方补全，不重复提交主解析。成功解析的 `_remember_parse_result()` 同步补齐同作品至多 500 份旧分享的缺失字段，保留已有计数、媒体线路、自定义标题、有效期和下架状态；更新缓存别名时保留原过期时间。`_merge_metadata_snapshot()` 必须校验 item_id/kind/platform。分享 GET 不补数据、不请求上游。新增回归在 `tests/test_function_checks.py`，修改本链路须加入常规后端测试命令。
 
 ### 流量分工：解析服务地址与同源流式媒体
 

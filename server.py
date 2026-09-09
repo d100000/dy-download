@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.24.2"
+APP_VERSION = "1.26.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -2955,6 +2955,10 @@ def _content_disposition(name: str) -> str:
 _cache: dict = {}
 _cache_lock = threading.RLock()
 _author_cache: dict = {}          # item_id -> (ts, 作者结构化详情)
+_metadata_retry_lock = threading.RLock()
+_metadata_retries: dict = {}      # item_id -> (下次重试时间, 是否进行中)
+_metadata_last_failure: dict = {}
+METADATA_RETRY_SECONDS = 60
 CDN_HEADERS = {
     "Referer": "https://www.douyin.com/",
     "Accept-Encoding": "identity",
@@ -4314,13 +4318,14 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
 
 
 def _parse_douyin_item_direct(kind: str, item_id: str,
-                              work_url: str = "", *, allow_metadata: bool = False) -> dict:
+                              work_url: str = "", *, allow_metadata: bool = False,
+                              refresh: bool = False) -> dict:
     if not re.fullmatch(r"\d{8,30}", str(item_id or "")):
         raise ApiError(400, "非法的抖音作品 ID")
     lock = _douyin_item_lock(item_id)
     with lock:
         cached = _douyin_result_cache.get(item_id)
-        if cached and time.time() - cached[0] < CACHE_TTL:
+        if not refresh and cached and time.time() - cached[0] < CACHE_TTL:
             result = cached[1]
             if result.get("kind") == "note":
                 fresh_note = _douyin_note_result_with_media(result, item_id)
@@ -4493,6 +4498,7 @@ def _remember_parse_result(key: str, data: dict, now: float) -> dict:
     if detail:
         data["author_detail"] = detail
     _save_parse_snapshot(data)
+    _backfill_share_metadata(data)
     _cache_put(key, data, now)
     _cache_put(data["item_id"], data, now)
     return data
@@ -4564,7 +4570,7 @@ def _parse_cached(text: str) -> dict:
                             safe_video["download_url"] = _douyin_video_download_url(
                                 item_id, filename)
                     return safe
-            return cached_data
+            return _retry_cached_metadata(key, cached_data)
     data = _parse_share(text)
     return _remember_parse_result(key, data, time.time())
 
@@ -5215,6 +5221,155 @@ def _snapshot_author(data: dict) -> dict:
               "total_favorited", "following_count", "aweme_count")
     return {key: detail[key] for key in fields
             if detail.get(key) is not None and detail[key] != ""}
+
+
+_EMPTY_TITLES = ("", "（无标题）", "(无标题)", "暂无标题", "无标题")
+
+
+def _metadata_missing(data: dict) -> list[str]:
+    """核心展示字段的完整性；合法的 0 不视为空，不以视频可播放代替信息完整。"""
+    missing = []
+    if str(data.get("title") or "").strip() in _EMPTY_TITLES:
+        missing.append("title")
+    if str(data.get("author") or "").strip() in ("", "未知作者"):
+        missing.append("author")
+    stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+    for key in ("digg", "comment", "share", "collect"):
+        value = stats.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            missing.append(key)
+    return missing
+
+
+def _merge_metadata_snapshot(old: dict, fresh: dict) -> dict:
+    """只补同一作品的展示信息，不替换媒体线路、有效计数或用户自定义标题。"""
+    if (not old.get("item_id") or old.get("item_id") != fresh.get("item_id")
+            or old.get("kind") != fresh.get("kind")
+            or (old.get("platform") and fresh.get("platform")
+                and old["platform"] != fresh["platform"])):
+        raise ApiError(409, "作品身份不一致，已停止信息补齐")
+    data = json.loads(json.dumps(old, ensure_ascii=False))
+    for key in ("title", "author", "avatar", "author_url", "create_time",
+                "stats", "tags", "music", "location", "author_detail"):
+        if key not in fresh:
+            continue
+        if key == "author" and data.get(key) == "未知作者":
+            data[key] = ""
+        data[key] = _merge_missing_fields({key: data.get(key)}, {key: fresh[key]})[key]
+    if not data.get("duration_ms") and fresh.get("duration_ms"):
+        data["duration_ms"] = fresh["duration_ms"]
+    video = data.get("video")
+    if isinstance(video, dict):
+        for key in ("width", "height"):
+            value = (fresh.get("video") or {}).get(key)
+            if not video.get(key) and value:
+                video[key] = value
+        if video.get("filename") in tuple(title + ".mp4" for title in _EMPTY_TITLES):
+            if str(data.get("title") or "") not in _EMPTY_TITLES:
+                video["filename"] = _safe_name(data["title"], data["item_id"]) + ".mp4"
+    if str(data.get("base") or "") in _EMPTY_TITLES and data.get("title"):
+        data["base"] = _safe_name(data["title"], data["item_id"])
+    if data != old:
+        data["snapshot_at"] = int(fresh.get("snapshot_at") or time.time())
+    return data
+
+
+def _backfill_share_metadata(data: dict, sid: str = "") -> int:
+    """在解析/管理员修复时补旧快照；分享页 GET 永远不触发。"""
+    item_id = str(data.get("item_id") or "")
+    if not item_id:
+        return 0
+    fresh = _share_storage_payload(data)
+    updated = 0
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id,title,author,avatar,cover,payload FROM shares WHERE item_id=? "
+                "AND status='ok' AND COALESCE(parse_status,'ready')='ready' "
+                "AND (expires_at=0 OR expires_at>?) "
+                + ("AND id=? " if sid else "") + "ORDER BY created DESC LIMIT 500",
+                (item_id, int(time.time()), sid) if sid else (item_id, int(time.time()))).fetchall()
+            for row in rows:
+                try:
+                    old = json.loads(row["payload"] or "{}")
+                    merged = _merge_metadata_snapshot(old, fresh)
+                except (ValueError, TypeError, AttributeError, ApiError):
+                    continue
+                # 顶层字段也可能来自旧占位符；custom_title / expires_at 等保持原状。
+                top = _merge_missing_fields(
+                    {k: row[k] for k in ("title", "author", "avatar", "cover")}, merged)
+                if merged == old and all(top[k] == row[k] for k in ("title", "author", "avatar", "cover")):
+                    continue
+                conn.execute("UPDATE shares SET title=?,author=?,avatar=?,cover=?,payload=? WHERE id=?",
+                             (top["title"], top["author"], top["avatar"], top["cover"],
+                              json.dumps(merged, ensure_ascii=False), row["id"]))
+                updated += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    # 保留每个缓存原来的媒体和过期时间，让不同输入别名也能看到已补齐的字段。
+    with _cache_lock:
+        for key, (ts, cached) in list(_cache.items()):
+            if cached.get("item_id") == item_id:
+                try:
+                    _cache[key] = (ts, _merge_metadata_snapshot(cached, data))
+                except ApiError:
+                    pass
+    return updated
+
+
+def _retry_cached_metadata(key: str, data: dict) -> dict:
+    """缺信息的抖音缓存按作品限流重试，只补官方元数据，不重复提交主解析。"""
+    if not _metadata_missing(data) or data.get("source") not in ("atc", "parser"):
+        return data
+    item_id = str(data.get("item_id") or "")
+    work_url = data.get("_link") or (_atc_cache_get(item_id) or {}).get("work_url") or ""
+    if not item_id or not _is_douyin_work_url(work_url):
+        return data
+    now = time.monotonic()
+    with _metadata_retry_lock:
+        next_at, busy = _metadata_retries.get(item_id, (0, False))
+        if busy or now < next_at:
+            return data
+        _metadata_retries[item_id] = (now + METADATA_RETRY_SECONDS, True)
+    try:
+        refreshed = _complete_douyin_result(work_url, json.loads(json.dumps(data)))
+        return _remember_parse_result(key, refreshed, time.time())
+    except Exception:
+        return data
+    finally:
+        with _metadata_retry_lock:
+            _metadata_retries[item_id] = (time.monotonic() + METADATA_RETRY_SECONDS, False)
+
+
+def _metadata_attempt(item_id: str) -> None:
+    with _metadata_retry_lock:
+        busy = _metadata_retries.get(item_id, (0, False))[1]
+        _metadata_retries[item_id] = (time.monotonic() + METADATA_RETRY_SECONDS, busy)
+        if len(_metadata_retries) > 500:
+            for key, (_, active) in list(_metadata_retries.items()):
+                if not active and key != item_id:
+                    _metadata_retries.pop(key, None)
+                    if len(_metadata_retries) <= 500:
+                        break
+
+
+def _record_metadata_failure(stage: str) -> None:
+    # 只记录有限分类，不保存上游原文、作品链接、代理地址或凭据。
+    code = "metadata_unavailable"
+    if proxy_mgr.force_proxy and not proxy_mgr.candidates():
+        code = "proxy_required"
+    elif stage == "metadata" and not _douyin_browser_binary():
+        code = "browser_missing"
+    elif stage == "metadata" and not _douyin_browser_enabled():
+        code = "browser_disabled"
+    with _metadata_retry_lock:
+        _metadata_last_failure.update(at=int(time.time()), stage=stage, code=code)
 
 
 def _save_parse_snapshot(data: dict) -> None:
@@ -6968,7 +7123,7 @@ def _merge_missing_fields(primary: dict, extra: dict) -> dict:
         old = merged.get(key)
         if isinstance(old, dict) and isinstance(value, dict):
             merged[key] = _merge_missing_fields(old, value)
-        elif (old is None or old == "" or old == "（无标题）"
+        elif (old is None or old == "" or old in ("（无标题）", "(无标题)")
               or (key == "title" and str(old).strip() in ("暂无标题", "无标题"))):
             merged[key] = value
     return merged
@@ -6985,7 +7140,7 @@ def _result_has_media(result: dict) -> bool:
 def _douyin_needs_supplement(result: dict) -> bool:
     if not _result_has_media(result):
         return True
-    if any(not result.get(key) or result.get(key) in ("（无标题）", "暂无标题", "无标题")
+    if any(not result.get(key) or result.get(key) in _EMPTY_TITLES
            for key in ("title", "author", "avatar", "author_url", "cover")):
         return True
     if any((result.get("stats") or {}).get(key) is None
@@ -7009,6 +7164,8 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
     # 图集需要真实作品 ID 才能生成受签名保护、可惰性刷新的图片端点。
     if not needs_detail and primary.get("kind") != "note":
         return primary
+    _metadata_attempt(old_id)
+    stage = "resolve"
     try:
         kind, item_id, canonical = _douyin_resolve_share_url(work_url)
         if re.fullmatch(r"\d{8,30}", old_id) and old_id != item_id:
@@ -7022,6 +7179,7 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
                 primary = dict(primary, item_id=item_id, source="douyin_direct", _link=canonical)
                 primary = _douyin_note_result_with_media(primary, item_id)
         if needs_detail:
+            stage = "metadata"
             extra = _parse_douyin_item_direct(kind, item_id, canonical, allow_metadata=True)
             extra_author = dict((_author_cache.get(item_id) or (0, {}))[1])
             merged = _merge_missing_fields(primary, extra)
@@ -7049,6 +7207,7 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
         primary_author["item_id"] = primary["item_id"]
         _author_cache[primary["item_id"]] = (time.time(), primary_author)
     except Exception:
+        _record_metadata_failure(stage)
         # 补充接口受网络/风控影响时不丢弃主服务已成功的结果。
         if primary_author and old_id:
             _author_cache[old_id] = (time.time(), primary_author)
@@ -7056,6 +7215,8 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
             raise ApiError(503, "暂未获取到作品内容，请稍后重试") from None
     if not _result_has_media(primary):
         raise ApiError(503, "暂未获取到可用的媒体地址，请稍后重试")
+    if _metadata_missing(primary):
+        _record_metadata_failure(stage)
     return primary
 
 
@@ -9546,6 +9707,309 @@ def admin_api_logs(request: Request, limit: int = 100):
     return {"logs": [dict(r) for r in rows]}
 
 
+# ---- 功能检查：仅管理员可运行，不把存活、已配置或媒体成功当作元数据成功 ----
+
+_function_check_lock = threading.RLock()
+_function_check_job: dict = {}
+
+
+def _check_item(ident: str, status: str, code: str, value=None) -> dict:
+    row = {"id": ident, "status": status, "code": code}
+    if value is not None:
+        row["value"] = value
+    return row
+
+
+def _incomplete_share_samples() -> dict:
+    rows = db_exec(
+        "SELECT id,item_id,payload FROM shares WHERE status='ok' "
+        "AND COALESCE(parse_status,'ready')='ready' AND (expires_at=0 OR expires_at>?) "
+        "ORDER BY created DESC LIMIT 100", (int(time.time()),), "all")
+    missing = []
+    for row in rows:
+        try:
+            data = json.loads(row["payload"])
+            fields = _metadata_missing(data)
+        except (TypeError, ValueError, AttributeError):
+            fields, data = ["snapshot"], {}
+        if fields:
+            missing.append({"sid": row["id"], "title": str(data.get("title") or "")[:300],
+                            "missing": fields})
+    return {"scanned": len(rows), "limit": 100, "items": missing}
+
+
+def _function_check_environment() -> dict:
+    binary = _douyin_browser_binary()
+    checks = [_check_item("version", "pass", "version", FRONTEND_VERSION)]
+    checks.append(_check_item("browser", "pending" if binary and _douyin_browser_enabled() else "fail",
+                              "browser_found" if binary and _douyin_browser_enabled() else
+                              "browser_disabled" if binary else "browser_missing"))
+    cfg = _atc_cfg()
+    configured = bool(cfg["enabled"] and cfg["key"] and cfg["secret"])
+    checks.append(_check_item("parser", "pending" if configured else "warn",
+                              "parser_configured" if configured else "parser_unconfigured"))
+    available = len(proxy_mgr.candidates())
+    checks.append(_check_item("proxy", "fail" if proxy_mgr.force_proxy and not available else "pass",
+                              "proxy_required" if proxy_mgr.force_proxy and not available else
+                              "proxy_strict" if proxy_mgr.force_proxy else "proxy_direct", available))
+    try:
+        samples = _incomplete_share_samples()
+        checks.append(_check_item("database", "pass", "database_readable"))
+    except Exception:
+        samples = {"scanned": 0, "limit": 100, "items": []}
+        checks.append(_check_item("database", "fail", "database_failed"))
+    with _metadata_retry_lock:
+        failure = dict(_metadata_last_failure)
+    return {"version": APP_VERSION, "frontend_version": FRONTEND_VERSION,
+            "checks": checks, "shares": samples, "last_metadata_failure": failure}
+
+
+def _function_check_record(ident: str, status: str, code: str, value=None) -> None:
+    with _function_check_lock:
+        rows = _function_check_job.setdefault("checks", [])
+        rows[:] = [row for row in rows if row["id"] != ident]
+        rows.append(_check_item(ident, status, code, value))
+
+
+def _check_error_code(exc: Exception) -> str:
+    # 白名单分类；不把异常文本、上游响应和带签名地址传到管理页面。
+    reason = getattr(exc, "reason", "")
+    return {"auth": "parser_auth", "entitlement": "parser_entitlement",
+            "busy": "parser_busy"}.get(reason, "request_failed")
+
+
+def _function_browser_probe() -> bool:
+    """沿用正式补全的 CDP 启动方式；不依赖会被子进程管道拖住的 dump-dom。"""
+    binary = _douyin_browser_binary()
+    if not binary or not _douyin_browser_enabled():
+        return False
+    with tempfile.TemporaryDirectory(prefix="douyin-check-") as profile:
+        port = _free_local_port()
+        proc = subprocess.Popen([
+            binary, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+            "--disable-gpu", "--disable-background-networking", "--disable-extensions",
+            "--no-first-run", f"--user-data-dir={profile}",
+            "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}", "about:blank",
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        conn = None
+        try:
+            deadline = time.monotonic() + DOUYIN_BROWSER_START_TIMEOUT
+            version = None
+            while time.monotonic() < deadline and proc.poll() is None:
+                try:
+                    with urlreq.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=.5) as response:
+                        version = json.loads(response.read(65536))
+                    break
+                except Exception:
+                    time.sleep(.08)
+            if not isinstance(version, dict) or not version.get("webSocketDebuggerUrl"):
+                return False
+            conn = _CDPConnection(version["webSocketDebuggerUrl"], timeout=2)
+            target = conn.command("Target.createTarget", {"url": "about:blank"}, timeout=3)
+            attached = conn.command("Target.attachToTarget", {
+                "targetId": target["targetId"], "flatten": True}, timeout=3)
+            result = conn.command("Runtime.evaluate", {
+                "expression": "document.documentElement.tagName", "returnByValue": True,
+            }, attached["sessionId"], timeout=3)
+            return (result.get("result") or {}).get("value") == "HTML"
+        finally:
+            if conn is not None:
+                conn.close()
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+
+
+def _function_media_probe(data: dict) -> dict:
+    if data.get("kind") != "video":
+        return _check_item("media", "skipped", "video_only")
+    source = data.get("source")
+    opener = (_open_primary_video_upstream if source in ("atc", "parser")
+              else _open_douyin_video_upstream if source in _LEGACY_DIRECT_SOURCES else None)
+    if opener is None:
+        return _check_item("media", "skipped", "media_not_supported")
+    response = opener(str(data.get("item_id") or ""), dict(CDN_HEADERS, Range="bytes=0-0"),
+                      validator=lambda r: _video_response_shape(r, "bytes=0-0"))
+    try:
+        if not response.read(1):
+            raise ApiError(502, "媒体响应为空")
+        return _check_item("media", "pass", "media_byte_ok")
+    finally:
+        _close_upstream(response)
+
+
+def _function_check_url(text: str) -> str:
+    links = _extract_supported_work_urls(text, 2)
+    if len(links) != 1 or _atc_platform_for_url(links[0]) not in ("douyin", "tiktok"):
+        raise ApiError(400, "请提供一条抖音或 TikTok 的公开作品链接")
+    return links[0]
+
+
+def _function_share_row(sid: str) -> dict:
+    row = db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one")
+    if not row:
+        raise ApiError(404, "分享页不存在")
+    row = dict(row)
+    if _share_state(row) != "ok":
+        raise ApiError(409, "只可补齐有效且已完成解析的分享页")
+    return row
+
+
+def _function_repair_share(sid: str) -> dict:
+    row = _function_share_row(sid)
+    old = json.loads(row["payload"] or "{}")
+    _require_share_item_allowed(old)
+    fresh = _get_parse_snapshot(row["item_id"])
+    if not fresh or _metadata_missing(fresh):
+        work_url = ((_atc_cache_get(row["item_id"]) or {}).get("work_url")
+                    or row.get("source_url") or "")
+        if not work_url and re.fullmatch(r"\d{8,30}", row["item_id"]) and (
+                old.get("platform") == "douyin" or old.get("source") in _LEGACY_DIRECT_SOURCES):
+            work_url = _douyin_work_url(row["kind"], row["item_id"])
+        work_url = _function_check_url(work_url)
+        if _is_douyin_work_url(work_url):
+            kind, real_id, canonical = _douyin_resolve_share_url(work_url)
+            if row["item_id"] not in (real_id, "item_" + hashlib.sha256(work_url.encode()).hexdigest()[:24]):
+                raise ApiError(409, "作品身份不一致，已停止信息补齐")
+            fresh = _parse_douyin_item_direct(kind, real_id, canonical, allow_metadata=True, refresh=True)
+            fresh["author_detail"] = _snapshot_author(fresh)
+            fresh = dict(fresh, item_id=row["item_id"])
+        else:
+            fresh = _atc_parse_work_url(work_url)
+        fresh["snapshot_at"] = int(time.time())
+    # 网络调用期间分享页可能被下架；写入前再次验证状态和归属。
+    row = _function_share_row(sid)
+    old = json.loads(row["payload"] or "{}")
+    _require_share_item_allowed(old)
+    merged = _merge_metadata_snapshot(old, fresh)
+    count = _backfill_share_metadata(merged, sid=sid)
+    _save_parse_snapshot(merged)
+    return {"updated": count, "missing": _metadata_missing(merged), "sid": sid}
+
+
+def _function_check_worker(work_url: str, sid: str) -> None:
+    try:
+        if sid:
+            _function_check_record("repair", "running", "repair_running")
+            result = _function_repair_share(sid)
+            _function_check_record("repair", "warn" if result["missing"] else "pass",
+                                   "repair_partial" if result["missing"] else "repair_ok", result)
+            return
+        _function_check_record("browser", "running", "browser_running")
+        try:
+            ok = _function_browser_probe()
+            code = ("browser_ok" if ok else "browser_missing" if not _douyin_browser_binary()
+                    else "browser_disabled" if not _douyin_browser_enabled() else "browser_failed")
+            _function_check_record("browser", "pass" if ok else "fail", code)
+        except Exception:
+            _function_check_record("browser", "fail", "browser_failed")
+        primary, native = None, None
+        _function_check_record("parser", "running", "parser_running")
+        try:
+            raw = _atc_extract(work_url, include_text=False)
+            primary = _atc_result_to_parse(work_url, raw, allow_partial=_is_douyin_work_url(work_url))
+            _function_check_record("parser", "pass", "parser_ok")
+        except Exception as exc:
+            _function_check_record("parser", "fail", _check_error_code(exc))
+        if _is_douyin_work_url(work_url):
+            _function_check_record("official", "running", "official_running")
+            try:
+                kind, real_id, canonical = _douyin_resolve_share_url(work_url)
+                native = _parse_douyin_item_direct(kind, real_id, canonical, allow_metadata=True, refresh=True)
+                _function_check_record("official", "warn" if _metadata_missing(native) else "pass",
+                                       "metadata_partial" if _metadata_missing(native) else "official_ok",
+                                       _metadata_missing(native))
+            except Exception:
+                _record_metadata_failure("metadata")
+                _function_check_record("official", "fail", "official_failed")
+        else:
+            _function_check_record("official", "skipped", "tiktok_primary")
+        data = (_complete_douyin_result(work_url, primary) if primary and _is_douyin_work_url(work_url)
+                else primary or native)
+        if not data:
+            _function_check_record("metadata", "fail", "metadata_unavailable")
+            _function_check_record("media", "skipped", "no_result")
+            _function_check_record("snapshot", "skipped", "no_result")
+            return
+        missing = _metadata_missing(data)
+        summary = {k: data.get(k) for k in ("item_id", "title", "author", "stats")}
+        summary["missing"] = missing
+        _function_check_record("metadata", "warn" if missing else "pass",
+                               "metadata_partial" if missing else "metadata_ok", summary)
+        _function_check_record("media", "running", "media_running")
+        try:
+            result = _function_media_probe(data)
+            _function_check_record(result["id"], result["status"], result["code"])
+        except Exception:
+            _function_check_record("media", "fail", "media_failed")
+        _function_check_record("snapshot", "running", "snapshot_running")
+        _remember_parse_result(work_url, data, time.time())
+        saved = _get_parse_snapshot(data["item_id"])
+        if not saved or any(saved.get(k) != data.get(k) for k in ("title", "author", "stats")):
+            raise ApiError(500, "信息快照校验失败")
+        _function_check_record("snapshot", "pass", "snapshot_ok")
+    except Exception:
+        _function_check_record("repair" if sid else "result", "fail", "repair_failed" if sid else "check_failed")
+    finally:
+        with _function_check_lock:
+            # 异常中止的阶段不能永远显示“正在检查”。
+            for row in _function_check_job.get("checks", []):
+                if row["status"] == "running":
+                    row.update(status="fail", code="check_failed")
+            _function_check_job.update(state="done", finished_at=int(time.time()))
+
+
+def _start_function_check(work_url: str = "", sid: str = "") -> dict:
+    with _function_check_lock:
+        if _function_check_job.get("state") == "running":
+            raise ApiError(409, "已有功能检查正在进行，请等待完成")
+        if time.time() - _function_check_job.get("finished_at", 0) < 10:
+            raise ApiError(429, "请等待 10 秒后再次检查", {"Retry-After": "10"})
+        _function_check_job.clear()
+        _function_check_job.update(id=secrets.token_hex(8), state="running", mode="repair" if sid else "probe",
+                                   started_at=int(time.time()), checks=[])
+        try:
+            threading.Thread(target=_function_check_worker, args=(work_url, sid), daemon=True).start()
+        except Exception:
+            _function_check_job.update(state="done", finished_at=int(time.time()))
+            raise ApiError(503, "暂时无法启动功能检查") from None
+        return dict(_function_check_job)
+
+
+class FunctionCheckBody(BaseModel):
+    text: str = ""
+
+
+@app.get("/api/admin/checks")
+def admin_function_checks(request: Request):
+    _require_admin(request)
+    status = _function_check_environment()
+    with _function_check_lock:
+        status["job"] = json.loads(json.dumps(_function_check_job))
+    return status
+
+
+@app.post("/api/admin/checks/run", status_code=202)
+def admin_function_check_run(body: FunctionCheckBody, request: Request):
+    _require_admin(request)
+    if len(body.text) > PARSE_TEXT_MAX:
+        raise ApiError(413, "解析文本超过上限")
+    return _start_function_check(work_url=_function_check_url(body.text))
+
+
+@app.post("/api/admin/checks/shares/{sid}/repair", status_code=202)
+def admin_function_check_repair(sid: str, request: Request):
+    _require_admin(request)
+    _function_share_row(sid)
+    return _start_function_check(sid=sid)
+
+
 # ---- 视频解析服务（配置 / 测试 / 播放优先级）----
 
 def _parser_test_error(exc: Exception) -> str:
@@ -10048,6 +10512,8 @@ def _health_loop():
 
 @app.on_event("startup")
 def _start_health():
+    if not _douyin_browser_binary() or not _douyin_browser_enabled():
+        print("⚠ 官方元数据补全缺少可用浏览器；请在管理后台的功能检查中查看依赖与修复提示。", flush=True)
     # 崩溃遗留的网页配额先退款；API 作业先恢复/对账，再清理过期明细。
     # cleanup 放在 legacy recovery 后，避免提前删掉旧 api_logs 导致无法重建已结算项。
     _prepare_share_parse_jobs()
@@ -10330,6 +10796,7 @@ def _frontend_asset(path: str) -> str:
 
 def _frontend_template(name: str) -> str:
     html = (Path("static") / name).read_text("utf-8")
+    html = html.replace("{{FRONTEND_VERSION}}", FRONTEND_VERSION)
     if name in ("index.html", "share.html"):
         catalog = json.dumps(UI_MESSAGES, ensure_ascii=False).replace("<", "\\u003c")
         script = Path("static/ui-i18n.js").read_text("utf-8")

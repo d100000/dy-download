@@ -547,6 +547,8 @@ footer{
   max-width:760px; margin:28px auto 0; padding:20px 0 28px; border-top:1px solid var(--border);
   color:var(--faint); font-size:12.5px; text-align:center; line-height:1.9;
 }
+.footer-version{margin-top:8px; color:var(--muted); font-variant-numeric:tabular-nums; overflow-wrap:anywhere}
+.footer-version code{font:inherit; user-select:all}
 
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
@@ -779,6 +781,7 @@ footer{
 <footer>
   <span data-i18n="footer1">仅供个人学习与授权备份 · 内容版权归原作者</span><br>
   <span data-i18n="footer2">本站不保存视频或图片文件</span>
+  <div class="footer-version"><span data-i18n="footer_version">版本</span> <code>v{{FRONTEND_VERSION}}</code></div>
 </footer>
 
 </div>
@@ -826,6 +829,7 @@ const I18N = {
     faq_q8:"How do I extract the transcript of a Douyin video (speech to text)?", faq_a8:"After parsing, switch on <strong>“Transcript (speech to text)”</strong> on the result card — extraction usually takes 1–3 minutes, and you can copy the full text or listen to the audio. Sign-in is required; signed-in users get a free daily quota, and each video is extracted only once site-wide (cached results cost nothing). See the <a href=\"/transcript\">transcript page</a>.",
     footer1:"For personal use and authorized backups · Copyright belongs to creators",
     footer2:"No video or image files stored",
+    footer_version:"Version",
     auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
     auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
     auth_math:"Quick math check", auth_math_ph:"Answer", auth_math_refresh:"New question",
