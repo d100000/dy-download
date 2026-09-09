@@ -1,0 +1,22 @@
+[Unit]
+Description=多平台下载器
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=douyin
+Group=douyin
+WorkingDirectory=/srv/douyin-dl
+EnvironmentFile=/etc/douyin-dl.env
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+ExecStart=/srv/douyin-dl/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 3344 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

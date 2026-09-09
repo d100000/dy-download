@@ -12,7 +12,7 @@ PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
 .venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
-.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence tests.test_function_checks tests.test_wallet_billing   # 后端测试套件（TestClient）
+bash tools/test.sh                        # 全部 Python + Node 回归；先装 requirements-dev.txt
 .venv/bin/python -m unittest tests.test_security_reliability.DurableBillingTests   # 单跑一个类（加 .方法名 可单跑一个用例）
 node --test tests/*.js                     # 前端逻辑测试；必须写 *.js 且在仓库根目录跑（文件名不匹配默认 glob，裸目录会报错）
 swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位图（1200×630，macOS/AppKit）
@@ -22,7 +22,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 页面：`/` 下载器 · `/transcript` 文案提取落地页 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露） · `/s/{sid}` 分享页。
 站点级路由（改站点文案/新增可收录页面时要一并同步）：`/robots.txt`、`/llms.txt`、`/sitemap.xml`、`/og.svg`（内联 SVG 卡片图）、`/og.png`（`static/og.png` 位图，微信/多数抓取器不渲染 SVG，卡片兜底必须用它）。
 
-依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。抖音官方完整视频链路还需要系统可执行的 Chrome/Chromium（可用 `DOUYIN_BROWSER_BIN` 指定）；没有浏览器时只尝试官方 SSR/JSON-LD 元数据，不能保证返回媒体地址。仓库 Dockerfile 已安装 `/usr/bin/chromium`，裸机部署需自行安装浏览器或设置 `DOUYIN_BROWSER_BIN`；新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
+依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。抖音官方完整视频链路还需要系统可执行的 Chrome/Chromium（可用 `DOUYIN_BROWSER_BIN` 指定）；没有浏览器时只尝试官方 SSR/JSON-LD 元数据，不能保证返回媒体地址。仓库 Dockerfile 已安装 `/usr/bin/chromium`，裸机部署需自行安装浏览器或设置 `DOUYIN_BROWSER_BIN`；运行依赖通过 requirements-lock.txt 固定兼容版本；测试依赖见 requirements-dev.txt，统一入口 tools/test.sh，以包名发现测试，不要使用缺少 -t . 的 unittest discover。新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
 测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（覆盖媒体签名与 Range/流租约、代理健康、原子配额、持久化计费、隐私存储、按平台解析与主动文案模式、播放日志及文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；三个 Node 测试（`test_download_flow.js`、`test_share_playback.js`、`test_video_metadata.js`）会把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑——改前端下载/播放代码时必须保留锚点或同步更新测试。本地回归必须使用独立空闲端口和独立 `DATA_DIR`，不得把用户正在查看的端口切换到另一份测试数据库；服务重启需保留原数据目录和 `.app-secret`，否则存量分享将 404、旧签名将 403。测试不能替代真实链接实测：解析服务和源平台随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
 
@@ -168,3 +168,5 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 ## 参考文档
 
 `docs/产品文档.md`：解析方案的实测记录、抖音六层限制机制与代理池对策。`docs/软件介绍.md`：功能全貌与架构概述。`docs/分享页功能规划.md`：分享页的产品方案、微信兼容专项与待实测清单。`docs/商业化与产品规划.md`：三视角商业化方案。`docs/机场代理接入.md`：机场订阅（vmess/trojan 等）无法直接入池，用 mihomo 边车落地成本地 socks5 端口再加进代理池的部署方案。
+
+最新部署步骤与只读预检：`docs/项目部署文档.md`、`tools/deploy_check.py`；模板位于 `deploy/`。微信签名票据刷新与凭据编辑共用 `_wx_ticket_lock`，更改 AppID 或 AppSecret 均清除缓存；公开接口在网络/上游响应异常时中性降级，不返回异常原文。

@@ -1,6 +1,6 @@
 # 多平台无水印下载器
 
-**当前版本：v1.29.1**（首页底部显示应用版本与前端时间戳；也可通过 `GET /healthz` 的 `version` 字段确认）
+**当前版本：v1.29.2**（首页底部显示应用版本与前端时间戳；也可通过 `GET /healthz` 的 `version` 字段确认）
 
 支持抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等 **50+ 内容平台**的视频 / 图集解析工具。优先调用已配置的内容解析服务；抖音缺少视频、作者或互动数据时，再通过服务器官方网页 / 接口补全。已有有效字段（包括统计值 0）保持不变，补全失败不影响已获取的媒体。普通解析默认不获取语音文案。
 
@@ -88,110 +88,35 @@ python3 douyin_dl.py "分享文案或短链" [输出目录]
 
 ## 部署到服务器
 
-### 方式一：Docker（推荐）
+完整操作步骤见 **[最新项目部署文档](docs/项目部署文档.md)**，包括首次安装、升级、持久化存储、稳定签名密钥、数据库备份与回滚、服务器功能验收。
+
+- 部署仓库根目录完整版；Docker 使用根目录 `Dockerfile`，包含 Chromium。不要运行 `oss/publish.sh`。
+- [运行环境模板](deploy/app.env.example)、[systemd 模板](deploy/douyin-dl.service)、[Nginx 模板](deploy/nginx.conf.example) 已提供；先修改域名、密码、数据目录与证书路径。
+- **重建/重启必须保留实际 `DATA_DIR` 和签名密钥**。新安装可使用自动生成并持久保存的 `.app-secret`；已有部署显式设置过 `APP_SECRET` / `CAPTCHA_SECRET`，升级时必须保留原值。不要在每次启动时重新生成。
+- 普通用户登录状态保存在数据库中；管理员会话与验证码仍在内存，使用单 Uvicorn worker。只 `git pull` 不会更新正在运行的进程，必须重启并核对首页和 `/healthz` 版本。
+- 解析服务、免费次数、网页计费价格、API 单价、分享域名与微信设置由后台保存，升级应保留数据库。没有代理时默认直接连接；严格代理模式需要可用代理。
 
 ```bash
-git clone https://github.com/d100000/dy-download.git && cd dy-download
-docker build -t douyin-dl .
-
-docker run -d --name douyin-dl \
-  --restart unless-stopped \
-  -p 127.0.0.1:3344:8000 \
-  -e ADMIN_PASSWORD=change-this-to-a-random-password \
-  -e TRUST_PROXY=1 \
-  -e PUBLIC_ORIGIN=https://your-domain.com \
-  -e APP_SECRET=$(openssl rand -hex 32) \
-  -v /srv/douyin-dl/data:/data \
-  douyin-dl
+# 服务器上只读核对版本与数据库结构（不迁移、不调用解析、不扣费）
+python3 tools/deploy_check.py --base-url http://127.0.0.1:3344 --data-dir /srv/douyin-dl/data
+# 公网入口也要单独检查，识别反代/CDN 或旧进程造成的差异
+python3 tools/deploy_check.py --base-url https://your-domain.com
 ```
 
-要点：
+预检通过仍需要后台“功能检查”、真实作品解析、完整文件下载和微信真机验收；详见部署文档中的检查矩阵。
 
-- `-v .../data:/data` **必须挂载**：SQLite 数据库（用户/计费/分享数据）与代理池配置都在这里，不挂载则容器重建后全部丢失。
-- 普通用户会话摘要持久保存在 SQLite `user_sessions` 表，30 天到期自动清理。升级后旧内存会话需要重新登录一次；新会话跨进程重启保持有效。管理员会话、算术题与滑块仍是短时内存状态，继续按单 worker 部署。前端构建时间戳在启动时固定，修改文件后需重启服务加载新版本。
-- Docker 默认设置 `REQUIRE_ADMIN_PASSWORD=1`；未传 `ADMIN_PASSWORD`、仍用默认值，或密码少于 12 位时会拒绝启动。
-- `-p 127.0.0.1:3344:8000` 只绑本机回环，由 Nginx 对外反代（见下），不要把 8000 直接暴露公网。
-- `TRUST_PROXY=1` 表示部署在反代之后：此时才采信 `X-Forwarded-For` 拿真实客户端 IP（限频、防薅、日志都依赖它），并自动给会话 Cookie 加 `Secure`。**没有反代时千万别开**，否则客户端可伪造头绕过所有基于 IP 的风控。
-- `PUBLIC_ORIGIN` 必须填写最终公网 HTTPS origin；否则反代下 API 返回的 `share_url` 与二维码可能指向内网监听地址。
-  - 主解析服务在后台配置；抖音缺失信息或主服务失败时通过官方链路补全。Docker 镜像已安装 Chromium，也可用 `DOUYIN_BROWSER_BIN` 指定。
-
-### 方式二：systemd + venv（裸机）
+## 测试与发布审查
 
 ```bash
-git clone https://github.com/d100000/dy-download.git /srv/douyin-dl
-cd /srv/douyin-dl
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-dev.txt
+bash tools/test.sh
+# 可选：生成后端行覆盖率报告
+COVERAGE=1 bash tools/test.sh
 ```
 
-`/etc/systemd/system/douyin-dl.service`：
+测试使用临时数据库与上游夹具，不修改生产账户。`requirements-lock.txt` 锁定已回归的运行依赖，`requirements-dev.txt` 补充匹配的 TestClient 与覆盖率工具；GitHub Actions 在 Python 3.9 / 3.12、Node 22 上执行相同测试。生产镜像不安装测试依赖。
 
-```ini
-[Unit]
-Description=douyin-dl
-After=network.target
-
-[Service]
-WorkingDirectory=/srv/douyin-dl
-Environment=ADMIN_PASSWORD=change-this-to-a-random-password
-Environment=TRUST_PROXY=1
-Environment=PUBLIC_ORIGIN=https://your-domain.com
-Environment=APP_SECRET=换成至少32字节的随机长字符串
-ExecStart=/srv/douyin-dl/.venv/bin/uvicorn server:app --host 127.0.0.1 --port 3344 --no-access-log
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-systemctl daemon-reload && systemctl enable --now douyin-dl
-curl -s http://127.0.0.1:3344/healthz    # 验证存活
-```
-
-### Nginx 反向代理 + HTTPS
-
-```nginx
-# 放在 nginx.conf 的 http {} 内；应用层仍会做签名、限频和并发限制，
-# 这里再增加一层共享限流，避免多进程/多实例绕过内存计数。
-limit_req_zone  $binary_remote_addr zone=douyin_media_req:10m rate=2r/s;
-limit_conn_zone $binary_remote_addr zone=douyin_media_conn:10m;
-
-server {
-    listen 443 ssl http2;
-    server_name your-domain.com;
-    # 默认不保存原始 IP、UA、Referer 或含短时媒体签名的完整请求地址。
-    access_log off;
-    error_log /var/log/nginx/douyin-dl-error.log crit;
-    # 证书可用 certbot 签发：certbot --nginx -d your-domain.com
-
-    # 视频播放/下载需要透传 Range，关闭 Nginx 响应缓冲，避免大文件先缓存后返回
-    location ~ ^/api/(?:douyin/|atc/)?video/ {
-        limit_req zone=douyin_media_req burst=20 nodelay;
-        limit_conn douyin_media_conn 6;
-        proxy_pass http://127.0.0.1:3344;
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-        proxy_set_header Host $host;
-        # 覆盖而非追加，防止客户端预置左侧 XFF 绕过 IP 限制。
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:3344;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-若 Nginx 前面还有 Cloudflare/CDN，先用 Nginx `real_ip` 模块把 `$remote_addr`
-还原为真实客户端地址，再设置 `TRUST_PROXY_HOPS`；不要直接信任公网传入的 XFF。
-
-分享域名（`SHARE_DOMAINS` 里的每个域名）各自加一个同样配置的 `server` 块，反代到同一个服务即可。
+本次审查证据、各功能测试映射与尚需服务器实测的边界见 [发布审查与测试报告](docs/发布审查与测试报告-2026-09-10.md)。
 
 ### 环境变量一览
 
@@ -330,6 +255,7 @@ python3 tools/testproxy.py 8899          # 另开一个终端，会打印每条�
 
 | 版本 | 日期 | 内容 |
 |---|---|---|
+| v1.29.2 | 2026-09-10 | 修复微信卡片签名异常降级与凭据切换缓存失效，合并并发票据刷新；补齐辅助功能与部署预检回归、锁定依赖、统一测试入口和 GitHub CI，更新完整部署/升级/回滚文档。 |
 | v1.29.1 | 2026-09-10 | 分享页下载前重读后台快照并更新媒体签名，明确区分分享不存在、过期与不可用；失败时保留鉴权、限频及下架的真实提示，避免旧签名一直无法下载。 |
 | v1.29.0 | 2026-09-10 | 解析结果独立保存原始分享链接及作品原链接，分享页保留刷新来源；打开分享页预检媒体，播放失效时自动续期并保留完整元数据。首页/批量预览接入同一恢复流程，刷新去重、不重复扣费，兼容旧数据升级。 |
 | v1.28.0 | 2026-09-10 | 后台增加登录用户每日免费解析次数设置，保存立即生效并保留当日使用记录；单条、批量和分享页解析统一读取后台额度，首页中英文额度与注册提示同步更新。 |

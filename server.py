@@ -56,7 +56,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.29.1"
+APP_VERSION = "1.29.2"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -6502,8 +6502,17 @@ def _wx_api(url: str) -> dict:
         return json.loads(r.read().decode("utf-8", "ignore"))
 
 
+_wx_ticket_lock = threading.Lock()
+
+
 def _wx_ticket():
-    """返回 (appid, jsapi_ticket)；未配置返回 (None, None)。带 app_settings 级缓存。"""
+    """合并并发刷新，并与后台凭据变更互斥，避免旧票据签署新 AppID。"""
+    with _wx_ticket_lock:
+        return _wx_ticket_locked()
+
+
+def _wx_ticket_locked():
+    """返回 (appid, jsapi_ticket)；未配置返回 (None, None)。带持久缓存。"""
     appid = app_setting("wx_appid").strip()
     secret = app_setting("wx_secret").strip()
     if not (appid and secret):
@@ -6518,14 +6527,18 @@ def _wx_ticket():
         return appid, cached
     tok = _wx_api("https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential"
                   f"&appid={urlparse.quote(appid)}&secret={urlparse.quote(secret)}")
-    if not tok.get("access_token"):
-        raise ApiError(502, f"获取微信 access_token 失败：{tok.get('errmsg') or tok}")
+    if not isinstance(tok, dict) or not isinstance(tok.get("access_token"), str) or not tok["access_token"]:
+        raise ApiError(502, "分享卡片配置暂不可用，请稍后重试")
     tk = _wx_api("https://api.weixin.qq.com/cgi-bin/ticket/getticket?type=jsapi"
                  f"&access_token={urlparse.quote(tok['access_token'])}")
-    if not tk.get("ticket"):
-        raise ApiError(502, f"获取 jsapi_ticket 失败：{tk.get('errmsg') or tk}")
+    if not isinstance(tk, dict) or not isinstance(tk.get("ticket"), str) or not tk["ticket"]:
+        raise ApiError(502, "分享卡片配置暂不可用，请稍后重试")
+    # 先校验有效期，再写票据，畸形响应不能留下部分缓存。
+    ttl = int(tk.get("expires_in", 7200))
+    if not 0 < ttl <= 7200:
+        raise ApiError(502, "分享卡片配置暂不可用，请稍后重试")
     set_app_setting("wx_ticket", tk["ticket"])
-    set_app_setting("wx_ticket_exp", now + int(tk.get("expires_in", 7200)) - 300)
+    set_app_setting("wx_ticket_exp", now + ttl - 300)
     return appid, tk["ticket"]
 
 
@@ -6552,8 +6565,9 @@ def wx_jssdk(request: Request, url: str = ""):
         raise ApiError(403, "该 URL 不属于本站，拒绝签名")
     try:
         appid, ticket = _wx_ticket()
-    except ApiError as e:
-        return {"enabled": False, "error": e.message}
+    except Exception:
+        # 公众号网络、鉴权或响应异常时保持页面可用，公开接口不透出上游原文。
+        return {"enabled": False, "error": "分享卡片配置暂不可用，请稍后重试"}
     if not appid:
         return {"enabled": False}
     nonce = secrets.token_hex(8)
@@ -8801,7 +8815,7 @@ class ExportBody(BaseModel):
 
 
 def _xlsx_safe_text(value, limit: int = 4096) -> str:
-    """把外部文本强制为 Excel 纯文本，防止 =/+/\-/@ 公式注入。"""
+    """把外部文本强制为 Excel 纯文本，防止 =、+、-、@ 公式注入。"""
     text = str(value or "").replace("\x00", "")[:max(0, int(limit))]
     candidate = text.lstrip(" \t\r\n")
     if candidate.startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r")):
@@ -10714,12 +10728,19 @@ def admin_set_share_config(body: ShareConfigBody, request: Request):
             raise ApiError(422, "主分享域名必须是合法的 http(s) origin，不能含路径或账号信息")
         d = normalized
         set_app_setting("share_primary_domain", d)
-    if body.wx_appid is not None:
-        set_app_setting("wx_appid", body.wx_appid.strip())
-    if body.wx_secret is not None and body.wx_secret.strip():
-        set_app_setting("wx_secret", body.wx_secret.strip())
-        set_app_setting("wx_ticket", "")          # 换了密钥，缓存的 ticket 立刻作废
-        set_app_setting("wx_ticket_exp", 0)
+    with _wx_ticket_lock:
+        credentials_changed = False
+        if body.wx_appid is not None:
+            appid = body.wx_appid.strip()
+            credentials_changed = appid != app_setting("wx_appid")
+            set_app_setting("wx_appid", appid)
+        if body.wx_secret is not None and body.wx_secret.strip():
+            secret = body.wx_secret.strip()
+            credentials_changed |= secret != app_setting("wx_secret")
+            set_app_setting("wx_secret", secret)
+        if credentials_changed:
+            set_app_setting("wx_ticket", "")
+            set_app_setting("wx_ticket_exp", 0)
     if body.toggle_domain:
         off = _domains_off()
         off.symmetric_difference_update({body.toggle_domain})
