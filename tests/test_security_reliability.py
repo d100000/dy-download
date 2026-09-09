@@ -184,7 +184,7 @@ class StaticRegressionTests(unittest.TestCase):
         self.assertEqual(share.status_code, 404)
         self.assertEqual(share.headers.get("cache-control"), "private, no-store")
         self.assertEqual(share.headers.get("pragma"), "no-cache")
-        self.assertEqual(share.headers.get("vary"), "User-Agent")
+        self.assertEqual(share.headers.get("vary"), "User-Agent, Accept-Language, Cookie")
 
 
 class MultiPlatformLinkTests(unittest.TestCase):
@@ -879,7 +879,7 @@ class SyncShareLockTests(unittest.TestCase):
         self.token = server._new_user_session(self.user_id)
 
     def tearDown(self):
-        server._user_sessions.pop(self.token, None)
+        server._delete_user_session(self.token)
         with server._db_lock:
             conn = server._db()
             try:
@@ -1966,7 +1966,7 @@ class AtcEnhancementTests(unittest.TestCase):
         self.client.cookies.set("sess", self.token)
 
     def tearDown(self):
-        server._user_sessions.pop(self.token, None)
+        server._delete_user_session(self.token)
         server.db_exec("DELETE FROM users WHERE id=424242")
         server.db_exec("DELETE FROM usage_daily WHERE subject LIKE 'atc:%'")
 
@@ -1986,7 +1986,7 @@ class AtcEnhancementTests(unittest.TestCase):
             if path == "/video/extract":
                 return {"code": 200, "data": "task-basic"}
             return {"code": 200, "data": {
-                "status": "WAITING", "title": "普通解析",
+                "status": "WAITING" if len(calls) == 2 else "SUCCESS", "title": "普通解析",
                 "videoUrl": "https://v3.douyinvod.com/basic.mp4",
                 "textContent": "不应该进入解析结果",
                 "workType": "video", "duration": 12.5,
@@ -1997,6 +1997,8 @@ class AtcEnhancementTests(unittest.TestCase):
             raw = server._atc_extract(
                 "https://v.douyin.com/BasicTask/", include_text=False)
         self.assertEqual(raw["title"], "普通解析")
+        self.assertEqual(raw["status"], "SUCCESS")
+        self.assertEqual(len(calls), 3)
         self.assertNotIn("taskType", calls[0][2])
         self.assertEqual(calls[0][:2], ("POST", "/video/extract"))
 
@@ -2152,7 +2154,7 @@ class AtcEnhancementTests(unittest.TestCase):
         def request(method, path, params, _cfg):
             calls.append((method, path, dict(params)))
             return {"code": 200, "data": {
-                "status": "WAITING", "duration": 9,
+                "status": "SUCCESS", "duration": 9,
                 "videoUrlList": ["https://v3.douyinvod.com/test.mp4"]}}
 
         with mock.patch.object(server, "_atc_request", side_effect=request):

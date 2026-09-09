@@ -28,7 +28,7 @@
 body{
   background:var(--bg); color:var(--text); min-height:100vh; font-size:15px; line-height:1.65;
   font-family:"PingFang SC","Hiragino Sans GB","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
-  -webkit-font-smoothing:antialiased; padding-bottom:calc(84px + env(safe-area-inset-bottom));
+  -webkit-font-smoothing:antialiased; padding-bottom:calc(110px + env(safe-area-inset-bottom));
 }
 button{font:inherit; cursor:pointer; border:none; background:none; color:inherit}
 a{color:inherit; text-decoration:none}
@@ -212,13 +212,13 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
 <div id="app"></div>
 <div class="toast" id="toast"></div>
 
-<div class="pload" id="pload">正在生成海报…</div>
+<div class="pload" id="pload" data-ui="正在生成海报…">正在生成海报…</div>
 <div class="pmask" id="pmask">
   <img id="posterImg" alt="分享海报">
-  <div class="p-tip" id="posterTip">长按图片保存到相册 · 或直接转发给朋友</div>
+  <div class="p-tip" id="posterTip" data-ui="长按图片保存到相册 · 或直接转发给朋友">长按图片保存到相册 · 或直接转发给朋友</div>
   <div class="p-act">
-    <a class="prim" id="posterDl" download="douyin-share.png" style="display:none">下载海报</a>
-    <button onclick="hidePoster()">关闭</button>
+    <a class="prim" id="posterDl" download="douyin-share.png" style="display:none" data-ui="下载海报">下载海报</a>
+    <button onclick="hidePoster()" data-ui="关闭">关闭</button>
   </div>
 </div>
 
@@ -232,8 +232,8 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
       ② 选择 <b>「在浏览器中打开」</b><br>
       ③ 在浏览器里点下载即可保存原片
     </div>
-    <button class="copy" id="maskCopy" onclick="copyLink()">📋 复制本页链接</button><br>
-    <button class="close" onclick="hideMask()">我知道了</button>
+    <button class="copy" id="maskCopy" onclick="copyLink()" data-ui="复制本页链接">复制本页链接</button><br>
+    <button class="close" onclick="hideMask()" data-ui="我知道了">我知道了</button>
   </div>
 </div>
 
@@ -241,7 +241,15 @@ footer a{color:var(--muted); text-decoration:underline; text-underline-offset:2p
 const S = window.__SHARE = {{SHARE_DATA}};
 const IS_WECHAT_UA = {{WECHAT}} || /micromessenger/i.test(navigator.userAgent);
 const ORIGIN = "{{ORIGIN}}";
+const LANG = '{{LANG}}';
 const app = document.getElementById('app');
+function sharePlatform(){ return S.data?.platform === 'tiktok' ? 'TikTok' : (LANG === 'en' ? 'Douyin' : '抖音'); }
+function switchLanguage(){
+  const url = new URL(location.href);
+  url.searchParams.set('lang', LANG === 'en' ? 'zh' : 'en');
+  location.href = url.href;
+}
+localizeUi();
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -291,21 +299,21 @@ function track(kind, extra){
 }
 function toast(msg){
   const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
+  t.textContent = uiText(msg); t.classList.add('show');
   clearTimeout(t._h); t._h = setTimeout(()=>t.classList.remove('show'), 1900);
 }
 const _MASK_DEFAULT = {
-  title: '下载需在浏览器中打开',
-  desc: '视频可以直接在微信内播放；如需保存文件，<br>请按下面两步操作 👇',
-  step: '① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「在浏览器中打开」</b><br>③ 在浏览器里点下载即可保存原片',
+  title: uiText('下载需在浏览器中打开'),
+  desc: uiText('视频可以直接在微信内播放；如需保存文件，<br>请按下面两步操作 👇'),
+  step: uiText('① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「在浏览器中打开」</b><br>③ 在浏览器里点下载即可保存原片'),
 };
 /* copy=false 时隐藏「复制本页链接」按钮。用在「发送给好友」引导里：
    微信不会把粘贴的网址展开成卡片，复制粘贴出去必然是一条纯文字链，
    把这个按钮摆在引导旁边等于劝用户走错路。 */
 function showMask(title, desc, step, copy){
-  document.getElementById('maskTitle').textContent = title || _MASK_DEFAULT.title;
-  document.getElementById('maskDesc').innerHTML = desc || _MASK_DEFAULT.desc;
-  document.getElementById('maskStep').innerHTML = step || _MASK_DEFAULT.step;
+  document.getElementById('maskTitle').textContent = uiText(title || _MASK_DEFAULT.title);
+  document.getElementById('maskDesc').innerHTML = uiText(desc || _MASK_DEFAULT.desc);
+  document.getElementById('maskStep').innerHTML = uiText(step || _MASK_DEFAULT.step);
   document.getElementById('maskCopy').style.display = (copy === false) ? 'none' : '';
   document.getElementById('mask').classList.add('show');
 }
@@ -313,14 +321,14 @@ function hideMask(){ document.getElementById('mask').classList.remove('show'); }
 /* 抖音风格分享文案：标题 + 一句引导 + 链接（两行以内，标题过长截断） */
 function shareText(){
   const url = S.url || location.href;
-  const t = String(S.title || '抖音作品').replace(/\s+/g, ' ').trim();
+  const t = String(S.title || sharePlatform() + ' video').replace(/\s+/g, ' ').trim();
   const short = t.length > 40 ? t.slice(0, 40) + '…' : t;
-  const by = S.author ? `@${S.author} 的抖音作品` : '抖音作品';
-  return `【${short}】${by}\n点开直接看，无需安装 App 👉 ${url}`;
+  const by = S.author ? `@${S.author} · ${sharePlatform()}` : sharePlatform();
+  return `【${short}】${by}\n${uiText('点开直接看，无需安装 App')} 👉 ${url}`;
 }
 function copyLink(){
   const text = shareText();
-  copyText(text).then(ok => toast(ok ? '链接已复制' : '复制失败，请手动复制地址栏'));
+  copyText(text).then(ok => toast(ok ? uiText('链接已复制') : uiText('复制失败，请手动复制地址栏')));
 }
 /* 分享给好友：微信内无法用按钮直接唤起分享面板，只能引导用户点右上角 ···。
    必须走 ··· 转发才会出卡片——微信不展开粘贴的网址，复制链接发出去只会是纯文字链，
@@ -328,7 +336,7 @@ function copyLink(){
 function shareToFriend(){
   track('share');
   if (IS_WECHAT_UA){
-    showMask('发送给好友',
+    showMask(uiText('发送给好友'),
       '点击右上角 <b>···</b> → <b>发送给朋友</b>，<br>好友收到的是带封面的卡片，点开即可观看 👇',
       '① 点击右上角的 <b>···</b> 按钮<br>② 选择 <b>「发送给朋友」</b> 或 <b>「分享到朋友圈」</b><br>③ 好友收到带封面标题的卡片，点开直接观看<br>'
       + '<span style="color:#9aa4b2">※ 直接复制链接粘贴给好友只会显示成一条网址，不会有卡片</span>',
@@ -338,8 +346,8 @@ function shareToFriend(){
   const url = S.url || location.href;
   if (navigator.share){
     navigator.share({
-      title: S.title || '抖音作品',
-      text: '@' + (S.author || '抖音创作者') + ' 的抖音作品 · 点开即可观看',
+      title: S.title || sharePlatform() + ' video',
+      text: shareText(),
       url,
     }).catch(()=>{});
   } else {
@@ -349,13 +357,13 @@ function shareToFriend(){
 
 /* ---------------- 状态页 ---------------- */
 const STATES = {
-  notfound: ['🔍','分享页不存在','链接可能有误，或已被创建者删除。'],
-  pending:  ['','视频正在准备中','链接已创建，系统正在后台获取内容。'],
-  processing:['','正在获取视频内容','通常只需几秒，完成后本页会自动更新。'],
-  failed:   ['⚠️','内容获取失败','抖音内容暂时无法获取，请稍后重新生成。'],
-  expired:  ['⏳','分享链接已过期','为保护创作者权益，分享页有有效期。可以让分享者重新生成一个。'],
-  dead:     ['🗑','内容已不可用','该作品可能已被原作者删除，或设置为私密/仅粉丝可见。'],
-  takedown: ['🛡','内容已下架','该分享页因权利人投诉或违规已被下架处理。'],
+  notfound: ['🔍',uiText('分享页不存在'),uiText('链接可能有误，或已被创建者删除。')],
+  pending:  ['',uiText('视频正在准备中'),uiText('链接已创建，系统正在后台获取内容。')],
+  processing:['',uiText('正在获取视频内容'),uiText('通常只需几秒，完成后本页会自动更新。')],
+  failed:   ['⚠️',uiText('内容获取失败'),uiText('抖音内容暂时无法获取，请稍后重新生成。')],
+  expired:  ['⏳',uiText('分享链接已过期'),uiText('为保护创作者权益，分享页有有效期。可以让分享者重新生成一个。')],
+  dead:     ['🗑',uiText('内容已不可用'),uiText('该作品可能已被原作者删除，或设置为私密/仅粉丝可见。')],
+  takedown: ['🛡',uiText('内容已下架'),uiText('该分享页因权利人投诉或违规已被下架处理。')],
 };
 function renderState(state){
   const [ico, h, fallback] = STATES[state] || STATES.notfound;
@@ -364,10 +372,10 @@ function renderState(state){
     ? S.error.message : (waiting && _statusNotice ? _statusNotice : fallback);
   document.body.style.paddingBottom = '0';
   app.innerHTML = `<div class="state" role="status" aria-live="polite">
-    <div class="ico${waiting ? ' wait' : ''}" aria-hidden="true">${ico}</div><h2>${h}</h2><p>${esc(p)}</p>
-    ${waiting ? '<p class="wait-note">页面可以继续打开；准备完成前请先不要转发到微信，避免卡片缓存为“准备中”。</p>' : ''}
+    <div class="ico${waiting ? ' wait' : ''}" aria-hidden="true">${ico}</div><h2>${uiText(h)}</h2><p>${esc(uiText(p))}</p>
+    ${waiting ? '<p class="wait-note" data-ui="页面可以继续打开；准备完成前请先不要转发到微信，避免卡片缓存为“准备中”。">页面可以继续打开；准备完成前请先不要转发到微信，避免卡片缓存为“准备中”。</p>' : ''}
     ${S.author ? `<p style="margin-top:10px;font-size:12.5px;color:var(--faint)">原作者：@${esc(S.author)}</p>` : ''}
-    ${waiting ? '' : '<a class="home" href="/">去重新生成分享页 →</a>'}
+    ${waiting ? '' : '<a class="home" href="/" data-ui="去重新生成分享页 →">去重新生成分享页 →</a>'}
   </div>`;
 }
 
@@ -466,37 +474,37 @@ function countValue(value){
 function countRows(data, labels){
   return labels.flatMap(([key,label]) => {
     const value = countValue(data?.[key]);
-    return value === null ? [] : [`<div><dt>${label}</dt><dd>${value.toLocaleString('zh-CN')}</dd></div>`];
+    return value === null ? [] : [`<div><dt>${uiText(label)}</dt><dd>${value.toLocaleString(LANG === 'en' ? 'en-US' : 'zh-CN')}</dd></div>`];
   });
 }
 function engagementBlock(d){
-  const items = countRows(d.stats, [['digg','点赞'],['comment','评论'],['share','分享'],['collect','收藏']]);
-  return items.length ? `<dl class="engagement" data-count="${items.length}" aria-label="作品互动数据">${items.join('')}</dl>` : '';
+  const items = countRows(d.stats, [['digg',uiText('点赞')],['comment',uiText('评论')],['share',uiText('分享')],['collect',uiText('收藏')]]);
+  return items.length ? `<dl class="engagement" data-count="${items.length}" aria-label="${uiText('作品互动数据')}">${items.join('')}</dl>` : '';
 }
 function metadataBlock(d){
   const items = [];
-  const add = (label,value) => { if (value) items.push(`<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`); };
+  const add = (label,value) => { if (value) items.push(`<div><dt>${uiText(label)}</dt><dd>${esc(value)}</dd></div>`); };
   const video = d.video || {};
   const ms = Number(d.duration_ms || video.duration_ms);
   if (S.kind !== 'note' && Number.isFinite(ms) && ms > 0){
-    const seconds = Math.floor(ms / 1000);
+    const seconds = Math.round(ms / 1000);
     const hours = Math.floor(seconds / 3600);
-    add('时长', (hours ? hours + ':' : '') + String(hours ? Math.floor(seconds / 60) % 60 : Math.floor(seconds / 60)).padStart(hours ? 2 : 1,'0') + ':' + String(seconds % 60).padStart(2,'0'));
+    add(uiText('时长'), (hours ? hours + ':' : '') + String(hours ? Math.floor(seconds / 60) % 60 : Math.floor(seconds / 60)).padStart(hours ? 2 : 1,'0') + ':' + String(seconds % 60).padStart(2,'0'));
   }
   if (S.kind !== 'note' && countValue(video.width) > 0 && countValue(video.height) > 0)
-    add('分辨率', video.width + ' × ' + video.height);
+    add(uiText('分辨率'), video.width + ' × ' + video.height);
   const format = String(video.format || video.filename?.split('.').pop() || '');
-  if (S.kind !== 'note' && /^[a-zA-Z0-9]{2,6}$/.test(format)) add('格式', format.toUpperCase());
-  if (countValue(d.create_time) > 0) add('发布于', fmtTimestamp(d.create_time));
-  return items.length ? `<dl class="metadata" aria-label="作品信息">${items.join('')}</dl>` : '';
+  if (S.kind !== 'note' && /^[a-zA-Z0-9]{2,6}$/.test(format)) add(uiText('格式'), format.toUpperCase());
+  if (countValue(d.create_time) > 0) add(uiText('发布于'), fmtTimestamp(d.create_time));
+  return items.length ? `<dl class="metadata" aria-label="${uiText('作品信息')}">${items.join('')}</dl>` : '';
 }
 function profileBlock(d){
   const profile = d.author_detail || {};
-  const items = countRows(profile, [['follower_count','粉丝'],['total_favorited','获赞'],['following_count','关注'],['aweme_count','作品']]);
+  const items = countRows(profile, [['follower_count',uiText('粉丝')],['total_favorited',uiText('获赞')],['following_count',uiText('关注')],['aweme_count',uiText('作品')]]);
   const id = profile.unique_id || profile.douyin_id || profile.short_id;
-  if (id) items.unshift(`<div><dt>抖音号</dt><dd>${esc(id)}</dd></div>`);
+  if (id) items.unshift(`<div><dt>${uiText(d.platform === 'tiktok' ? '账号' : '抖音号')}</dt><dd>${esc(id)}</dd></div>`);
   if (!items.length && !profile.signature) return '';
-  return `<details class="profile"><summary>作者资料</summary>
+  return `<details class="profile"><summary data-ui="作者资料">作者资料</summary>
     ${items.length ? `<dl class="profile-data">${items.join('')}</dl>` : ''}
     ${profile.signature ? `<p class="signature">${esc(profile.signature)}</p>` : ''}</details>`;
 }
@@ -508,10 +516,10 @@ function authorBlock(d){
   return `<div class="author">
     ${av}
     <div class="identity">
-      <div class="n">${esc(S.author || profile.nickname) || '未知作者'}</div>
-      <div class="s">抖音创作者</div>
+      <div class="n">${esc(S.author || profile.nickname) || uiText('未知作者')}</div>
+      <div class="s">${d.platform === 'tiktok' ? 'TikTok' : (LANG === 'en' ? 'Douyin' : '抖音')} · ${uiText('视频创作者')}</div>
     </div>
-    ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener noreferrer">作者主页 ↗</a>` : ''}
+    ${home ? `<a class="go" href="${esc(home)}" target="_blank" rel="noopener noreferrer" data-ui="作者主页 ↗">作者主页 ↗</a>` : ''}
   </div>`;
 }
 function extraBlock(d){
@@ -524,16 +532,16 @@ function extraBlock(d){
   return ex + tg;
 }
 function captionBlock(d){
-  const original = /^\d{8,30}$/.test(S.item_id || '')
-    ? 'https://www.douyin.com/' + (S.kind === 'note' ? 'note/' : 'video/') + S.item_id : '';
+  const original = publicLink(d.original_url) || (/^\d{8,30}$/.test(S.item_id || '')
+    ? 'https://www.douyin.com/' + (S.kind === 'note' ? 'note/' : 'video/') + S.item_id : '');
   const caption = d.title || S.title || '';
-  return `${caption && caption !== S.title ? `<details class="original-caption"><summary>原作品文案</summary><p>${esc(caption)}</p></details>` : ''}
-    <div class="caption-tools">${caption ? '<button type="button" onclick="copyCaption()">复制文案</button>' : ''}
-    ${original ? `<a href="${esc(original)}" target="_blank" rel="noopener noreferrer">查看原作品 ↗</a>` : ''}</div>
-    ${fmtTimestamp(S.snapshot_at) ? `<p class="snapshot-note">数据获取于 ${esc(fmtTimestamp(S.snapshot_at))} · 互动数以获取时为准</p>` : ''}`;
+  return `${caption && caption !== S.title ? `<details class="original-caption"><summary data-ui="原作品文案">原作品文案</summary><p>${esc(caption)}</p></details>` : ''}
+    <div class="caption-tools">${caption ? '<button type="button" onclick="copyCaption()" data-ui="复制文案">复制文案</button>' : ''}
+    ${original ? `<a href="${esc(original)}" target="_blank" rel="noopener noreferrer" data-ui="查看原作品 ↗">查看原作品 ↗</a>` : ''}</div>
+    ${fmtTimestamp(S.snapshot_at) ? `<p class="snapshot-note">${uiText('数据获取于 {time} · 互动数以获取时为准', {time: esc(fmtTimestamp(S.snapshot_at))})}</p>` : ''}`;
 }
 function copyCaption(){
-  copyText(S.data?.title || S.title || '').then(ok => toast(ok ? '文案已复制' : '复制失败，请重试'));
+  copyText(S.data?.title || S.title || '').then(ok => toast(ok ? uiText('文案已复制') : uiText('复制失败，请重试')));
 }
 
 function render(){
@@ -541,6 +549,8 @@ function render(){
   const isNote = S.kind === 'note';
   const hasMedia = !isNote && d.video &&
     (d.video.url || d.video.atc_url || d.video.proxy_url);
+  const canDownload = !isNote && d.video &&
+    (videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video.download_url || d.video.proxy_url);
   const wide = d.video && d.video.width && d.video.height && d.video.width > d.video.height;
   const playerStyle = playerInlineStyle(d.video || {});
 
@@ -550,32 +560,32 @@ function render(){
           <span class="idx">${i+1}</span>
           <img src="${esc(shareImageSrc(im))}" alt="第 ${i+1} 张" loading="lazy" referrerpolicy="no-referrer"
                onerror="imgFail(this)">
-          <button class="save" onclick="saveImageAt(${i})">保存</button>
+          <button class="save" onclick="saveImageAt(${i})" data-ui="保存">保存</button>
         </figure>`).join('')}</div>`
     : `<div class="player${wide ? ' wide' : ''}" id="playerBox" style="${esc(playerStyle)}"
           data-video-width="${esc(d.video?.width || '')}" data-video-height="${esc(d.video?.height || '')}">
         ${S.cover ? `<img class="poster" id="poster" src="${esc(S.cover)}" alt="" referrerpolicy="no-referrer">` : ''}
         ${hasMedia
-          ? `<button class="playbtn" id="playBtn" type="button" aria-label="播放视频" onclick="startPlay()"><i aria-hidden="true"></i></button>`
-          : `<div class="media-pending" role="status" aria-live="polite"><p>视频暂时无法播放，已获取的作品信息仍可查看。</p><button type="button" onclick="retryMedia()">重新检查</button></div>`}
-        <div class="loading" id="loading">加载中…</div>
+          ? `<button class="playbtn" id="playBtn" type="button" aria-label="${uiText('播放视频')}" onclick="startPlay()"><i aria-hidden="true"></i></button>`
+          : `<div class="media-pending" role="status" aria-live="polite"><p data-ui="视频暂时无法播放，已获取的作品信息仍可查看。">视频暂时无法播放，已获取的作品信息仍可查看。</p><button type="button" onclick="retryMedia()" data-ui="重新检查">重新检查</button></div>`}
+        <div class="loading" id="loading" data-ui="加载中…">加载中…</div>
       </div>`;
 
   app.innerHTML = `
   <div class="wrap">
     <div class="top">
-      <a class="brand" href="/"><span class="logo">↓</span><b>抖音无水印</b>· 分享页</a>
-      <a class="mini" href="/">生成我的 →</a>
+      <a class="brand" href="/"><span class="logo">↓</span><b>${uiText('多平台下载器')}</b></a>
+      <div style="display:flex;gap:8px;align-items:center"><button class="mini" type="button" onclick="switchLanguage()" aria-label="${LANG === 'en' ? '切换中文' : 'Switch to English'}">${LANG === 'en' ? '中文' : 'EN'}</button><a class="mini" href="/">${uiText('生成我的 →')}</a></div>
     </div>
-    <p class="slogan">分享抖音视频，微信点开就能看</p>
+    <p class="slogan">${uiText(d.platform === 'tiktok' ? '分享 TikTok 视频，微信点开就能看' : '分享抖音视频，微信点开就能看')}</p>
 
     <div class="card">
       ${media}
       <div class="body">
-        <span class="badge">${isNote ? '图集 · ' + ((d.images||[]).length) + ' 张原图' : '视频 · 无水印原片'}</span>
+        <span class="badge">${isNote ? uiText('图集 · {count} 张原图', {count: (d.images||[]).length}) : uiText('视频 · 无水印原片')}</span>
         <h1 class="title">${esc(S.title)}</h1>
         ${engagementBlock(d)}
-        ${metadataBlock(d)}
+        <div id="mediaMetadata">${metadataBlock(d)}</div>
         ${authorBlock(d)}
         ${profileBlock(d)}
         ${extraBlock(d)}
@@ -585,33 +595,34 @@ function render(){
 
     <a class="cta" href="/" onclick="track('cta')">
       <div>
-        <div class="t">想保存这个视频，或分享你的作品？</div>
-        <div class="d">打开抖音下载器，粘贴链接 10 秒搞定 · 无水印免费下载</div>
+        <div class="t" data-ui="想保存这个视频，或分享你的作品？">想保存这个视频，或分享你的作品？</div>
+        <div class="d">${uiText('粘贴链接，即可下载或分享原片')}</div>
       </div>
       <div class="arrow">›</div>
     </a>
 
-    <button class="poster-cta" onclick="makePoster()">📸 生成分享海报<span>图片比链接更适合发朋友圈与群聊</span></button>
+    <button class="poster-cta" onclick="makePoster()">${uiText('📸 生成分享海报')}<span>${uiText('图片比链接更适合发朋友圈与群聊')}</span></button>
 
-    <div class="trust"><span>🔓 开源可审查</span><span>🔒 不保存媒体</span><span>🚫 永不接广告</span><span>👤 账号可选</span></div>
+    <div class="trust"><span data-ui="🔓 开源可审查">🔓 开源可审查</span><span data-ui="🔒 不保存媒体">🔒 不保存媒体</span><span data-ui="🚫 永不接广告">🚫 永不接广告</span><span data-ui="👤 账号可选">👤 账号可选</span></div>
 
     <div class="qr">
       <img src="/s/${esc(S.sid)}/qr.svg" alt="扫码在手机上打开">
-      <div>手机扫码打开 · 或复制链接发给朋友</div>
+      <div data-ui="手机扫码打开 · 或复制链接发给朋友">手机扫码打开 · 或复制链接发给朋友</div>
     </div>
 
     <footer>
-      内容版权归原作者 ${S.author ? '@' + esc(S.author) : ''} 所有，本页仅作原作品的呈现与跳转，不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析不请求语音文案。访问与播放诊断明细保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。媒体直连时，媒体源会接收请求方网络与浏览器信息。<br>
-      请勿未经授权二次发布或商用。<a href="javascript:void(0)" onclick="report()">侵权投诉</a> ·
-      <a href="/">关于本站</a>${S.expires_at ? ' · 本页 ' + fmtDate(S.expires_at) + ' 过期' : ''}
+      ${uiText('内容版权归原作者 {author} 所有。本站保存作品信息，不保存视频或图片文件。', {author: S.author ? '@' + esc(S.author) : ''})}
+      ${uiText('公开作品链接会提交给第三方内容解析服务；抖音缺失信息通过官方接口补全。普通解析不请求语音文案。访问与播放诊断明细最多保留 30 天，每 5 分钟清理到期记录。媒体直连时，媒体源会接收请求方网络与浏览器信息。')}<br>
+      ${uiText('请勿未经授权二次发布或商用。')}<a href="javascript:void(0)" onclick="report()">${uiText('侵权投诉')}</a> ·
+      <a href="/">${uiText('关于本站')}</a>${S.expires_at ? ' · ' + uiText('本页 {date} 过期', {date: fmtDate(S.expires_at)}) : ''}
     </footer>
   </div>
 
   <div class="bar"><div class="in">
     ${isNote
-      ? `<button class="btn p" onclick="saveAll()">⬇ 保存全部图片</button>`
-      : `<button class="btn p" onclick="download(this)"${hasMedia ? '' : ' disabled aria-disabled="true"'}>⬇ 下载无水印原片</button>`}
-    <button class="btn g" onclick="shareToFriend()">↗ 分享给好友</button>
+      ? `<button class="btn p" onclick="saveAll()" data-ui="⬇ 保存全部图片">⬇ 保存全部图片</button>`
+      : `<button class="btn p" onclick="download(this)"${canDownload ? '' : ' disabled aria-disabled="true"'} data-ui="⬇ 下载无水印原片">⬇ 下载无水印原片</button>`}
+    <button class="btn g" onclick="shareToFriend()" data-ui="↗ 分享给好友">↗ 分享给好友</button>
   </div></div>`;
 }
 
@@ -634,10 +645,26 @@ function syncPlayerRatio(video){
   box.style.setProperty('--player-width', `${width / height * 70}vh`);
   box.classList.toggle('wide', width / height > 1.05);
 }
+function syncPlayerMetadata(video){
+  syncPlayerRatio(video);
+  const target = document.getElementById('mediaMetadata');
+  if (!target) return;
+  const width = Number(video?.videoWidth);
+  const height = Number(video?.videoHeight);
+  const duration = Number(video?.duration);
+  const hasDimensions = Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
+  const hasDuration = Number.isFinite(duration) && duration > 0;
+  if (!hasDimensions && !hasDuration) return;
+  // 线路可能返回不同清晰度；展示当前文件参数，不改后台作品信息快照。
+  const data = {...S.data, video: {...S.data?.video}};
+  if (hasDimensions) Object.assign(data.video, {width: Math.round(width), height: Math.round(height)});
+  if (hasDuration) data.duration_ms = Math.round(duration * 1000);
+  target.innerHTML = metadataBlock(data);
+}
 function startPlay(){
   const d = S.data || {};
   if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)){
-    toast('视频正在准备中，请稍候');
+    toast(uiText('视频正在准备中，请稍候'));
     retryMedia();
     return;
   }
@@ -660,7 +687,7 @@ function startPlay(){
   const fromUnified = source === 'parser' || source === 'atc';
   const fromDouyinDirect = source === 'douyin_direct' || source === 'douyin_web';
   const ROUTES = {
-    atc:   {src: d.video.atc_url || (fromUnified ? (d.video.direct_url || d.video.url) : ''), wait: directWait, tip: '加载中…'},
+    atc:   {src: d.video.atc_url || (fromUnified ? (d.video.direct_url || d.video.url) : ''), wait: directWait, tip: uiText('加载中…')},
     proxy: {src: d.video.proxy_url, wait: 12000,      tip: '切换备用线路中…'},
     dy1:   {src: fromUnified ? '' : d.video.url,     wait: directWait, tip: fromDouyinDirect ? '切换官方直连中…' : '切换旧直连中…'},
     dy2:   {src: fromUnified ? '' : d.video.alt_url, wait: directWait, tip: fromDouyinDirect ? '切换官方备用线路中…' : '切换旧备线中…'},
@@ -685,8 +712,8 @@ function startPlay(){
     v.dataset.videoWidth = d.video.width || '';
     v.dataset.videoHeight = d.video.height || '';
   }
-  v.addEventListener('loadedmetadata', () => syncPlayerRatio(v));
-  v.addEventListener('durationchange', () => syncPlayerRatio(v));
+  v.addEventListener('loadedmetadata', () => syncPlayerMetadata(v));
+  v.addEventListener('durationchange', () => syncPlayerMetadata(v));
   v.id = 'player';
   box.appendChild(v);
   syncPlayerRatio(v);
@@ -771,8 +798,8 @@ function startPlay(){
         detail:'all ' + routes.length + ' routes failed'});
       // 自动探测失败不能弹阻断遮罩：微信/X5 可能已经在原生视频层播放，
       // 但没有及时同步标准事件。浏览器引导只保留给用户明确点击下载/分享。
-      if (IS_WECHAT_UA) toast('若画面已播放可继续观看；仍无画面时请点视频播放键重试');
-      else toast('播放失败，请稍后重试或直接下载');
+      if (IS_WECHAT_UA) toast(uiText('若画面已播放可继续观看；仍无画面时请点视频播放键重试'));
+      else toast(uiText('播放失败，请稍后重试或直接下载'));
     }, 600);
   }
 
@@ -782,15 +809,15 @@ function startPlay(){
 /* ---------------- 下载 ---------------- */
 function download(btn){
   const d = S.data || {};
-  if (!d.video || !(d.video.url || d.video.atc_url || d.video.proxy_url)){
-    toast('视频正在准备中，请稍候');
+  if (!d.video || !(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video.download_url || d.video.proxy_url)){
+    toast(uiText('视频正在准备中，请稍候'));
     retryMedia();
     return;
   }
   track('download');
   if (IS_WECHAT_UA){ showMask(); return; }
   browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
-    btn, d.video.download_url || d.video.proxy_url, true);
+    btn, d.video.download_url || d.video.proxy_url, true, videoDirectDownloadURL(d.video,d.source), d.video);
 }
 function saveImage(url, name){
   track('download');
@@ -839,7 +866,7 @@ function downloadTarget(onError){
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
-      onError?.(message || '下载未能启动，请稍后重试');
+      onError?.(message || uiText('下载未能启动，请稍后重试'));
     } catch {}
   };
   return frame.name;
@@ -852,6 +879,71 @@ function clickDownload(url, filename, isolated=false, onError=null){
   a.style.display = 'none';
   document.body.appendChild(a); a.click(); a.remove();
 }
+function videoDirectDownloadURL(video, source=''){
+  if (!video) return '';
+  const urls=[video.atc_url];
+  if (['parser','atc'].includes(video.source || source)) urls.push(video.direct_url,video.url);
+  for (const raw of urls){
+    if (!raw || typeof raw!=='string') continue;
+    try {
+      const u=new URL(raw);
+      if (u.protocol==='https:' && !u.username && !u.password && (!u.port || u.port==='443')) return raw;
+    } catch {}
+  }
+  return '';
+}
+
+function videoDownloadRefreshURL(video){
+  try {
+    const u = new URL(video?.download_refresh_url || '', location.href);
+    if (u.origin === location.origin && /^\/api\/media\/video\/[\w-]{8,40}\/download-link$/.test(u.pathname))
+      return u.pathname + u.search;
+  } catch {}
+  return '';
+}
+
+async function refreshVideoDownloadLink(video, failedUrl){
+  let endpoint = videoDownloadRefreshURL(video);
+  if (!endpoint) throw new Error(uiText('暂时无法更新下载链接，请稍后重试'));
+  const deadline = Date.now() + 310000;
+  for (let attempt = 0; attempt < 155 && Date.now() < deadline; attempt++){
+    const controller = new AbortController();
+    const timer = setTimeout(()=>controller.abort(), 15000);
+    let resp, data;
+    try {
+      resp = await fetch(endpoint, {
+        method: 'POST', mode: 'same-origin', credentials: 'same-origin', cache: 'no-store',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({failed_url: failedUrl || ''}), signal: controller.signal,
+      });
+      data = await resp.json();
+    } catch {
+      throw new Error(uiText('下载链接更新失败，请稍后重试'));
+    } finally { clearTimeout(timer); }
+    if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403)
+        throw new Error(uiText('下载请求已失效，请刷新页面后再试'));
+      if (resp.status === 504) throw new Error(uiText('下载链接更新超时，请稍后再试'));
+      throw new Error(uiText('暂时无法更新下载链接，请稍后重试'));
+    }
+    if (resp.status === 200 && data.status === 'ready'){
+      const url = videoDirectDownloadURL({source: 'parser', direct_url: data.url});
+      if (!url) throw new Error(uiText('暂未获取到可用的下载链接，请稍后重试'));
+      // 只更新媒体，保留原来的标题、作者、互动数与文件名。
+      video.url = video.direct_url = url;
+      if (video.atc_url) video.atc_url = url;
+      for (const key of ['download_refresh_url', 'download_url', 'proxy_url'])
+        if (typeof data[key] === 'string') video[key] = data[key];
+      return url;
+    }
+    if (resp.status !== 202 || data.status !== 'processing')
+      throw new Error(uiText('下载链接更新失败，请稍后重试'));
+    await new Promise(resolve=>setTimeout(resolve,
+      Math.max(1000, Math.min(5000, Number(data.retry_after_ms) || 2000))));
+  }
+  throw new Error(uiText('下载链接更新超时，请稍后再试'));
+}
+
 function downloadFallbackURL(url, filename){
   if (!url) return '';
   try {
@@ -873,10 +965,10 @@ async function downloadResponseError(resp){
   } catch {}
   if (message) return message;
   if (resp.status === 401 || resp.status === 403)
-    return '下载请求未通过验证，请刷新页面后再试';
+    return uiText('下载请求未通过验证，请刷新页面后再试');
   if (resp.status === 429)
-    return '下载请求过于频繁，请稍后再试';
-  return '下载线路暂时不可用（HTTP ' + resp.status + '），请稍后重试';
+    return uiText('下载请求过于频繁，请稍后再试');
+  return uiText('下载线路暂时不可用（HTTP {status}），请稍后重试', {status: resp.status});
 }
 async function responseBlobWithProgress(resp, onProgress){
   const type = (resp.headers.get('content-type') || 'application/octet-stream')
@@ -900,10 +992,10 @@ async function responseBlobWithProgress(resp, onProgress){
   return new Blob(chunks, {type});
 }
 function downloadProgress(loaded, total){
-  if (total) return '下载中 ' + Math.min(100, Math.round(loaded / total * 100)) + '%';
-  return '已下载 ' + (loaded / 1024 / 1024).toFixed(1) + ' MB';
+  if (total) return uiText('下载中 {percent}%', {percent: Math.min(100, Math.round(loaded / total * 100))});
+  return uiText('已下载 {size} MB', {size: (loaded / 1024 / 1024).toFixed(1)});
 }
-async function fetchAssetBlob(source, onProgress){
+async function fetchAssetBlob(source, onProgress, videoOnly=false){
   const resp = await fetch(source, {
     mode: 'cors', credentials: 'omit', cache: 'no-store',
   });
@@ -912,9 +1004,19 @@ async function fetchAssetBlob(source, onProgress){
   if (contentType.startsWith('text/') || contentType.includes('json')
       || contentType.includes('html')){
     try { await resp.body?.cancel(); } catch {}
-    throw new Error('下载线路返回了无效内容，请稍后重试');
+    throw new Error(uiText('下载线路返回了无效内容，请稍后重试'));
   }
-  return responseBlobWithProgress(resp, onProgress);
+  const mediaType=contentType.split(';',1)[0].trim();
+  if(videoOnly && (resp.status!==200 || !(mediaType.startsWith('video/') ||
+      ['application/mp4','application/octet-stream','binary/octet-stream'].includes(mediaType)))){
+    try { await resp.body?.cancel(); } catch {}
+    throw new Error(uiText('原片下载返回了无效内容，请重新解析后再试'));
+  }
+  const blob=await responseBlobWithProgress(resp,onProgress);
+  const expected=Number(resp.headers.get('content-length')) || 0;
+  if(videoOnly && (!blob.size || (expected && blob.size!==expected)))
+    throw new Error(uiText('视频未下载完整，请重试'));
+  return blob;
 }
 async function preflightVideoDownload(source){
   let lastError = null;
@@ -936,7 +1038,7 @@ async function preflightVideoDownload(source){
         throw error;
       }
       if (resp.status !== 200 && resp.status !== 206){
-        const error = new Error('下载线路返回了异常状态，请稍后重试');
+        const error = new Error(uiText('下载线路返回了异常状态，请稍后重试'));
         error.retryable = true;
         throw error;
       }
@@ -946,7 +1048,7 @@ async function preflightVideoDownload(source){
           || contentType === 'application/mp4'
           || contentType === 'application/octet-stream'
           || contentType === 'binary/octet-stream')){
-        const error = new Error('下载线路返回了无效内容，请稍后重试');
+        const error = new Error(uiText('下载线路返回了无效内容，请稍后重试'));
         error.retryable = true;
         throw error;
       }
@@ -954,7 +1056,7 @@ async function preflightVideoDownload(source){
         const contentRange = resp.headers.get('content-range') || '';
         const length = Number(resp.headers.get('content-length')) || 0;
         if (!/^bytes 0-0\/(?:\d+|\*)$/i.test(contentRange) || length > 65536){
-          const error = new Error('下载线路未正确响应 Range，请稍后重试');
+          const error = new Error(uiText('下载线路未正确响应 Range，请稍后重试'));
           error.retryable = true;
           throw error;
         }
@@ -971,22 +1073,52 @@ async function preflightVideoDownload(source){
       await new Promise(resolve => setTimeout(resolve, 350));
     }
   }
-  throw lastError || new Error('下载失败，请稍后重试');
+  throw lastError || new Error(uiText('下载失败，请稍后重试'));
 }
-async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false){
+async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false, directUrl='', video=null){
   const oldHTML = btn ? btn.innerHTML : null;
   const oldDisabled = btn ? btn.disabled : false;
-  if (btn){ btn.textContent = '下载中…'; btn.disabled = true; }
-  else toast('开始下载…');
+  if (btn){ btn.textContent = uiText('下载中…'); btn.disabled = true; }
+  else toast(uiText('开始下载…'));
   try {
-    const fallback = downloadFallbackURL(fallbackUrl, filename);
-    if (requireFallback && !fallback)
-      throw new Error('暂未获取到可用的下载线路，请重新解析后再试');
-    if (fallback){
-      if (btn) btn.textContent = '检查下载线路…';
-      await preflightVideoDownload(fallback);
-      clickDownload(fallback, filename, true, toast);
-    } else {
+    let fallback = downloadFallbackURL(fallbackUrl, filename);
+    let directSaved=false, directError=null;
+    const saveDirect = async source => {
+      const blob = await fetchAssetBlob(source, (loaded,total)=>{
+        if (btn) btn.textContent = downloadProgress(loaded,total);
+      }, true);
+      const objectURL = URL.createObjectURL(blob);
+      clickDownload(objectURL,filename);
+      setTimeout(()=>URL.revokeObjectURL(objectURL),60000);
+      directSaved = true;
+    };
+    if (directUrl){
+      try { await saveDirect(directUrl); }
+      catch { directError = new Error(uiText('原片下载暂时不可用，请重新解析后再试')); }
+    }
+    if (!directSaved && videoDownloadRefreshURL(video)){
+      if (btn) {
+        btn.textContent = uiText('正在重新获取下载链接…');
+        btn.setAttribute?.('aria-busy','true');
+      }
+      try {
+        const fresh = await refreshVideoDownloadLink(video, directUrl);
+        fallback = downloadFallbackURL(video.download_url || video.proxy_url || fallbackUrl, filename);
+        try { await saveDirect(fresh); }
+        catch { throw new Error(uiText('下载链接更新后仍不可用，请稍后重试')); }
+      } catch(error) {
+        directError = error;
+      }
+    }
+    if (!directSaved && requireFallback && !fallback)
+      throw directError || new Error(uiText('暂未获取到可用的下载线路，请重新解析后再试'));
+    if (!directSaved && directError && !fallback) throw directError;
+    if (!directSaved && fallback){
+      if (btn) btn.textContent = uiText('尝试备用下载线路…');
+      try { await preflightVideoDownload(fallback); }
+      catch(error){ throw directError || error; }
+      clickDownload(fallback, filename, true, directError ? ()=>toast(directError.message) : toast);
+    } else if (!directSaved) {
       const blob = await fetchAssetBlob(url, (loaded, total) => {
         if (btn) btn.textContent = downloadProgress(loaded, total);
       });
@@ -994,21 +1126,21 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
       clickDownload(u, filename);
       setTimeout(()=>URL.revokeObjectURL(u), 5000);
     }
-    toast('下载已开始，请查看浏览器下载列表');
+    toast(uiText('下载已开始，请查看浏览器下载列表'));
     return true;
   } catch (error) {
-    toast(error && error.message ? error.message : '下载失败，请稍后重试');
+    toast(error && error.message ? error.message : uiText('下载失败，请稍后重试'));
     return false;
   } finally {
-    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; }
+    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; btn.removeAttribute?.('aria-busy'); }
   }
 }
 function imgFail(image){
   // 同源图片端点在服务端已刷新过一次；失败时保留
   // 当前页面和其他已加载图片，避免整页无限重载。
-  if (image){ image.onerror = null; image.classList.add('is-failed'); image.alt = '图片暂时加载失败'; }
+  if (image){ image.onerror = null; image.classList.add('is-failed'); image.alt = uiText('图片暂时加载失败'); }
   if (window._imgFailed) return; window._imgFailed = true;
-  toast('部分图片暂时无法加载，请稍后刷新再试');
+  toast(uiText('部分图片暂时无法加载，请稍后刷新再试'));
 }
 
 /* ---------------- 分享海报（前端 canvas 合成，服务器不参与、不落地） ----------------
@@ -1062,7 +1194,7 @@ async function makePoster(){
     } else {
       x.fillStyle = '#22262e'; x.fillRect(0, 0, W, CH);
       x.fillStyle = '#5B6470'; x.font = '600 30px sans-serif'; x.textAlign = 'center';
-      x.fillText('抖音作品', W/2, CH/2); x.textAlign = 'left';
+      x.fillText(uiText('抖音作品'), W/2, CH/2); x.textAlign = 'left';
     }
 
     // 播放角标
@@ -1087,7 +1219,7 @@ async function makePoster(){
       }
     } catch {}
     x.fillStyle = '#B9C0CA'; x.font = '400 27px "PingFang SC",system-ui,sans-serif';
-    x.fillText('@' + (S.author || '抖音创作者'), P + (S.avatar ? 70 : 0), y);
+    x.fillText('@' + (S.author || uiText('视频创作者')), P + (S.avatar ? 70 : 0), y);
 
     // 二维码 + 引导
     const qr = await loadImg('/s/' + S.sid + '/qr.png', false);
@@ -1095,14 +1227,14 @@ async function makePoster(){
     x.fillStyle = '#fff'; x.fillRect(P - 8, qy - 8, QS + 16, QS + 16);
     x.drawImage(qr, P, qy, QS, QS);
     x.fillStyle = '#EDEFF2'; x.font = '600 30px "PingFang SC",system-ui,sans-serif';
-    x.fillText('扫码直接观看', P + QS + 34, qy + 62);
+    x.fillText(uiText('扫码直接观看'), P + QS + 34, qy + 62);
     x.fillStyle = '#8A93A0'; x.font = '400 24px "PingFang SC",system-ui,sans-serif';
-    x.fillText('无水印原片 · 无需登录抖音', P + QS + 34, qy + 104);
-    x.fillText('不用装抖音 App', P + QS + 34, qy + 140);
+    x.fillText(uiText('无水印原片 · 无需登录抖音'), P + QS + 34, qy + 104);
+    x.fillText(uiText('不用装抖音 App'), P + QS + 34, qy + 140);
 
     // 品牌页脚（带域名：海报进朋友圈后是免费获客位）
     x.fillStyle = '#4E5561'; x.font = '400 21px "PingFang SC",system-ui,sans-serif';
-    x.fillText('抖音无水印下载器 · 不保存媒体文件 · ' + location.host, P, H - 42);
+    x.fillText(uiText('抖音无水印下载器 · 不保存媒体文件 · ') + location.host, P, H - 42);
 
     // 关键：必须用 data: URI 而非 blob: 对象 URL —— 微信 WebView 无法对 blob: 图片
     // 长按「保存图片/发送给朋友」，只认 data: 与 http(s)。用 blob 会导致海报存不下也发不出。
@@ -1114,12 +1246,12 @@ async function makePoster(){
     dl.href = dataURL;
     dl.style.display = IS_WECHAT_UA ? 'none' : '';       // 微信内无法触发下载，靠长按保存
     document.getElementById('posterTip').textContent = IS_WECHAT_UA
-      ? '长按上方图片 → 保存图片 / 发送给朋友'
-      : '右键/长按保存图片，或点下载海报';
+      ? uiText('长按上方图片 → 保存图片 / 发送给朋友')
+      : uiText('右键/长按保存图片，或点下载海报');
     document.getElementById('pmask').classList.add('show');
     track('cta');
   } catch(e){
-    toast('海报生成失败：' + (e && e.message ? e.message : '图片跨域受限'));
+    toast(uiText('海报生成失败：') + (e && e.message ? e.message : uiText('图片跨域受限')));
   } finally {
     document.getElementById('pload').classList.remove('show');
   }
@@ -1145,8 +1277,8 @@ async function setupWxShare(){
     signature:cfg.signature, jsApiList:['updateAppMessageShareData','updateTimelineShareData']});
   wx.ready(() => {
     const opt = {
-      title: (S.title || '抖音作品').slice(0, 40),        // 标题=抖音文案，与卡片抓取一致
-      desc: '@' + (S.author || '抖音创作者') + ' 的抖音作品 · 点开即可观看，无需安装 App',
+      title: (S.title || uiText('抖音作品')).slice(0, 40),        // 标题=抖音文案，与卡片抓取一致
+      desc: shareText(),
       link: S.url || location.href,
       imgUrl: S.card_cover || S.cover || (ORIGIN + '/og.png'),   // 无签名 JPEG 优先；微信不渲染 SVG
     };
@@ -1157,12 +1289,12 @@ async function setupWxShare(){
 
 /* ---------------- 投诉 ---------------- */
 function report(){
-  const reason = prompt('请简要说明投诉理由（如：我是该作品的著作权人，要求下架）');
+  const reason = prompt(uiText('请简要说明投诉理由（如：我是该作品的著作权人，要求下架）'));
   if (!reason) return;
-  const contact = prompt('留下联系方式（选填，仅用于回复投诉；保留期最多 30 天，到期后定时删除）') || '';
+  const contact = prompt(uiText('留下联系方式（选填，仅用于回复投诉；保留期最多 30 天，到期后定时删除）')) || '';
   fetch('/api/report', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({sid: S.sid, reason, contact})})
-    .then(r=>r.json()).then(d=>toast(d.message || '已收到投诉')).catch(()=>toast('提交失败，请稍后再试'));
+    .then(r=>r.json()).then(d=>toast(d.message || uiText('已收到投诉'))).catch(()=>toast(uiText('提交失败，请稍后再试')));
 }
 
 /* ---------------- 入口 ---------------- */

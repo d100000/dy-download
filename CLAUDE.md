@@ -12,7 +12,7 @@ PORT=8010 ADMIN_PASSWORD=xxx ./run.sh      # 换端口 / 改管理密码
 .venv/bin/uvicorn server:app --reload --port 3344 --no-access-log   # 开发热重载（手动方式）
 python3 douyin_dl.py "分享文案或短链" [输出目录]      # 纯标准库 CLI 版，不依赖服务
 python3 tools/testproxy.py 8899            # 本地测试代理：验证"出站请求确实走代理"，逐条打印 CONNECT
-.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback   # 后端测试套件（TestClient，约 2 秒跑完）
+.venv/bin/python -m unittest tests.test_security_reliability tests.test_parser_fallback tests.test_auth_persistence   # 后端测试套件（TestClient）
 .venv/bin/python -m unittest tests.test_security_reliability.DurableBillingTests   # 单跑一个类（加 .方法名 可单跑一个用例）
 node --test tests/*.js                     # 前端逻辑测试；必须写 *.js 且在仓库根目录跑（文件名不匹配默认 glob，裸目录会报错）
 swift tools/render_og.swift static/og.svg static/og.png   # 重渲染 og.png 位图（1200×630，macOS/AppKit）
@@ -40,7 +40,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 
 `static/*.html` 每个页面是自包含单文件（内联 CSS + 原生 JS，无构建、无框架、无依赖）。没有 `StaticFiles` 挂载，每个页面都有独立路由，分两类：
 - **模板替换型**：`index.html` / `api-docs.html`（替换 `{{HTMLLANG}}` / `{{SEO_HEAD}}` / `{{ORIGIN}}`）、`share.html`（见分享页一节）。
-- **纯 `FileResponse`**：`admin.html`（`/admin_d`）、`api-console.html`（`/api-console`），无占位符、不做 SEO。
+- **仅版本注入型**：`admin.html`（`/admin_d`）、`api-console.html`（`/api-console`），不做 SEO。全部页面经 `_frontend_template()` 注入应用/时间戳版本，`_frontend_response()` 禁止持久缓存；本地图标的 `?v=` 与启动时固定的 `FRONTEND_VERSION` 一致时才使用 immutable 长缓存。
 
 新增可被搜索引擎收录的页面时，必须走模板 + `_seo_head()`，否则占位符会原样输出到页面。
 
@@ -50,9 +50,11 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 
 `server.py` 使用主服务优先、抖音官方补全；`oss/server.py` 与 `douyin_dl.py` 是独立的旧实现，不共享主服务配置。
 
+2026-09-09 已核对官方视频文档 `https://www.anytocopy.com/account/api/docs`：POST `/video/extract` 与 GET `/video/query` 均使用 query 参数，鉴权只放请求头。`WAITING` / `PROCESSING` 以及 `FAILED` / `FAILURE` 响应也可能带媒体地址，所有入口必须使用 `_atc_result_complete()`；`_atc_basic_result_ready()` 只表示有媒体，不能作为显式任务状态的替代。仅无状态的旧同步响应兼容立即返回。查询可重试原 taskId，但未知是否受理的 POST 不自动重发；并发拒绝退回队列后至少等 5 秒，各 purpose 都受超时约束。`_ParserServiceError` 的内部分类区分临时网络异常和永久鉴权/权益失败，公开错误不得包含上游名称或原文。`content` 与 `title` 分别保存；`createBy` / `createTime` 是任务元数据，不能映射为作品作者/发布时间。文档没有保证互动数、作者详情和媒体地址 TTL，继续按需补全与点击刷新。
+
 ### 流量分工：解析服务地址与同源流式媒体
 
-新主服务响应使用 `source: parser`、`video.direct_url` 与 `/api/media/video/{item_id}`；官方补充媒体使用 `/api/douyin/video/{item_id}`。媒体路径必须与缓存来源匹配；旧 `/api/atc/video` 路由仅作兼容。下载保留签名、白名单、Range 与并发校验。
+新主服务响应使用 `source: parser`、`video.direct_url` 与 `/api/media/video/{item_id}`；官方补充媒体使用 `/api/douyin/video/{item_id}`。解析页、批量与分享页通过 `videoDirectDownloadURL()` 选主服务原片（兼容旧 `atc_url`），浏览器 CORS 下载、显示进度，校验 200/媒体类型/非空/已知长度后保存 Blob；不得把官方接口重定向地址当主服务原片。主服务地址缺失/过期或直连失败时，点击下载才 POST `video.download_refresh_url`（`/api/media/video/{item_id}/download-link`，独立 `download_link` HMAC）。返回 202 时显示加载并有界轮询，后台复用 `atc_jobs` 的 `download` 任务，用 `atc_cache.work_url` 保存的来源重新提交普通解析；不调用官方补全、不覆盖信息快照、不重复扣解析配额。任务创建原子去重、最多 32 个在途、30 秒冷却和 5 分钟超时。新地址重新缓存并更新前端媒体；失败后才预检同源备用流，服务器默认代理优先，空代理池或全部失败后直接连接；管理员可显式开启严格代理模式。媒体路径必须与缓存来源匹配；旧 `/api/atc/video` 路由仅作兼容。同源下载保留签名、白名单、Range 与并发校验。
 
 ATC 的 `duration_ms`、`video.width`、`video.height` 可能为空。首页不得用 `0:00`、`720P` 等看似真实的值兜底；单条结果通过 `<video preload="metadata">` 的 `loadedmetadata` / `durationchange` 从媒体链接补全，失败显示「暂未读取」。批量列表为避免一次解析触发几十条媒体请求，只在用户打开视频预览时读取并回填对应行。
 
@@ -64,15 +66,19 @@ ATC 的 `duration_ms`、`video.width`、`video.height` 可能为空。首页不�
 
 ### 代理池
 
+v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后直连。旧配置未带 `proxy_policy_version=1` 时只迁移一次，之后保留管理员显式选择。mihomo 内部 blackhole 保持，指定 `proxy_override` 的 IP 绑定请求不隐式换出口。主解析视频备用流仅允许 `_primary_media_allowed()` 中的抖音 / TikTok CDN；抖音官方路径继续使用原 `_host_allowed()`。
+
 `ProxyManager`（`threading.Lock` 保护）持久化在 `data/config.json`（代理列表 + 策略），不在 SQLite 里。支持 `scheme://user:pass@host:port`、`host:port:user:pass`、`user:pass@host:port`、`host:port` 四种输入格式（`parse_proxy` 归一化，无前缀按 `default_protocol`，默认 socks5）。策略：`round_robin`/`random`/`least_fail`、每请求重试数、连续失败自动禁用、后台 `_health_loop` 定时并发测速（出口 IP + 抖音可达性）并对恢复的代理自愈解禁。
 
 **内置 mihomo 内核（机场订阅）**：代理池只认 http/socks，机场的 vmess/trojan 等加密协议进不来，因此由 `MihomoManager`（`server.py` 内「内置 mihomo 内核」分区）把订阅落地成一个本地 socks5 端口再接进池子。它托管一个完整的子进程生命周期：`ensure_binary()` 按平台下载内核（`data/mihomo/`，`MIHOMO_DL_BASE`/`MIHOMO_VERSION` 可换源换版本，`MIHOMO_OFF=1` 全禁）→ `write_config()` 渲染 YAML → `_start_locked()`/`stop()`/`reload()` → 后台 `supervise()` 守护线程（每 5s，仿 `_health_loop`）。`ProxyManager.sync_managed()` 维护那条 `id="mihomo"` 的托管代理条目。后台 `/api/admin/mihomo` 读写，订阅存 `app_settings` 表的 `mihomo_sub_url`。改动时注意三条硬约束：① **隔离**——只绑 `127.0.0.1` + `allow-lan:false` + 随机高端口 + `authentication` 账密（连本机也要验证），保证同机其他项目连不进、不改系统代理、不开 TUN；② **fail-closed**——`fallback` 组必须挂一个永远失败的 `blackhole` 成员，否则空 provider 会让内核注入 COMPATIBLE(=DIRECT) 导致服务器真实 IP 泄漏；③ **exec 路径**——用 `MIHOMO_BIN.resolve()` 绝对路径且不传 `cwd`（`DATA_DIR` 是相对路径，传 cwd 会让相对二进制路径解析错）。子进程随服务启停（startup 起 `supervise`，shutdown 调 `stop`），pidfile 清理孤儿，务必单 worker。
 
 ### 分享页（`/s/{sid}`）
 
-把抖音链接变成"微信里点开就能看"的页面。规划见 [docs/分享页功能规划.md](docs/分享页功能规划.md)。
+把抖音和 TikTok 视频链接变成"微信里点开就能看"的页面。规划见 [docs/分享页功能规划.md](docs/分享页功能规划.md)。
 
 同样**不落地任何媒体字节**：`shares` 表只存净化后的元数据快照，抖音短时媒体地址和刷新所需的官方作品链接留在受保护列 / 内存缓存中，不进入公开 payload；其他平台的短时地址保存在 `atc_cache`。成功解析通过 `_remember_parse_result()` 把完整展示数据写入 `parse_snapshots`（24 小时 TTL，每 5 分钟清理），作者补充资料同步保存到有效快照；已生成分享仍按自身有效期保存。分享页读取不得调用上游或 `_atc_enqueue()`，媒体仅在播放/下载时按需刷新；不要恢复访问时自动刷新/轮询媒体的旧逻辑。`_parse_share()` 处理新短链，`_parse_item(kind,item_id)` 处理存量分享页刷新：主服务优先，抖音缺失信息走官方补全；升级前已存的 `vid` 仅作为历史兼容数据处理，不得成为新解析的旁路。
+
+`static/ui-locales.json` 与 `static/ui-i18n.js` 由 `_frontend_template()` 内联至首页与分享页，保持 HTML 自包含。静态系统标签使用 `data-ui`，动态反馈使用 `uiText()`；不要翻译作品标题、作者、文案或标签。语言按 query / Cookie / Accept-Language 选择，分享页使用 `{{LANG}}` 与切换按钮。
 
 `static/share.html` 是独立模板（占位符 `{{SHARE_HEAD}}` / `{{SHARE_DATA}}` / `{{WECHAT}}`），刻意比首页轻——微信里首屏要 1 秒内出内容，因此不要往里加极光动画之类的装饰。注入 `{{SHARE_DATA}}` 的 JSON 已把 `<` 转义，改这段时别把转义丢了。
 
@@ -96,7 +102,9 @@ ATC 的 `duration_ms`、`video.width`、`video.height` 可能为空。首页不�
 
 抖音短链、数字作品 ID、分享 worker 与缓存刷新均优先使用主解析服务，再由官方链路按需补全。主任务最多 3 个在途，后台任务最多 2 个；文案任务仍需用户主动开启并按原配额结算。作者接口只补缺失字段，不覆盖已有精确计数；数值统一为整数或 null。公开接口使用中性名称，兼容旧路由和内部数据库字段。
 
-### 滑块验证码与 `pass_token` 门禁
+### 算术题、滑块验证码与 `pass_token` 门禁
+
+注册/登录先调用 `/api/auth/math` 取得一次性加减题，再以 `/api/auth/math/verify` 验证答案；通过后用返回的 `math_token` 放入 `X-Auth-Math` 请求头加载 `/api/auth/captcha`。题目与授权均绑定 IP、有效期 5 分钟，题目尝试一次即作废，授权最多加载 10 张滑块。不得仅在浏览器判断答案或无门禁签发滑块。
 
 自研的防机器人链路（无 Pillow、无第三方库）：`_png()` 是手写的极简 PNG 编码器（stdlib `zlib`+`struct`），`make_captcha()` 服务端生成带缺口的背景图。**缺口坐标只存在服务端 `_captchas` 与像素里**，绝不出现在响应体中——抓包拿不到答案，改这段时别把坐标漏进返回值。`verify_captcha()` 校验落点 + 行为轨迹 + PoW（`POW_BITS=14`，抬高批量自动化成本）+ 蜜罐字段。
 
@@ -119,7 +127,7 @@ ATC 的 `duration_ms`、`video.width`、`video.height` 可能为空。首页不�
 
 SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lock`；schema 在 `_SCHEMA` 里用 `CREATE TABLE IF NOT EXISTS` 就地演进（无迁移框架，改表要自行考虑既有库的兼容）。
 
-**会话与验证码状态仍在进程内存字典**（`_user_sessions`、`_sessions`、`_captchas`、`_passes`、限频计数），由 `_sweeper` 线程每 5 分钟清理。后果：重启即掉线；**多 worker 部署会话不互认**——默认按单 worker 运行，会话仍需改造为共享存储。开放 API 作业及计费已持久化，不受该限制。签名与摘要密钥默认原子持久化到权限 `0600` 的 `data/.app-secret`，生产/多实例也可显式设置同一个 `APP_SECRET`。
+**普通用户会话已持久化**：`user_sessions` 只保存随机令牌的 SHA-256 摘要，浏览器使用 30 天 HttpOnly/SameSite=Lax Cookie；重启不掉线，退出删除对应摘要，禁用/删除用户立即失效。旧版内存会话升级后需重新登录一次。管理员会话与验证码仍在进程内存（`_sessions`、`_math_challenges`、`_math_grants`、`_captchas`、`_passes`、限频计数），每 5 分钟清理，仍须单 worker 部署。开放 API 作业及计费已持久化，不受该限制。签名与摘要密钥默认原子持久化到权限 `0600` 的 `data/.app-secret`，生产/多实例也可显式设置同一个 `APP_SECRET`。
 
 `TRUST_PROXY=1` 才采信 `X-Forwarded-For`（否则客户端可伪造头绕过所有基于 IP 的风控），并连带开启 Cookie `Secure`；从右侧按 `TRUST_PROXY_HOPS` 取值。Nginx 应覆盖为 `$remote_addr`，不要用会保留客户端伪造左侧值的 `$proxy_add_x_forwarded_for`。
 

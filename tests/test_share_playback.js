@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/localized-vm');
 
 const html = fs.readFileSync('static/share.html', 'utf8');
 const start = html.indexOf('let _playSession = 0;');
@@ -304,4 +304,55 @@ test('neutral parser source honors direct-media priority', () => {
   }, priority: ['atc', 'proxy', 'dy1', 'dy2']});
   h.startPlay();
   assert.equal(h.videos[0].src, 'https://v3.douyinvod.com/main.mp4');
+});
+
+test('English TikTok share counts and metadata preserve zero and original captions', () => {
+  const c = metadataHarness({}, {item_id:'tiktok_6718335390845095173'});
+  c.LANG = 'en';
+  const counts = c.engagementBlock({stats: {digg: 1234, comment: 0}});
+  assert.match(counts, /<dt>Likes<\/dt><dd>1,234/);
+  assert.match(counts, /<dt>Comments<\/dt><dd>0/);
+  assert.doesNotMatch(counts, /<dt>Shares|<dt>Saves/);
+  assert.match(c.metadataBlock({duration_ms: 12000}), /Duration/);
+  assert.match(c.authorBlock({platform: 'tiktok'}), /TikTok · Video creator/);
+  const original_url = 'https://www.tiktok.com/@creator/video/6718335390845095173';
+  const caption = c.captionBlock({title:'原始中文标题 #标签', original_url});
+  assert.ok(caption.includes('原始中文标题 #标签'));
+  assert.ok(caption.includes(original_url));
+  assert.doesNotMatch(caption, /douyin.com/);
+});
+
+test('localized template labels preserve nested elements and user content', () => {
+  const c = {};
+  vm.runInNewContext('', c);
+  c.LANG = 'en';
+  const text = {nodeType: 3, textContent: '下载'};
+  const icon = {nodeType: 1, textContent: 'icon'};
+  const label = {children:[icon], childNodes:[text,icon], getAttribute:()=> '下载'};
+  c.localizeUi({querySelectorAll:()=>[label]});
+  assert.equal(text.textContent, 'Download');
+  assert.equal(icon.textContent, 'icon');
+});
+
+test('share playback displays actual file dimensions and duration without changing its saved snapshot', () => {
+  const data = {duration_ms: 10000, video: {width: 2160, height: 3840, filename: 'original.mp4'},
+    stats: {digg: 33796, comment: 161}, title: '替你自由'};
+  const original = JSON.stringify(data);
+  const c = metadataHarness(data);
+  const target = {innerHTML: ''};
+  c.document = {getElementById: id => id === 'mediaMetadata' ? target : null};
+  vm.runInNewContext(playbackSource, c);
+  c.syncPlayerMetadata({videoWidth: 1080, videoHeight: 1920, duration: 9.5});
+  assert.match(target.innerHTML, /1080 × 1920/);
+  assert.match(target.innerHTML, /0:10/);
+  assert.doesNotMatch(target.innerHTML, /2160|3840/);
+  assert.equal(JSON.stringify(data), original);
+  const previous = target.innerHTML;
+  c.syncPlayerMetadata({videoWidth: 0, videoHeight: 0, duration: NaN});
+  assert.equal(target.innerHTML, previous);
+  c.LANG = 'en';
+  c.syncPlayerMetadata({videoWidth: 720, videoHeight: 1280, duration: 9.5});
+  assert.match(target.innerHTML, /Resolution/);
+  assert.match(target.innerHTML, /720 × 1280/);
+  assert.equal(JSON.stringify(data), original);
 });

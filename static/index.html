@@ -396,6 +396,12 @@ a.ghost-btn{text-decoration:none}
 .auth-field{display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted)}
 .auth-field input{background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:11px 13px; color:var(--text); font-size:15px; outline:none}
 .auth-field input:focus{border-color:var(--accent)}
+.auth-math-row{display:flex;align-items:center;gap:10px;min-width:0}
+.auth-math-question{font-size:15px;color:var(--text);white-space:nowrap;font-variant-numeric:tabular-nums}
+.auth-math-row input{width:0;min-width:60px;flex:1}
+.auth-math-refresh{flex-shrink:0;padding:8px;color:var(--muted);background:none;border:0;cursor:pointer;font-size:12px}
+.auth-math-refresh:focus-visible{outline:2px solid var(--accent);border-radius:6px}
+.auth-hint{font-size:12px;color:var(--muted);line-height:1.5}
 .hp-field{position:absolute; left:-9999px; width:1px; height:1px; opacity:0}
 .auth-submit{width:100%; justify-content:center; margin-top:2px}
 .auth-err{font-size:13px; color:var(--danger-text); min-height:18px; text-align:center}
@@ -596,9 +602,19 @@ footer{
       <div class="auth-body">
         <label class="auth-field"><span data-i18n="auth_email">邮箱</span><input type="email" id="authEmail" autocomplete="username" placeholder="you@example.com"></label>
         <label class="auth-field"><span data-i18n="auth_pw">密码</span><input type="password" id="authPw" autocomplete="current-password" data-i18n-ph="auth_pw_ph" placeholder="至少 6 位"></label>
+        <div class="auth-field">
+          <label for="authMathAnswer" data-i18n="auth_math">算术验证</label>
+          <div class="auth-math-row">
+            <span class="auth-math-question" id="authMathQuestion" aria-live="polite">…</span>
+            <input id="authMathAnswer" type="text" inputmode="numeric" maxlength="2" autocomplete="off" aria-describedby="authMathQuestion authMathHint" data-i18n-ph="auth_math_ph" placeholder="答案">
+            <button type="button" class="auth-math-refresh" id="authMathRefresh" data-i18n="auth_math_refresh">换一题</button>
+          </div>
+          <span class="auth-hint" id="authMathHint" data-i18n="auth_math_hint">答对后继续滑块验证</span>
+        </div>
         <input type="text" id="authHp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
         <button class="primary-btn auth-submit" id="authNext" data-i18n="auth_next">下一步</button>
-        <div class="auth-err" id="authErr"></div>
+        <span class="auth-hint" data-i18n="auth_remember">登录状态保留 30 天，可随时退出</span>
+        <div class="auth-err" id="authErr" role="alert"></div>
       </div>
     </div>
     <!-- 步骤 2：滑块验证 -->
@@ -620,7 +636,7 @@ footer{
             <div class="sc-handle" id="scHandle"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
           </div>
         </div>
-        <div class="auth-err" id="authErr2"></div>
+        <div class="auth-err" id="authErr2" role="alert"></div>
       </div>
     </div>
   </div>
@@ -725,7 +741,7 @@ footer{
   <div class="faq-list">
     <details class="faq-item">
       <summary data-i18n="faq_q1">这个下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载则由本站代理流式转发。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载优先使用原片直连，失败后尝试本站代理线路。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -802,7 +818,7 @@ const I18N = {
     faq_title:"FAQ",
     faq_q6:"How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", faq_a6:"After parsing, click <strong>create share page</strong> to get a link. To make friends receive a <strong>card with cover image and title</strong>, open that page <strong>inside WeChat</strong>, then tap the top-right <strong>···</strong> → “Send to friend” — forwarded that way it arrives as a card. If you simply copy the link and paste it into a chat, WeChat will not expand it into a card; it stays a plain URL (that's how WeChat works, for every site). Either way friends can <strong>watch the no-watermark original</strong> by tapping it — no Douyin app, no copy-paste codes.",
     faq_q7:"Do my friends need the Douyin app? Do share links expire?", faq_a7:"No app needed — it opens right in WeChat's browser. Share pages last <strong>7 days anonymously, 30 days when signed in</strong>. The page stores the post’s metadata, including its caption, engagement counts and available author details — <strong>no video files are stored</strong> and copyright stays with the creator. You can also generate a <strong>poster with a QR code</strong> to save and post to Moments.",
-    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; media routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. <strong>Public post links are sent to a configured third-party content service</strong>; missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy.",
+    faq_q1:"What data does this downloader process and retain?", faq_a1:"The front end is <strong>open source and auditable</strong>. We do not store video or image files; media routes only stream bytes. Your browser creates a <strong>random first-party anonymous ID that expires after 30 days</strong>. For free quotas, abuse prevention and playback diagnostics, the service converts your IP and that ID into purpose-specific digests. Those digests, coarse browser details, page/parse/play events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional; registration stores your email address and a salted password hash. <strong>Public post links are sent to a configured third-party content service</strong>; missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when you actively turn on Transcript. Direct media requests disclose browser network information to the media host, video downloads prefer direct original-media requests and try the site's proxy if those fail.",
     faq_q2:"Do I need to log in or install anything?", faq_a2:"No source-platform login, app or browser extension is required. A site account is optional: basic parsing works without one, while account features such as the API console require sign-in.",
     faq_q3:"Do downloaded videos have a watermark?", faq_a3:"No. You get the <strong>original with no watermark</strong>, and we never add our own.",
     faq_q4:"Can I download photo galleries?", faq_a4:"Yes. Image posts are auto-detected — download each original image or batch-download them.",
@@ -812,6 +828,9 @@ const I18N = {
     footer2:"No video or image files stored",
     auth_login:"Sign in", auth_register:"Sign up", auth_email:"Email", auth_pw:"Password", auth_pw_ph:"at least 6 chars",
     auth_next:"Next", auth_back:"‹ Back", auth_verify:"Security check", sc_drag:"Drag the slider to fit the puzzle",
+    auth_math:"Quick math check", auth_math_ph:"Answer", auth_math_refresh:"New question",
+    auth_math_hint:"Answer correctly to continue to the slider check",
+    auth_remember:"Stay signed in for 30 days. Sign out anytime.",
     quota_tpl:(r,l,u)=>`Free today: ${r}/${l} left · ${u}/day when signed in`,
   },
   zh: { btn_parse:"开始解析", btn_loading:"解析中…", err_link:"请粘贴受支持平台的公开作品链接",
@@ -1002,7 +1021,7 @@ input.addEventListener('keydown', (e) => {
 syncComposerState();
 
 /* ---------- 提示 ---------- */
-function showError(msg){ alertText.textContent = msg; alertBox.classList.remove('ok'); alertBox.classList.add('show'); composer.classList.add('is-error'); }
+function showError(msg){ alertText.textContent = uiText(msg); alertBox.classList.remove('ok'); alertBox.classList.add('show'); composer.classList.add('is-error'); }
 /* 配额用尽：错误文案后追加可点的注册引导（价值时刻引导，可忽略） */
 function showQuotaError(msg){
   alertText.textContent = msg + ' ';
@@ -1014,7 +1033,7 @@ function showQuotaError(msg){
   alertText.appendChild(a);
   alertBox.classList.remove('ok'); alertBox.classList.add('show'); composer.classList.add('is-error');
 }
-function showOk(msg){ alertText.textContent = msg; alertBox.classList.add('ok','show'); composer.classList.remove('is-error'); }
+function showOk(msg){ alertText.textContent = uiText(msg); alertBox.classList.add('ok','show'); composer.classList.remove('is-error'); }
 function hideError(){ alertBox.classList.remove('show','ok'); composer.classList.remove('is-error'); }
 
 /* ---------- 解析 ---------- */
@@ -1044,7 +1063,7 @@ async function parse(){
         showQuotaError(data.error || '今日免费次数已用完');
         return;
       }
-      throw new Error(data.error || `解析失败（HTTP ${resp.status}），请稍后重试`);
+      throw new Error(data.error || uiText('解析失败（HTTP {status}），请稍后重试', {status: resp.status}));
     }
     render(data);
     refreshQuota();
@@ -1074,7 +1093,7 @@ function maybeRegTip(){
   a.textContent = t('reg_tip_cta') || '免费注册';
   a.onclick = () => { tip.remove(); openAuth('register'); };
   const x = document.createElement('button');
-  x.textContent = '✕'; x.setAttribute('aria-label', '关闭');
+  x.textContent = '✕'; x.setAttribute('aria-label', uiText('关闭'));
   x.onclick = () => { tip.remove();
     try { localStorage.setItem('dy_regtip_off', String(Date.now())); } catch {} };
   tip.appendChild(a); tip.appendChild(x);
@@ -1095,7 +1114,7 @@ async function parseBatch(text, run = parseRun){
       showQuotaError(data.error || '今日免费次数已用完');
       return;
     }
-    throw new Error(data.error || '批量解析失败');
+    throw new Error(data.error || uiText('批量解析失败'));
   }
   refreshQuota();
   _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
@@ -1109,20 +1128,20 @@ function renderBatch(count, fails){
   const rows = _batch.map((d, i) => {
     const isNote = d.kind === 'note';
     const cover = isNote ? albumImageSrc(d.images?.[0]) : (d.cover || '');
-    const canDownload = isNote || Boolean(d.video?.download_url || d.video?.proxy_url);
+    const canDownload = isNote || Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video, d.source) || d.video?.download_url || d.video?.proxy_url);
     const canShare = sharePageSupported(d);
     return `<tr>
       <td class="bt-idx tnum">${i+1}</td>
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
-      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||'未知')}</div>${engagementHTML(d.stats)}</td>
-      <td><span class="bt-tag">${isNote?'图集':'视频'}</span></td>
-      <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,'待读取')}</td>
+      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||uiText('未知'))}</div>${engagementHTML(d.stats)}</td>
+      <td><span class="bt-tag">${isNote?uiText('图集'):uiText('视频')}</span></td>
+      <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,uiText('待读取'))}</td>
       <td class="bt-ops">
-        ${isNote?`<button class="mini-btn" onclick="downloadBatchAlbum(${i},this)">下载图集</button>`
+        ${isNote?`<button class="mini-btn" onclick="downloadBatchAlbum(${i},this)">${uiText('下载图集')}</button>`
                 :(canDownload
-                  ? `<button class="mini-btn" onclick="dlBatchOne(${i},this)">下载</button>`
-                  : `<a class="mini-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">打开原片</a>`)}
-        ${canShare ? `<button class="mini-btn ghost" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">分享页</button>` : ''}
+                  ? `<button class="mini-btn" onclick="dlBatchOne(${i},this)" data-ui="下载">下载</button>`
+                  : `<a class="mini-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">${uiText('打开原片')}</a>`)}
+        ${canShare ? `<button class="mini-btn ghost" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="分享页">分享页</button>` : ''}
       </td>
     </tr>`;
   }).join('');
@@ -1132,15 +1151,15 @@ function renderBatch(count, fails){
 
   result.innerHTML = `
     <div class="batch-bar">
-      <div class="batch-stat">共 <b>${count}</b> 条 · 成功 <b style="color:var(--ok)">${_batch.length}</b>${fails.length?` · 失败 <b style="color:var(--accent)">${fails.length}</b>`:''}</div>
+      <div class="batch-stat">${uiText('共')} <b>${count}</b> · ${uiText('成功')} <b style="color:var(--ok)">${_batch.length}</b>${fails.length?` · ${uiText('失败')} <b style="color:var(--accent)">${fails.length}</b>`:''}</div>
       <div class="batch-actions">
-        <span style="font-size:12px;color:var(--faint);align-self:center">导出 Excel 可保存全部标题 / 链接 / 数据</span>
-        <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note' && (d.video?.download_url || d.video?.proxy_url))?'':'style="display:none"'}>⬇ 下载全部视频</button>
-        <button class="primary-btn" id="exportBtn" ${_batch.length?'':'disabled'}>📊 导出 Excel</button>
+        <span style="font-size:12px;color:var(--faint);align-self:center">${uiText('导出 Excel 可保存全部标题 / 链接 / 数据')}</span>
+        <button class="ghost-btn" id="dlAllBtn" ${_batch.some(d=>d.kind!=='note' && (videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video?.download_url || d.video?.proxy_url))?'':'style="display:none"'}>${uiText('⬇ 下载全部视频')}</button>
+        <button class="primary-btn" id="exportBtn" ${_batch.length?'':'disabled'}>${uiText('📊 导出 Excel')}</button>
       </div>
     </div>
     <div class="tblwrap batch-tblwrap"><table class="batch-table">
-      <thead><tr><th>#</th><th>封面</th><th>标题 / 作者</th><th>类型</th><th>时长</th><th>操作</th></tr></thead>
+      <thead><tr><th>#</th><th>${uiText('封面')}</th><th>${uiText('标题 / 作者')}</th><th>${uiText('类型')}</th><th>${uiText('时长')}</th><th>${uiText('操作')}</th></tr></thead>
       <tbody>${rows || ''}</tbody>
     </table></div>
     ${failHtml}`;
@@ -1153,30 +1172,33 @@ function renderBatch(count, fails){
 async function dlBatchOne(i, btn){
   const d = _batch[i]; if (!d) return;
   await browserDownload(d.video.url, d.video.filename, btn,
-    d.video.download_url || d.video.proxy_url, true);
+    d.video.download_url || d.video.proxy_url, true, videoDirectDownloadURL(d.video, d.source), d.video);
 }
 async function downloadAllVideos(){
-  const vids = _batch.filter(d => d.kind !== 'note' && (d.video?.download_url || d.video?.proxy_url));
+  const vids = _batch.filter(d => d.kind !== 'note' && (videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video?.download_url || d.video?.proxy_url));
   const btn = $('#dlAllBtn'); const old = btn.textContent;
+  if (btn.disabled) return;
+  btn.disabled = true;
   try {
     for (let i=0; i<vids.length; i++){
-      btn.textContent = `下载中 ${i+1}/${vids.length}…`;
+      btn.textContent = uiText('下载中 {current}/{total}…', {current: i+1,total: vids.length});
       const ok = await browserDownload(
-        vids[i].video.url, vids[i].video.filename, null,
-        vids[i].video.download_url || vids[i].video.proxy_url, true);
+        vids[i].video.url, vids[i].video.filename, btn,
+        vids[i].video.download_url || vids[i].video.proxy_url, true, videoDirectDownloadURL(vids[i].video, vids[i].source), vids[i].video);
       if (!ok) break;
       await new Promise(r=>setTimeout(r,500));
     }
   } finally {
     btn.textContent = old;
+    btn.disabled = false;
   }
 }
 async function exportBatch(){
-  const btn = $('#exportBtn'); const old = btn.textContent; btn.textContent='导出中…'; btn.disabled=true;
+  const btn = $('#exportBtn'); const old = btn.textContent; btn.textContent=uiText('导出中…'); btn.disabled=true;
   try {
     const resp = await fetch('/api/export/xlsx', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({items:_batch})});
-    if (!resp.ok) throw new Error('导出失败');
+    if (!resp.ok) throw new Error(uiText('导出失败'));
     const blob = await resp.blob();
     const a = document.createElement('a'); const u = URL.createObjectURL(blob);
     a.href = u; a.download = '多平台批量解析.xlsx'; document.body.appendChild(a); a.click(); a.remove();
@@ -1200,7 +1222,7 @@ function openPlayer(i){
     body.innerHTML = `<div class="pm-title">${esc(d.title)}</div>${engagementHTML(d.stats)}<div class="pm-imgs">${
       (d.images||[]).map(im=>`<img src="${esc(albumImageSrc(im))}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
-    const canDownload = Boolean(d.video?.download_url || d.video?.proxy_url);
+    const canDownload = Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video?.download_url || d.video?.proxy_url);
     body.innerHTML = `<video controls autoplay preload="metadata" playsinline webkit-playsinline x5-playsinline
       x5-video-player-type="h5" x5-video-player-fullscreen="false"
       src="${esc(videoPlaySrc(d.video))}" ${videoDatasetHTML(d.video)}
@@ -1210,11 +1232,11 @@ function openPlayer(i){
       onerror="videoProxyFallback(this)"
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       <div class="pm-title">${esc(d.title)}</div>
-      <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,'读取中…')}</span><span data-video-resolution>${videoResolutionText(d.video,'读取中…')}</span></div>
+      <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,uiText('读取中…'))}</span><span data-video-resolution>${videoResolutionText(d.video,uiText('读取中…'))}</span></div>
       ${engagementHTML(d.stats)}
       <div class="pm-act">${canDownload
-        ? `<button class="primary-btn" onclick="dlBatchOne(${i},this)">⬇ 下载视频</button>`
-        : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}</div>`;
+        ? `<button class="primary-btn" onclick="dlBatchOne(${i},this)" data-ui="⬇ 下载视频">⬇ 下载视频</button>`
+        : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}</div>`;
   }
   wireVideoMetadata(body);
   m.classList.add('show'); document.body.style.overflow='hidden';
@@ -1279,11 +1301,11 @@ function videoDurationMs(video){
   const seconds = Number(video?.duration);
   return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : 0;
 }
-function videoDurationText(ms, pending='读取中…'){
+function videoDurationText(ms, pending=uiText('读取中…')){
   const value = Number(ms);
   return Number.isFinite(value) && value > 0 ? fmtDur(value) : pending;
 }
-function videoResolutionText(video, pending='读取中…'){
+function videoResolutionText(video, pending=uiText('读取中…')){
   const width = Math.round(Number(video?.width) || 0);
   const height = Math.round(Number(video?.height) || 0);
   return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
@@ -1303,7 +1325,7 @@ function videoRatioStyle(video){
 function engagementHTML(stats){
   const labels = LANG === 'en'
     ? [['digg','Likes'],['comment','Comments'],['share','Shares'],['collect','Saves']]
-    : [['digg','点赞'],['comment','评论'],['share','分享'],['collect','收藏']];
+    : [['digg',uiText('点赞')],['comment',uiText('评论')],['share',uiText('分享')],['collect',uiText('收藏')]];
   const items = labels.flatMap(([key, label]) => {
     const raw = stats?.[key];
     // 只显示明确的非负整数：缺失值、空字符串和布尔值都不能被当成 0。
@@ -1384,11 +1406,11 @@ function syncVideoMetadata(video){
 function markVideoMetadataUnavailable(video){
   const scope = videoMetadataScope(video);
   scope.querySelectorAll('[data-video-duration],[data-video-resolution]').forEach(el => {
-    if (el.classList.contains('is-pending') || el.textContent.includes('读取中')) el.textContent = '暂未读取';
+    if (el.classList.contains('is-pending') || el.textContent.includes('读取中')) el.textContent = uiText('暂未读取');
   });
   const index = batchVideoIndex(video);
   const cell = index >= 0 ? result.querySelector(`[data-batch-duration="${index}"]`) : null;
-  if (cell && !Number(_batch[index]?.duration_ms)) cell.textContent = '暂未读取';
+  if (cell && !Number(_batch[index]?.duration_ms)) cell.textContent = uiText('暂未读取');
 }
 function wireVideoMetadata(root2){
   root2.querySelectorAll('video[data-read-metadata]').forEach(video => {
@@ -1404,7 +1426,7 @@ function wireVideoMetadata(root2){
 function render(d){
   result.innerHTML = (d.kind === 'note' ? albumHTML(d) : videoHTML(d));
   if (d.kind === 'note') _albums[d.item_id] = d.images;
-  else _videos[d.item_id] = d.video;
+  else _videos[d.item_id] = d.video && {...d.video, source: d.video.source || d.source};
   _shareSrc[d.item_id] = input.value;      // 解析缓存过期时用它重新解析
   revealRenderedResult();
   wireVideoMetadata(result);
@@ -1414,7 +1436,7 @@ function render(d){
 
 /* ================= 文案提取（语音转文字，注册用户每日限额）================= */
 let _tsTimer = null;
-const TS_BTN_LABEL = '📝 获取文案（语音转文字）';
+const TS_BTN_LABEL = uiText('📝 获取文案（语音转文字）');
 function syncTranscriptUI(){
   const box = result.querySelector('.ts-box'); if (!box) return;
   const note = box.querySelector('.ts-note');
@@ -1520,7 +1542,7 @@ function copyCard(btn){
   const tags = [...card.querySelectorAll('.tag')].map(t=>t.textContent).join(' ');
   const txt = (title + (tags ? '\n' + tags : '')).trim();
   copyText(txt).then(ok => { if (ok) {
-    const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1500);
+    const o = btn.textContent; btn.textContent = uiText('✓ 已复制'); setTimeout(()=>btn.textContent=o, 1500);
   }});
 }
 
@@ -1530,13 +1552,13 @@ function authorRow(d){
   const av = d.avatar ? `<img src="${esc(d.avatar)}" alt="">` : '<div class="ph"></div>';
   const inner = d.author_url
     ? `<a class="avatar-link" href="${esc(d.author_url)}" target="_blank" rel="noopener"
-         data-item="${esc(d.item_id)}" data-enrich="${canEnrich ? '1' : '0'}" title="点击访问 TA 的${esc(platform)}主页">${av}</a>`
+         data-item="${esc(d.item_id)}" data-enrich="${canEnrich ? '1' : '0'}" title="${LANG === 'en' ? 'Open creator profile' : '点击访问作者主页'}">${av}</a>`
     : av;
   return `<div class="author-row">
     ${inner}
     <div>
-      <div class="name">${esc(d.author) || '未知作者'}</div>
-      <div class="sub">${d.author_url ? `点击头像访问${esc(platform)}主页${canEnrich ? ' · 悬停查看资料' : ''}` : ('作品 ID ' + esc(d.item_id))}</div>
+      <div class="name">${esc(d.author) || uiText('未知作者')}</div>
+      <div class="sub">${d.author_url ? (LANG === 'en' ? `Open ${esc(platform)} profile${canEnrich ? ' · Hover for details' : ''}` : `点击头像访问${esc(platform)}主页${canEnrich ? ' · 悬停查看资料' : ''}`) : ('ID ' + esc(d.item_id))}</div>
     </div>
   </div>`;
 }
@@ -1581,16 +1603,16 @@ function showTip(a){
     <div class="ah">
       ${a.avatar ? `<img src="${esc(a.avatar)}" alt="">` : ''}
       <div class="am">
-        <div class="an">${esc(a.nickname) || '未知作者'}</div>
-        ${a.douyin_id ? `<div class="ai">抖音号：${esc(a.douyin_id)}</div>` : ''}
+        <div class="an">${esc(a.nickname) || uiText('未知作者')}</div>
+        ${a.douyin_id ? `<div class="ai">${uiText('抖音号')}: ${esc(a.douyin_id)}</div>` : ''}
       </div>
     </div>
     ${a.signature ? `<div class="asig">${esc(a.signature)}</div>` : ''}
     <div class="astats">
-      ${stat('作品', a.aweme_count)}${stat('关注', a.following_count)}
-      ${stat('粉丝', a.follower_count)}${stat('获赞', a.total_favorited)}
+      ${stat(uiText('作品'), a.aweme_count)}${stat(uiText('关注'), a.following_count)}
+      ${stat(uiText('粉丝'), a.follower_count)}${stat(uiText('获赞'), a.total_favorited)}
     </div>
-    <div class="atip">点击头像打开抖音主页</div>`;
+    <div class="atip">${uiText('作者主页 ↗')}</div>`;
   t.classList.add('show');
   positionTip();
 }
@@ -1629,7 +1651,7 @@ function downloadTarget(onError){
       const text = (frame.contentDocument?.body?.textContent || '').trim();
       let message = '';
       try { message = JSON.parse(text).error || ''; } catch {}
-      onError?.(message || '下载未能启动，请稍后重试');
+      onError?.(message || uiText('下载未能启动，请稍后重试'));
     } catch {}
   };
   return frame.name;
@@ -1642,6 +1664,71 @@ function clickDownload(url, filename, isolated=false, onError=null){
   else a.download = filename || 'download';
   a.style.display = 'none';
   document.body.appendChild(a); a.click(); a.remove();
+}
+
+function videoDirectDownloadURL(video, source=''){
+  if (!video) return '';
+  const urls=[video.atc_url];
+  if (['parser','atc'].includes(video.source || source)) urls.push(video.direct_url,video.url);
+  for (const raw of urls){
+    if (!raw || typeof raw!=='string') continue;
+    try {
+      const u=new URL(raw);
+      if (u.protocol==='https:' && !u.username && !u.password && (!u.port || u.port==='443')) return raw;
+    } catch {}
+  }
+  return '';
+}
+
+function videoDownloadRefreshURL(video){
+  try {
+    const u = new URL(video?.download_refresh_url || '', location.href);
+    if (u.origin === location.origin && /^\/api\/media\/video\/[\w-]{8,40}\/download-link$/.test(u.pathname))
+      return u.pathname + u.search;
+  } catch {}
+  return '';
+}
+
+async function refreshVideoDownloadLink(video, failedUrl){
+  let endpoint = videoDownloadRefreshURL(video);
+  if (!endpoint) throw new Error(uiText('暂时无法更新下载链接，请稍后重试'));
+  const deadline = Date.now() + 310000;
+  for (let attempt = 0; attempt < 155 && Date.now() < deadline; attempt++){
+    const controller = new AbortController();
+    const timer = setTimeout(()=>controller.abort(), 15000);
+    let resp, data;
+    try {
+      resp = await fetch(endpoint, {
+        method: 'POST', mode: 'same-origin', credentials: 'same-origin', cache: 'no-store',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({failed_url: failedUrl || ''}), signal: controller.signal,
+      });
+      data = await resp.json();
+    } catch {
+      throw new Error(uiText('下载链接更新失败，请稍后重试'));
+    } finally { clearTimeout(timer); }
+    if (!resp.ok) {
+      if (resp.status === 401 || resp.status === 403)
+        throw new Error(uiText('下载请求已失效，请刷新页面后再试'));
+      if (resp.status === 504) throw new Error(uiText('下载链接更新超时，请稍后再试'));
+      throw new Error(uiText('暂时无法更新下载链接，请稍后重试'));
+    }
+    if (resp.status === 200 && data.status === 'ready'){
+      const url = videoDirectDownloadURL({source: 'parser', direct_url: data.url});
+      if (!url) throw new Error(uiText('暂未获取到可用的下载链接，请稍后重试'));
+      // 只更新媒体，保留原来的标题、作者、互动数与文件名。
+      video.url = video.direct_url = url;
+      if (video.atc_url) video.atc_url = url;
+      for (const key of ['download_refresh_url', 'download_url', 'proxy_url'])
+        if (typeof data[key] === 'string') video[key] = data[key];
+      return url;
+    }
+    if (resp.status !== 202 || data.status !== 'processing')
+      throw new Error(uiText('下载链接更新失败，请稍后重试'));
+    await new Promise(resolve=>setTimeout(resolve,
+      Math.max(1000, Math.min(5000, Number(data.retry_after_ms) || 2000))));
+  }
+  throw new Error(uiText('下载链接更新超时，请稍后再试'));
 }
 
 function downloadFallbackURL(url, filename){
@@ -1666,10 +1753,10 @@ async function downloadResponseError(resp){
   } catch {}
   if (message) return message;
   if (resp.status === 401 || resp.status === 403)
-    return '下载请求未通过验证，请刷新页面后再试';
+    return uiText('下载请求未通过验证，请刷新页面后再试');
   if (resp.status === 429)
-    return '下载请求过于频繁，请稍后再试';
-  return '下载线路暂时不可用（HTTP ' + resp.status + '），请稍后重试';
+    return uiText('下载请求过于频繁，请稍后再试');
+  return uiText('下载线路暂时不可用（HTTP {status}），请稍后重试', {status: resp.status});
 }
 
 async function responseBlobWithProgress(resp, onProgress){
@@ -1695,11 +1782,11 @@ async function responseBlobWithProgress(resp, onProgress){
 }
 
 function downloadProgress(loaded, total){
-  if (total) return '下载中 ' + Math.min(100, Math.round(loaded / total * 100)) + '%';
-  return '已下载 ' + (loaded / 1024 / 1024).toFixed(1) + ' MB';
+  if (total) return uiText('下载中 {percent}%', {percent: Math.min(100, Math.round(loaded / total * 100))});
+  return uiText('已下载 {size} MB', {size: (loaded / 1024 / 1024).toFixed(1)});
 }
 
-async function fetchAssetBlob(source, onProgress){
+async function fetchAssetBlob(source, onProgress, videoOnly=false){
   const resp = await fetch(source, {
     mode: 'cors', credentials: 'omit', cache: 'no-store',
   });
@@ -1708,9 +1795,19 @@ async function fetchAssetBlob(source, onProgress){
   if (contentType.startsWith('text/') || contentType.includes('json')
       || contentType.includes('html')){
     try { await resp.body?.cancel(); } catch {}
-    throw new Error('下载线路返回了无效内容，请稍后重试');
+    throw new Error(uiText('下载线路返回了无效内容，请稍后重试'));
   }
-  return responseBlobWithProgress(resp, onProgress);
+  const mediaType=contentType.split(';',1)[0].trim();
+  if(videoOnly && (resp.status!==200 || !(mediaType.startsWith('video/') ||
+      ['application/mp4','application/octet-stream','binary/octet-stream'].includes(mediaType)))){
+    try { await resp.body?.cancel(); } catch {}
+    throw new Error(uiText('原片下载返回了无效内容，请重新解析后再试'));
+  }
+  const blob=await responseBlobWithProgress(resp,onProgress);
+  const expected=Number(resp.headers.get('content-length')) || 0;
+  if(videoOnly && (!blob.size || (expected && blob.size!==expected)))
+    throw new Error(uiText('视频未下载完整，请重试'));
+  return blob;
 }
 
 async function preflightVideoDownload(source){
@@ -1733,7 +1830,7 @@ async function preflightVideoDownload(source){
         throw error;
       }
       if (resp.status !== 200 && resp.status !== 206){
-        const error = new Error('下载线路返回了异常状态，请稍后重试');
+        const error = new Error(uiText('下载线路返回了异常状态，请稍后重试'));
         error.retryable = true;
         throw error;
       }
@@ -1743,7 +1840,7 @@ async function preflightVideoDownload(source){
           || contentType === 'application/mp4'
           || contentType === 'application/octet-stream'
           || contentType === 'binary/octet-stream')){
-        const error = new Error('下载线路返回了无效内容，请稍后重试');
+        const error = new Error(uiText('下载线路返回了无效内容，请稍后重试'));
         error.retryable = true;
         throw error;
       }
@@ -1751,7 +1848,7 @@ async function preflightVideoDownload(source){
         const contentRange = resp.headers.get('content-range') || '';
         const length = Number(resp.headers.get('content-length')) || 0;
         if (!/^bytes 0-0\/(?:\d+|\*)$/i.test(contentRange) || length > 65536){
-          const error = new Error('下载线路未正确响应 Range，请稍后重试');
+          const error = new Error(uiText('下载线路未正确响应 Range，请稍后重试'));
           error.retryable = true;
           throw error;
         }
@@ -1768,26 +1865,53 @@ async function preflightVideoDownload(source){
       await new Promise(resolve => setTimeout(resolve, 350));
     }
   }
-  throw lastError || new Error('下载失败，请稍后重试');
+  throw lastError || new Error(uiText('下载失败，请稍后重试'));
 }
 
-/* 视频直接走同源签名流，绕开抖音首跳 302 的 CORS 限制；
-   抖音图片也优先走按作品 ID 刷新的同源端点。
-   视频只做 1 字节预检，随后交给浏览器原生流式保存，避免把整段视频堆进内存。
-   下载目标隔离在隐藏 iframe，错误不会覆盖当前页面。 */
-async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false){
+/* 主解析返回的原片由浏览器直接下载；失败后才尝试受签名保护的同源备用流。 */
+async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=false, directUrl='', video=null){
   const oldHTML = btn ? btn.innerHTML : null;
   const oldDisabled = btn ? btn.disabled : false;
-  if (btn){ btn.textContent = '下载中…'; btn.disabled = true; }
+  if (btn){ btn.textContent = uiText('下载中…'); btn.disabled = true; }
   try {
-    const fallback = downloadFallbackURL(fallbackUrl, filename);
-    if (requireFallback && !fallback)
-      throw new Error('暂未获取到可用的下载线路，请重新解析后再试');
-    if (fallback){
-      if (btn) btn.textContent = '检查下载线路…';
-      await preflightVideoDownload(fallback);
-      clickDownload(fallback, filename, true, showError);
-    } else {
+    let fallback = downloadFallbackURL(fallbackUrl, filename);
+    let directSaved=false, directError=null;
+    const saveDirect = async source => {
+      const blob = await fetchAssetBlob(source, (loaded,total)=>{
+        if (btn) btn.textContent = downloadProgress(loaded,total);
+      }, true);
+      const objectURL = URL.createObjectURL(blob);
+      clickDownload(objectURL,filename);
+      setTimeout(()=>URL.revokeObjectURL(objectURL),60000);
+      directSaved = true;
+    };
+    if (directUrl){
+      try { await saveDirect(directUrl); }
+      catch { directError = new Error(uiText('原片下载暂时不可用，请重新解析后再试')); }
+    }
+    if (!directSaved && videoDownloadRefreshURL(video)){
+      if (btn) {
+        btn.textContent = uiText('正在重新获取下载链接…');
+        btn.setAttribute?.('aria-busy','true');
+      }
+      try {
+        const fresh = await refreshVideoDownloadLink(video, directUrl);
+        fallback = downloadFallbackURL(video.download_url || video.proxy_url || fallbackUrl, filename);
+        try { await saveDirect(fresh); }
+        catch { throw new Error(uiText('下载链接更新后仍不可用，请稍后重试')); }
+      } catch(error) {
+        directError = error;
+      }
+    }
+    if (!directSaved && requireFallback && !fallback)
+      throw directError || new Error(uiText('暂未获取到可用的下载线路，请重新解析后再试'));
+    if (!directSaved && directError && !fallback) throw directError;
+    if (!directSaved && fallback){
+      if (btn) btn.textContent = uiText('尝试备用下载线路…');
+      try { await preflightVideoDownload(fallback); }
+      catch(error){ throw directError || error; }
+      clickDownload(fallback, filename, true, directError ? ()=>showError(directError.message) : showError);
+    } else if (!directSaved) {
       const blob = await fetchAssetBlob(url, (loaded, total) => {
         if (btn) btn.textContent = downloadProgress(loaded, total);
       });
@@ -1795,25 +1919,25 @@ async function browserDownload(url, filename, btn, fallbackUrl, requireFallback=
       clickDownload(obju, filename);
       setTimeout(()=>URL.revokeObjectURL(obju), 5000);
     }
-    showOk('下载已开始，请查看浏览器下载列表');
+    showOk(uiText('下载已开始，请查看浏览器下载列表'));
     return true;
   } catch(error){
-    showError(error && error.message ? error.message : '下载失败，请稍后重试');
+    showError(error && error.message ? error.message : uiText('下载失败，请稍后重试'));
     return false;
   } finally {
-    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; }
+    if (btn){ btn.innerHTML = oldHTML; btn.disabled = oldDisabled; btn.removeAttribute?.('aria-busy'); }
   }
 }
 
 function downloadVideoItem(btn){
   const v = _videos[btn.dataset.itemId];
   if (v) browserDownload(
-    v.url, v.filename, btn, v.download_url || v.proxy_url, true);
+    v.url, v.filename, btn, v.download_url || v.proxy_url, true, videoDirectDownloadURL(v), v);
 }
 
 function sharePageSupported(d){
   if (d && typeof d.share_supported === 'boolean') return d.share_supported;
-  return !d?.platform || d.platform === 'douyin';
+  return !d?.platform || d.platform === 'douyin' || (d.platform === 'tiktok' && d.kind !== 'note');
 }
 
 function videoPlaySrc(v){
@@ -1860,7 +1984,7 @@ function useProxyFallback(el){
 
 function videoHTML(d){
   const platform = platformName(d.platform || 'douyin');
-  const canDownload = Boolean(d.video.download_url || d.video.proxy_url);
+  const canDownload = Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video.download_url || d.video.proxy_url);
   const canShare = sharePageSupported(d);
   const durationValue = Number(d.duration_ms);
   const widthValue = Number(d.video.width);
@@ -1881,36 +2005,36 @@ function videoHTML(d){
                onerror="videoProxyFallback(this)"
                ${d.cover ? `poster="${esc(d.cover)}"` : ''}></video>
         ${!d.video.proxy_url ? '' : `<div class="fallback-hint">
-          播放不出来？<a href="javascript:void(0)" onclick="useProxyFallback(this.parentNode)">改用服务器代理播放</a>
+          ${uiText('播放不出来？')} <a href="javascript:void(0)" onclick="useProxyFallback(this.parentNode)" data-ui="改用服务器代理播放">改用服务器代理播放</a>
         </div>`}
       </div>
       <div class="info">
-        <span class="badge">${esc(platform)} · 视频 · 无水印</span>
+        <span class="badge">${esc(platform)} · ${uiText('视频 · 无水印')}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         <div class="meta-row">
-          <div class="meta-item"><div class="k">时长</div><div class="v${hasDuration?'':' is-pending'}" data-video-duration>${videoDurationText(d.duration_ms)}</div></div>
-          <div class="meta-item"><div class="k">分辨率</div><div class="v${hasResolution?'':' is-pending'}" data-video-resolution>${videoResolutionText(d.video)}</div></div>
-          <div class="meta-item"><div class="k">格式</div><div class="v">MP4</div></div>
-          ${d.create_time?`<div class="meta-item"><div class="k">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
+          <div class="meta-item"><div class="k" data-ui="时长">时长</div><div class="v${hasDuration?'':' is-pending'}" data-video-duration>${videoDurationText(d.duration_ms)}</div></div>
+          <div class="meta-item"><div class="k" data-ui="分辨率">分辨率</div><div class="v${hasResolution?'':' is-pending'}" data-video-resolution>${videoResolutionText(d.video)}</div></div>
+          <div class="meta-item"><div class="k" data-ui="格式">格式</div><div class="v">MP4</div></div>
+          ${d.create_time?`<div class="meta-item"><div class="k" data-ui="发布">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
         </div>
         ${engagementHTML(d.stats)}
         ${extrasBlock(d)}
         <div class="actions">
           ${canDownload
-            ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)">⬇ 下载视频</button>`
-            : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer">↗ 打开无水印原片</a>`}
-          ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">🔗 生成分享页</button>` : ''}
-          <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
+            ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)" data-ui="⬇ 下载视频">⬇ 下载视频</button>`
+            : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}
+          ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
+          <button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>
         </div>
         <div class="ts-box" data-item="${esc(d.item_id)}">
           <div class="ts-head">
-            <button class="ghost-btn ts-btn">📝 获取文案（语音转文字）</button>
+            <button class="ghost-btn ts-btn" data-ui="📝 获取文案（语音转文字）">📝 获取文案（语音转文字）</button>
             <span class="ts-note"></span>
           </div>
           <div class="ts-body" style="display:none"></div>
         </div>
-        <div class="tip">视频时长与分辨率会在加载原片后自动读取</div>
+        <div class="tip" data-ui="视频时长与分辨率会在加载原片后自动读取">视频时长与分辨率会在加载原片后自动读取</div>
       </div>
     </div>
   </div>`;
@@ -1924,7 +2048,7 @@ function albumHTML(d){
   <div class="card">
     <div class="album-head">
       <div class="info" style="gap:10px">
-        <span class="badge">${esc(platform)} · 图集 · ${imgs.length} 张原图 · 逐张安全下载</span>
+        <span class="badge">${esc(platform)} · ${uiText('图集 · {count} 张原图', {count: imgs.length})}</span>
         <div class="v-title">${esc(d.title)}</div>
         ${authorRow(d)}
         ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
@@ -1932,9 +2056,9 @@ function albumHTML(d){
         ${extrasBlock(d)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="ghost-btn" onclick="copyCard(this)">复制文案</button>
-        ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)">🔗 生成分享页</button>` : ''}
-        <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadAlbumAll(this)">⬇ 下载全部</button>
+        <button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>
+        ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
+        <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadAlbumAll(this)" data-ui="⬇ 下载全部">⬇ 下载全部</button>
       </div>
     </div>
     <div class="album-grid">
@@ -1991,19 +2115,19 @@ function openShare(html){
 
 async function makeShare(itemId, btn){
   const old = btn ? btn.textContent : null;
-  if (btn){ btn.textContent = '生成中…'; btn.style.pointerEvents = 'none'; }
+  if (btn){ btn.textContent = uiText('生成中…'); btn.style.pointerEvents = 'none'; }
   try {
     const resp = await fetch('/api/share', {
       method:'POST', headers: jsonHeaders(),
       body: JSON.stringify({item_id: itemId, text: _shareSrc[itemId] || ''})
     });
     const d = await resp.json().catch(()=>({}));
-    if (!resp.ok) throw new Error(d.error || '生成分享页失败');
+    if (!resp.ok) throw new Error(d.error || uiText('生成分享页失败'));
     shareResultHTML(d);
     refreshQuota();
   } catch(e){
-    openShare(`<h3>生成失败</h3><div class="share-err">${esc(e.message)}</div>
-      <div class="share-acts"><button class="ghost-btn" onclick="closeShare()">关闭</button></div>`);
+    openShare(`<h3>${uiText('生成失败')}</h3><div class="share-err">${esc(e.message)}</div>
+      <div class="share-acts"><button class="ghost-btn" onclick="closeShare()" data-ui="关闭">关闭</button></div>`);
   } finally {
     if (btn){ btn.textContent = old; btn.style.pointerEvents = ''; }
   }
@@ -2013,26 +2137,24 @@ function shareResultHTML(d){
   const url = d.url;
   const days = d.expires_at ? Math.max(1, Math.round((d.expires_at*1000 - Date.now())/86400000)) : 0;
   openShare(`
-    <h3>🔗 分享页已生成</h3>
-    <div class="sub">把这个链接发到微信，对方点开就能直接看，不用装抖音 App。</div>
+    <h3>${uiText('🔗 分享页已生成')}</h3>
+    <div class="sub">${uiText('把这个链接发到微信，对方点开就能直接看，无需安装 App。')}</div>
     <div class="share-link">
       <input id="shareUrl" value="${esc(url)}" readonly onclick="this.select()"
              data-title="${esc(d.title || '')}" data-author="${esc(d.author || '')}">
-      <button onclick="copyShareUrl(this)">复制</button>
+      <button onclick="copyShareUrl(this)" data-ui="复制">复制</button>
     </div>
     <div class="share-qr">
       <img src="/s/${esc(d.sid)}/qr.svg" alt="分享页二维码">
-      <div class="qt"><b>想发出带封面的卡片？</b>用微信扫这个码打开页面，再点右上角 <b>···</b> →「发送给朋友」，发出去就是卡片。<br>
-      直接复制链接粘贴到聊天窗口也能用，但微信不会展开成卡片，只显示为一条网址。</div>
+      <div class="qt">${uiText('用微信扫码打开页面，再点右上角 ··· →「发送给朋友」，即可发送带封面的卡片。直接粘贴链接只会显示网址。')}</div>
     </div>
     <div class="share-tips">
-      · 页面只呈现作品信息与播放地址，<b>不存储任何视频文件</b><br>
-      · 已署名原作者并回链原作品，尊重创作者权益<br>
-      ${days ? `· 该链接 <b>${days} 天</b>后过期${d.expires_at ? '（登录后有效期更长）' : ''}` : ''}
+      ${uiText('作品信息已保存，媒体文件不落地。请尊重原作者权益。')}<br>
+      ${d.expires_at ? uiText('本页 {date} 过期', {date: fmtDate(d.expires_at)}) : ''}
     </div>
     <div class="share-acts">
-      <a class="primary-btn" href="${esc(url)}" target="_blank" rel="noopener">预览分享页 ↗</a>
-      <button class="ghost-btn" onclick="closeShare()">完成</button>
+      <a class="primary-btn" href="${esc(url)}" target="_blank" rel="noopener">${uiText('预览分享页 ↗')}</a>
+      <button class="ghost-btn" onclick="closeShare()">${uiText('完成')}</button>
     </div>`);
 }
 
@@ -2043,17 +2165,17 @@ function closeMine(){ mineModal.classList.remove('show'); document.body.style.ov
 
 $('#mySharesBtn').onclick = async () => {
   mineModal.classList.add('show'); document.body.style.overflow = 'hidden';
-  $('#mineList').innerHTML = '<div class="mine-empty">加载中…</div>';
+  $('#mineList').innerHTML = '<div class="mine-empty" data-ui="加载中…">加载中…</div>';
   try {
     const d = await (await fetch('/api/shares')).json();
     renderMine(d.shares || []);
   } catch {
-    $('#mineList').innerHTML = '<div class="mine-empty">加载失败，请稍后重试。</div>';
+    $('#mineList').innerHTML = '<div class="mine-empty" data-ui="加载失败，请稍后重试。">加载失败，请稍后重试。</div>';
   }
 };
 
-const STATE_LABEL = {ok:'生效中', pending:'排队中', processing:'准备中', failed:'获取失败',
-  expired:'已过期', dead:'源已删除', takedown:'已下架'};
+const STATE_LABEL = {ok:uiText('生效中'), pending:uiText('排队中'), processing:uiText('准备中'), failed:uiText('获取失败'),
+  expired:uiText('已过期'), dead:uiText('源已删除'), takedown:uiText('已下架')};
 function renderMine(list){
   if (!list.length){
     $('#mineList').innerHTML = `<div class="mine-empty">还没有生成过分享页。<br>
@@ -2066,15 +2188,15 @@ function renderMine(list){
       ${s.cover ? `<img src="${esc(s.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<span class="mine-cover-placeholder" aria-hidden="true"></span>'}
       <div class="mt">
         <b>${esc(s.title)}</b>
-        <div class="ms">@${esc(s.author||'未知')} · <span class="mine-state">${STATE_LABEL[s.state]||s.state}</span>
+        <div class="ms">@${esc(s.author||uiText('未知'))} · <span class="mine-state">${STATE_LABEL[s.state]||s.state}</span>
           ${s.expires_at ? (days > 0 ? ` · ${days} 天后过期` : ' · 已过期') : ''}</div>
         <div class="mn"><span title="访问">👁 ${s.views}</span><span title="播放">▶ ${s.plays>=10?'🔥':''} ${s.plays}</span><span title="下载">⬇ ${s.downloads}</span></div>
       </div>
       <div class="mo">
-        <a href="${esc(s.url)}" target="_blank" rel="noopener">打开</a>
+        <a href="${esc(s.url)}" target="_blank" rel="noopener" data-ui="打开">打开</a>
         <button onclick="copyMine(this)" data-url="${esc(s.url)}"
-                data-title="${esc(s.title)}" data-author="${esc(s.author||'')}">复制</button>
-        <button class="del" data-sid="${esc(s.sid)}" onclick="delMineButton(this)">删除</button>
+                data-title="${esc(s.title)}" data-author="${esc(s.author||'')}" data-ui="复制">复制</button>
+        <button class="del" data-sid="${esc(s.sid)}" onclick="delMineButton(this)" data-ui="删除">删除</button>
       </div>
     </div>`;
   }).join('');
@@ -2087,42 +2209,46 @@ function copyMine(btn){
 }
 function delMineButton(btn){ return delMine(btn.dataset.sid); }
 async function delMine(sid){
-  if (!confirm('删除后这个分享链接会立即失效，确定删除？')) return;
+  if (!confirm(uiText('删除后这个分享链接会立即失效，确定删除？'))) return;
   try {
     const r = await fetch('/api/shares/' + sid, {method:'DELETE'});
     if (!r.ok) throw new Error();
     document.querySelector(`.mine-item[data-sid="${sid}"]`)?.remove();
     if (!document.querySelector('.mine-item')) renderMine([]);
-  } catch { alert('删除失败，请稍后重试'); }
+  } catch { alert(uiText('删除失败，请稍后重试')); }
 }
 
 /* 抖音风格分享文案：标题 + 一句引导 + 链接（两行以内，标题过长截断） */
 function shareText(title, author, url){
-  const t = String(title || '抖音作品').replace(/\s+/g, ' ').trim();
+  const t = String(title || uiText('抖音作品')).replace(/\s+/g, ' ').trim();
   const short = t.length > 40 ? t.slice(0, 40) + '…' : t;
-  const by = author ? `@${author} 的抖音作品` : '抖音作品';
-  return `【${short}】${by}\n点开直接看，无需安装 App 👉 ${url}`;
+  const by = author ? `@${author}` : uiText('视频');
+  return `【${short}】${by}\n${uiText('点开直接看，无需安装 App')} 👉 ${url}`;
 }
 
 function copyShareUrl(btn){
   const el = $('#shareUrl');
-  const done = () => { const o = btn.textContent; btn.textContent = '✓ 已复制'; setTimeout(()=>btn.textContent=o, 1600); };
+  const done = () => { const o = btn.textContent; btn.textContent = uiText('✓ 已复制'); setTimeout(()=>btn.textContent=o, 1600); };
   const text = shareText(el.dataset.title, el.dataset.author, el.value);
   copyText(text, el).then(ok => { if (ok) done(); });
 }
 
-/* ================= 登录 / 注册（表单 → 弹出滑块 → 通过后继续）================= */
+/* ================= 登录 / 注册（算术题 → 滑块 → 持久会话）================= */
 let _authMode = 'login', _cap = null, _capX = -1, _traj = [], _dragOK = false, _pending = null;
+let _authEpoch = 0, _mathRequest = 0, _capRequest = 0, _mathCid = '', _mathToken = '';
 const authModal = $('#authModal');
 
 async function refreshUser(){
   try {
-    const d = await (await fetch('/api/auth/me')).json();
+    const response = await fetch('/api/auth/me', {credentials:'same-origin', cache:'no-store'});
+    if (!response.ok) return;
+    const d = await response.json();
     const logged = !!d.user;
     _loggedIn = logged;
     $('#authBtn').style.display = logged ? 'none' : '';
     $('#userMenu').style.display = logged ? 'flex' : 'none';
     if (logged) $('#userEmail').textContent = d.user.email;
+    else $('#userEmail').textContent = '';
     refreshQuota();
   } catch {}
 }
@@ -2133,15 +2259,27 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('.user-menu')) $('#userDrop').style.display = 'none';
 });
 $('#authBtn').onclick = () => openAuth('login');
-$('#logoutBtn').onclick = async () => { await fetch('/api/auth/logout',{method:'POST'}); refreshUser(); };
+$('#logoutBtn').onclick = async () => {
+  try {
+    const r = await fetch('/api/auth/logout',{method:'POST', credentials:'same-origin'});
+    if (!r.ok) throw new Error();
+    $('#userDrop').style.display='none';
+    await refreshUser();
+  } catch { showError(LANG==='en'?'Sign out failed. Please try again.':'退出失败，请重试'); }
+};
 $('#authClose').onclick = closeAuth;
 authModal.addEventListener('click', e => { if (e.target===authModal) closeAuth(); });
 document.querySelectorAll('.auth-tab').forEach(t => t.onclick = () => setMode(t.dataset.mode));
 
 function setMode(mode){
+  _authEpoch++; _pending=null; _cap=null; _mathToken='';
   _authMode = mode;
   document.querySelectorAll('.auth-tab').forEach(t => t.classList.toggle('active', t.dataset.mode===mode));
-  $('#authNext').textContent = '下一步';
+  $('#authPw').autocomplete=mode==='register'?'new-password':'current-password';
+  $('#authNext').textContent = t('auth_next') || '下一步';
+  $('#authErr').textContent=''; $('#authErr2').textContent='';
+  showStep(1);
+  loadAuthMath();
 }
 function openAuth(mode){
   setMode(mode);
@@ -2150,25 +2288,76 @@ function openAuth(mode){
   authModal.classList.add('show'); document.body.style.overflow='hidden';
 }
 function closeAuth(){ authModal.classList.remove('show'); document.body.style.overflow='';
+  _authEpoch++; _mathCid=''; _mathToken=''; _pending=null; _cap=null;
+  $('#authPw').value=''; $('#authMathAnswer').value='';
   window._afterLogin = null;          // 用户放弃登录时清掉挂起的续跑动作
 }
 function showStep(n){ $('#authStep1').style.display=n===1?'':'none'; $('#authStep2').style.display=n===2?'':'none'; }
-$('#authBack').onclick = () => showStep(1);
+$('#authBack').onclick = () => setMode(_authMode);
+$('#authMathRefresh').onclick = () => loadAuthMath();
+$('#authMathAnswer').addEventListener('keydown', e => {
+  if(e.key==='Enter' && !$('#authNext').disabled){ e.preventDefault(); $('#authNext').click(); }
+});
 
-/* 步骤1：点「下一步/登录/注册」→ 校验表单 → 弹出滑块 */
-$('#authNext').onclick = () => {
+async function loadAuthMath(){
+  const epoch=_authEpoch, serial=++_mathRequest;
+  _mathCid=''; _mathToken='';
+  $('#authMathQuestion').textContent='…'; $('#authMathAnswer').value='';
+  $('#authMathAnswer').removeAttribute('aria-invalid');
+  $('#authNext').disabled=true; $('#authMathRefresh').disabled=true;
+  try {
+    const r=await fetch('/api/auth/math', {cache:'no-store'});
+    const d=await r.json();
+    if(epoch!==_authEpoch || serial!==_mathRequest) return;
+    if(!r.ok) throw new Error(d.error || (LANG==='en'?'Could not load question':'题目加载失败'));
+    _mathCid=d.cid; $('#authMathQuestion').textContent=d.question;
+  } catch(e) {
+    if(epoch===_authEpoch && serial===_mathRequest){
+      $('#authMathQuestion').textContent='—'; $('#authErr').textContent=e.message;
+    }
+  } finally {
+    if(epoch===_authEpoch && serial===_mathRequest){
+      $('#authNext').disabled=!_mathCid; $('#authMathRefresh').disabled=false;
+    }
+  }
+}
+
+/* 步骤1：服务端答题通过后才显示并加载滑块，不能只靠前端计算答案。 */
+$('#authNext').onclick = async () => {
+  if($('#authNext').disabled) return;
   const email=$('#authEmail').value.trim(), pw=$('#authPw').value;
   const err=$('#authErr'); err.textContent='';
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ err.textContent=LANG==='en'?'Please enter a valid email':'请输入正确的邮箱'; return; }
   if(pw.length<6){ err.textContent=LANG==='en'?'Password must be at least 6 characters':'密码至少 6 位'; return; }
-  _pending = {email, password:pw, hp:$('#authHp').value};
-  const act = t(_authMode==='login'?'auth_login':'auth_register') || (_authMode==='login'?'登录':'注册');
-  $('#authCapTitle').textContent = act + (LANG==='en'?' · Security check':' · 安全验证');
-  showStep(2);
-  loadCaptcha();
+  const answer=$('#authMathAnswer').value.trim();
+  if(!/^\d{1,2}$/.test(answer) || !_mathCid){
+    err.textContent=LANG==='en'?'Please answer the math question':'请填写算术题答案';
+    $('#authMathAnswer').setAttribute('aria-invalid','true'); $('#authMathAnswer').focus(); return;
+  }
+  const epoch=_authEpoch, pending={email, password:pw, hp:$('#authHp').value};
+  $('#authNext').disabled=true; $('#authMathRefresh').disabled=true;
+  try {
+    const r=await fetch('/api/auth/math/verify', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cid:_mathCid,answer})});
+    const d=await r.json();
+    if(epoch!==_authEpoch) return;
+    if(!r.ok) throw new Error(d.error || (LANG==='en'?'Incorrect answer':'答案不正确'));
+    _mathToken=d.math_token; _mathCid=''; _pending=pending;
+    const act = t(_authMode==='login'?'auth_login':'auth_register') || (_authMode==='login'?'登录':'注册');
+    $('#authCapTitle').textContent = act + (LANG==='en'?' · Security check':' · 安全验证');
+    showStep(2);
+    await loadCaptcha();
+  } catch(e) {
+    if(epoch!==_authEpoch) return;
+    err.textContent=e.message;
+    await loadAuthMath();
+    if(epoch===_authEpoch) $('#authMathAnswer').focus();
+  }
 };
 
 async function loadCaptcha(){
+  if(!_mathToken || !_pending) return;
+  const epoch=_authEpoch, serial=++_capRequest;
   _dragOK=false; _capX=-1; _traj=[]; _cap=null;
   const track=$('#scTrack'); track.classList.remove('ok','err');
   $('#scHandle').style.left='0px'; $('#scFill').style.width='0px';
@@ -2176,14 +2365,23 @@ async function loadCaptcha(){
   $('#scLabel').textContent = t('sc_drag') || '向右拖动滑块完成拼图'; $('#authErr2').textContent='';
   $('#scLoading').style.display='grid';
   try {
-    _cap = await (await fetch('/api/auth/captcha')).json();
+    const r=await fetch('/api/auth/captcha', {headers:{'X-Auth-Math':_mathToken},cache:'no-store'});
+    const d=await r.json();
+    if(epoch!==_authEpoch || serial!==_capRequest) return;
+    if(!r.ok){
+      if(r.status===403){ setMode(_authMode); $('#authErr').textContent=d.error; return; }
+      throw new Error(d.error || (LANG==='en'?'Could not load slider':'验证码加载失败，请返回重试'));
+    }
+    _cap=d;
     const bg=$('#scBg'), pc=$('#scPiece');
-    bg.onload = () => $('#scLoading').style.display='none';
+    bg.onload = () => { if(epoch===_authEpoch && serial===_capRequest) $('#scLoading').style.display='none'; };
     bg.src=_cap.bg; pc.src=_cap.piece;
     pc.style.top = (_cap.y/_cap.h*100)+'%';
     pc.style.visibility='visible';
-    setTimeout(()=>$('#scLoading').style.display='none', 600);
-  } catch { $('#authErr2').textContent='验证码加载失败，请返回重试'; }
+    setTimeout(()=>{ if(epoch===_authEpoch && serial===_capRequest) $('#scLoading').style.display='none'; }, 600);
+  } catch(e) {
+    if(epoch===_authEpoch && serial===_capRequest){ $('#scLoading').style.display='none'; $('#authErr2').textContent=e.message; }
+  }
 }
 
 /* 滑块拖动 */
@@ -2243,6 +2441,9 @@ function solvePoW(cid, need){ const enc=new TextEncoder();
 
 /* 松手即校验滑块 → 成功换令牌 → 直接继续登录/注册 */
 async function verifyCaptcha(){
+  if(!_cap || !_pending) return;
+  const epoch=_authEpoch, pending=_pending, mode=_authMode;
+  let signingIn=false;
   _dragOK=true;
   const track=$('#scTrack'); $('#scLabel').textContent=LANG==='en'?'Verifying…':'验证中…';
   try {
@@ -2250,23 +2451,30 @@ async function verifyCaptcha(){
     const vr = await fetch('/api/auth/captcha/verify', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({cid:_cap.cid, x:_capX, trajectory:_traj, nonce})});
     const vd = await vr.json().catch(()=>({}));
-    if(!vr.ok) throw new Error(vd.error || '验证失败');
+    if(epoch!==_authEpoch) return;
+    if(!vr.ok) throw new Error(vd.error || uiText('验证失败'));
     track.classList.add('ok'); $('#scLabel').textContent=LANG==='en'?'Verified ✓':'验证通过 ✓';
     // 拿到一次性令牌，立即继续登录/注册
-    const r = await fetch('/api/auth/'+(_authMode==='register'?'register':'login'), {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify({..._pending, pass_token:vd.pass_token})});
+    signingIn=true;
+    const r = await fetch('/api/auth/'+(mode==='register'?'register':'login'), {method:'POST',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({...pending, pass_token:vd.pass_token})});
     const d = await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(d.error || '操作失败');
+    if(epoch!==_authEpoch) return;
+    if(!r.ok) throw new Error(d.error || uiText('操作失败'));
     // 登录成功后自动继续被引导打断的操作（如开启文案提取），不让用户重操作
     const after = window._afterLogin; window._afterLogin = null;
-    setTimeout(()=>{ closeAuth(); refreshUser().then(()=>{ if (after) after(); }); }, 350);
+    setTimeout(()=>{ if(epoch===_authEpoch){ closeAuth(); refreshUser().then(()=>{ if (after) after(); }); } }, 350);
   } catch(e){
+    if(epoch!==_authEpoch) return;
+    if(signingIn){ setMode(mode); $('#authErr').textContent=e.message; return; }
     track.classList.add('err'); $('#authErr2').textContent=e.message;
-    setTimeout(loadCaptcha, 700);                       // 失败自动换一张
+    setTimeout(()=>{ if(epoch===_authEpoch) loadCaptcha(); }, 700);
   }
 }
 
 refreshUser();
+window.addEventListener('pageshow', e => { if(e.persisted) refreshUser(); });
+document.addEventListener('visibilitychange', () => { if(!document.hidden) refreshUser(); });
 </script>
 </body>
 </html>

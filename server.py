@@ -56,7 +56,13 @@ from pydantic import BaseModel, Field
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.22.1"
+APP_VERSION = "1.24.2"
+UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
+
+
+def _ui_text(message: str, lang: str, fallback: Optional[str] = None) -> str:
+    return UI_MESSAGES.get(lang, {}).get(message, fallback or message) if lang != "zh" else message
+
 _BUILD_DATE = time.strftime("%Y-%m-%d", time.gmtime())  # 进程启动日期，供 sitemap lastmod
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data"))
@@ -203,6 +209,12 @@ CREATE TABLE IF NOT EXISTS users(
   created_at INTEGER, last_login INTEGER, disabled INTEGER DEFAULT 0, reg_ip TEXT,
   api_trial_granted_cents INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS user_sessions(
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
 CREATE TABLE IF NOT EXISTS api_keys(
   key TEXT PRIMARY KEY, user_id INTEGER, name TEXT, created INTEGER, enabled INTEGER DEFAULT 1,
   balance_cents INTEGER DEFAULT 100, spent_cents INTEGER DEFAULT 0, calls INTEGER DEFAULT 0,
@@ -834,25 +846,107 @@ def verify_pw(pw: str, salt: str, h: str) -> bool:
         hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 120_000).hex(), h)
 
 
-_user_sessions: dict = {}     # token -> (user_id, expiry)
 USER_SESSION_TTL = 30 * 86400
 
 
-def _new_user_session(uid: int) -> str:
-    tok = secrets.token_urlsafe(24)
-    _user_sessions[tok] = (uid, time.time() + USER_SESSION_TTL)
+def _user_session_hash(tok: str) -> str:
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def _new_user_session(uid: int, previous_token: str = "") -> str:
+    """浏览器保存随机 HttpOnly Cookie，数据库只存摘要；重启不丢会话。"""
+    tok = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO user_sessions(token_hash,user_id,created_at,expires_at) "
+                "VALUES(?,?,?,?)", (_user_session_hash(tok), uid, now, now + USER_SESSION_TTL))
+            if previous_token:
+                conn.execute("DELETE FROM user_sessions WHERE token_hash=?",
+                             (_user_session_hash(previous_token),))
+            conn.commit()
+        finally:
+            conn.close()
     return tok
+
+
+def _delete_user_session(tok: str):
+    if tok:
+        db_exec("DELETE FROM user_sessions WHERE token_hash=?", (_user_session_hash(tok),))
 
 
 def current_user(request: Request):
     """从 cookie 取当前登录用户（dict）或 None。"""
     tok = request.cookies.get("sess", "")
-    ent = _user_sessions.get(tok)
-    if not ent or ent[1] < time.time():
-        _user_sessions.pop(tok, None)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", tok):
         return None
-    row = db_exec("SELECT * FROM users WHERE id=? AND disabled=0", (ent[0],), "one")
+    row = db_exec(
+        "SELECT u.* FROM users u JOIN user_sessions s ON s.user_id=u.id "
+        "WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0",
+        (_user_session_hash(tok), int(time.time())), "one")
     return dict(row) if row else None
+
+
+# 算术题是滑块的前置门禁；答案不随响应下发，题目只能尝试一次。
+_math_challenges: dict = {}   # cid -> (answer, expires_at, ip)
+_math_grants: dict = {}       # token -> (expires_at, ip, remaining_slider_loads)
+_math_lock = threading.Lock()
+AUTH_MATH_TTL = 300
+
+
+def _sweep_math(now: float):
+    # 调用方持有 _math_lock。
+    for cid, entry in list(_math_challenges.items()):
+        if entry[1] <= now:
+            _math_challenges.pop(cid, None)
+    for token, entry in list(_math_grants.items()):
+        if entry[0] <= now:
+            _math_grants.pop(token, None)
+
+
+def _make_math_challenge(request: Request) -> dict:
+    a, b = secrets.randbelow(10) + 1, secrets.randbelow(10) + 1
+    subtract = bool(secrets.randbelow(2))
+    if subtract:
+        a, b = max(a, b), min(a, b)
+    cid = secrets.token_urlsafe(18)
+    expires = int(time.time()) + AUTH_MATH_TTL
+    with _math_lock:
+        _sweep_math(time.time())
+        if len(_math_challenges) >= 3000:
+            raise ApiError(429, "验证请求较多，请稍后再试")
+        _math_challenges[cid] = (a - b if subtract else a + b, expires, _client_ip(request))
+    return {"cid": cid, "question": f"{a} {'−' if subtract else '+'} {b} = ?",
+            "expires_at": expires}
+
+
+def _verify_math_challenge(cid: str, answer: str, request: Request) -> str:
+    with _math_lock:
+        entry = _math_challenges.pop(cid, None)
+        now = int(time.time())
+        if not entry or entry[1] <= now or entry[2] != _client_ip(request):
+            raise ApiError(400, "算术题已失效，请换一题重试")
+        if not re.fullmatch(r"\d{1,2}", answer.strip()) or int(answer) != entry[0]:
+            raise ApiError(400, "答案不正确，请回答新题目")
+        _sweep_math(now)
+        if len(_math_grants) >= 3000:
+            raise ApiError(429, "验证请求较多，请稍后再试")
+        token = secrets.token_urlsafe(24)
+        _math_grants[token] = (now + AUTH_MATH_TTL, entry[2], 10)
+    return token
+
+
+def _require_math_grant(request: Request):
+    token = request.headers.get("X-Auth-Math", "")
+    with _math_lock:
+        entry = _math_grants.get(token)
+        if (not entry or entry[0] <= time.time() or entry[1] != _client_ip(request)
+                or entry[2] <= 0):
+            raise ApiError(403, "请先回答算术题，再进行滑块验证")
+        _math_grants[token] = (entry[0], entry[1], entry[2] - 1)
 
 
 # ---- 滑块验证码（服务端 PNG 缺口 + 行为轨迹 + PoW + 蜜罐 + 一次性签名令牌）----
@@ -1115,9 +1209,8 @@ def _admin_record_fail(ip: str):
 def _sweep_memory():
     """周期清理会话/令牌/限频等内存字典，防止无界增长。"""
     now = time.time()
-    for tok, ent in list(_user_sessions.items()):
-        if ent[1] < now:
-            _user_sessions.pop(tok, None)
+    with _math_lock:
+        _sweep_math(now)
     for tok, exp in list(_passes.items()):
         if exp < now:
             _passes.pop(tok, None)
@@ -1179,6 +1272,8 @@ def _cleanup_retained_data(force: bool = False) -> None:
             conn.execute("DELETE FROM share_submissions WHERE ts<?",
                          (int(now) - 2 * 86400,))
             conn.execute("DELETE FROM parse_snapshots WHERE expires_at<=?", (int(now),))
+            conn.execute("DELETE FROM user_sessions WHERE expires_at<=? "
+                         "OR user_id NOT IN (SELECT id FROM users WHERE disabled=0)", (int(now),))
             expired_shares = conn.execute(
                 "SELECT quota_reservation_id FROM shares "
                 "WHERE expires_at>0 AND expires_at<?", (int(now),)).fetchall()
@@ -1250,7 +1345,8 @@ TEST_URL_DOUYIN = "https://www.iesdouyin.com/"        # 抖音可达性
 SUPPORTED_SCHEMES = ("http", "https", "socks5", "socks5h", "socks4", "socks4a")
 
 DEFAULT_SETTINGS = {
-    "force_proxy": True,          # 无可用代理时拒绝直连（防真实 IP 暴露）
+    "force_proxy": False,         # 默认代理优先，无可用代理时允许服务器直连
+    "proxy_policy_version": 1,    # 旧版本的强制代理默认值只迁移一次
     "default_protocol": "socks5", # 无协议前缀的代理按此协议解析（代理多为 socks5）
     "rotation": "round_robin",    # round_robin | random | least_fail
     "retries": 3,                 # 单个请求最多尝试几个代理后放弃
@@ -1289,6 +1385,10 @@ class ProxyManager:
                 d = json.loads(STORE_FILE.read_text("utf-8"))
                 self.proxies = d.get("proxies", [])
                 self.settings.update(d.get("settings", {}))
+                if not d.get("settings", {}).get("proxy_policy_version"):
+                    self.settings["force_proxy"] = False
+                    self.settings["proxy_policy_version"] = 1
+                    self._save()
             except Exception:
                 pass
 
@@ -1486,7 +1586,7 @@ class ProxyManager:
     # ---- 选择与打点 ----
     @property
     def force_proxy(self) -> bool:
-        return bool(self.settings.get("force_proxy", True))
+        return bool(self.settings.get("force_proxy", False))
 
     @property
     def retries(self) -> int:
@@ -2079,10 +2179,9 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
              timeout: int = 30, retry_http_statuses: tuple = (),
              ban_on_auth_error: bool = True,
              proxy_override: Optional[dict] = None):
-    """出站请求核心：一律经代理，失败自动转移。
+    """出站请求核心：代理优先，无代理或代理重试失败时默认服务器直连。
 
-    所有到抖音的服务器请求都走这里 —— **绝不服务器直连**，避免暴露服务器 IP。
-    仅当管理后台关闭「禁止直连」(force_proxy=False) 且无可用代理时，才退回直连。
+    管理员仍可显式开启严格代理模式；绑定签名出口的请求始终保留指定代理。
     返回 (response, proxy_used_or_None)。
     """
     hdrs = {"User-Agent": pick_ua()}
@@ -2099,7 +2198,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
         if proxy_mgr.force_proxy:
             raise ApiError(503, "没有可用代理，且已开启「禁止服务器直连」——为避免暴露服务器 IP，"
                                 "不会直连抖音。请在管理后台添加并启用代理。")
-        r = _raw_open(url, follow, hdrs, timeout, None)   # 仅在管理员显式允许时直连
+        r = _raw_open(url, follow, hdrs, timeout, None)
         proxy_mgr.mark_ok(None)
         return r, None
 
@@ -2170,7 +2269,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
     if proxy_mgr.force_proxy:
         raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音。"
                             "请在管理后台检查代理状态。")
-    r = _raw_open(url, follow, hdrs, timeout, None)   # 仅在管理员显式允许时直连
+    r = _raw_open(url, follow, hdrs, timeout, None)
     proxy_mgr.mark_ok(None)
     return r, None
 
@@ -2301,8 +2400,14 @@ class ApiError(Exception):
 
 
 @app.exception_handler(ApiError)
-async def _api_error(_: Request, exc: ApiError):
-    return JSONResponse(status_code=exc.status, content={"error": exc.message},
+async def _api_error(request: Request, exc: ApiError):
+    fallback = {400: "Invalid request.", 401: "Please sign in and try again.",
+                403: "This request could not be verified. Refresh the page and try again.",
+                404: "The requested content is unavailable.", 422: "Please check the supplied information.",
+                429: "Too many requests. Please try again later.",
+                504: "The request timed out. Please try again."}.get(exc.status, "The service is unavailable. Please try again later.")
+    message = _ui_text(exc.message, _pick_lang(request), fallback)
+    return JSONResponse(status_code=exc.status, content={"error": message},
                         headers=exc.headers)
 
 
@@ -2319,6 +2424,18 @@ def _host_allowed(url: str) -> bool:
     except (ValueError, TypeError):
         return False
     return any(host == s or host.endswith("." + s) for s in ALLOWED_HOST_SUFFIXES)
+
+
+def _primary_media_allowed(url: str) -> bool:
+    """主解析媒体只允许已知 CDN；TikTok 不扩大抖音官方媒体的白名单。"""
+    if not _atc_public_url(url):
+        return False
+    if _host_allowed(url):
+        return True
+    host = (urlparse.urlsplit(url).hostname or "").lower().rstrip(".")
+    suffixes = ("tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com", "tiktokv.com")
+    return (any(host == suffix or host.endswith("." + suffix) for suffix in suffixes)
+            or bool(re.fullmatch(r"v\d+[\w.-]*\.tiktok\.com", host)))
 
 
 def _find_key(obj, key):
@@ -2404,6 +2521,13 @@ def _atc_video_download_url(item_id: str,
         "exp": exp, "sig": sig, "dl": "1",
         "name": filename or "video.mp4",
     })
+
+
+def _video_download_refresh_url(item_id: str) -> str:
+    """只授权刷新指定作品的下载地址，不能提交任意来源或媒体 URL。"""
+    exp, sig = _media_token("download_link", item_id)
+    return f"/api/media/video/{item_id}/download-link?" + urlparse.urlencode({
+        "exp": exp, "sig": sig})
 
 
 def _stream(resp, chunk=256 * 1024, on_close=None):
@@ -4801,14 +4925,17 @@ def _share_view(row: dict, origin: str = "") -> dict:
         # Legacy snapshots may still contain a signed URL or a proxy token.
         # Remove those fields before deciding whether the cache is usable so an
         # expired/missing cache can never make the page advertise a dead link.
-        for key in ("url", "direct_url", "atc_url", "proxy_url", "download_url"):
+        for key in ("url", "direct_url", "atc_url", "proxy_url", "download_url",
+                    "download_refresh_url"):
             video.pop(key, None)
         video["media_available"] = False
+        if re.fullmatch(r"[\w-]{8,40}", row["item_id"]):
+            video["download_refresh_url"] = _video_download_refresh_url(row["item_id"])
         if _atc_url_fresh(cached, cfg["url_ttl"]):
             direct = cached["video_url"]
             video["url"] = direct
             video["direct_url"] = direct
-            if _host_allowed(direct):
+            if _primary_media_allowed(direct):
                 video["proxy_url"] = _atc_video_proxy_url(row["item_id"])
                 video["download_url"] = _atc_video_download_url(
                     row["item_id"], filename)
@@ -5015,7 +5142,7 @@ def _normalize_share_short_link(text: str) -> str:
     """只做本地语法校验；不跟随短链、不产生任何出站请求。"""
     raw_text = str(text or "").strip()
     if not raw_text:
-        raise ApiError(422, "invalid_douyin_link: 请提供抖音分享链接")
+        raise ApiError(422, "invalid_douyin_link: 请提供抖音或 TikTok 分享链接")
     if len(raw_text.encode("utf-8")) > 4096:
         raise ApiError(413, "payload_too_large: 分享文案最多 4KB")
     urls = re.findall(r"https?://[^\s<>'\"]+", raw_text, re.I)
@@ -5027,6 +5154,14 @@ def _normalize_share_short_link(text: str) -> str:
         try:
             parsed = urlparse.urlsplit(candidate)
             host = (parsed.hostname or "").lower().rstrip(".")
+            if host in ("www.tiktok.com", "tiktok.com", "vm.tiktok.com", "vt.tiktok.com"):
+                if (parsed.scheme == "https" and not parsed.username and not parsed.password
+                        and parsed.port is None and not parsed.fragment
+                        and (re.fullmatch(r"/@[^/\s]+/video/\d{8,30}/?", parsed.path)
+                             or (host in ("vm.tiktok.com", "vt.tiktok.com")
+                                 and re.fullmatch(r"/[\w-]{3,100}/?", parsed.path)))):
+                    valid.append(urlparse.urlunsplit(("https", host, parsed.path, parsed.query, "")))
+                continue
             if host == "v.douyin.com":
                 saw_douyin = True
             if (parsed.scheme != "https" or host != "v.douyin.com"
@@ -5039,11 +5174,11 @@ def _normalize_share_short_link(text: str) -> str:
         except (TypeError, ValueError):
             continue
     if len(valid) > 1:
-        raise ApiError(422, "multiple_links: 每次只能提交一个抖音分享链接")
+        raise ApiError(422, "multiple_links: 每次只能提交一个视频分享链接")
     if not valid:
-        detail = "请粘贴不带参数的抖音短链（v.douyin.com）"
+        detail = "请粘贴有效的抖音短链或 TikTok 视频分享链接"
         if not saw_douyin:
-            detail = "未找到 v.douyin.com 抖音短链"
+            detail = "未找到抖音短链或 TikTok 视频分享链接"
         raise ApiError(422, f"invalid_douyin_link: {detail}")
     return valid[0]
 
@@ -5176,7 +5311,7 @@ def _share_storage_payload(data: dict) -> dict:
         video.pop(key, None)
     if source in _LEGACY_DIRECT_SOURCES or source in ("atc", "parser"):
         for key in ("url", "atc_url", "direct_url", "proxy_url",
-                    "download_url", "alt_url"):
+                    "download_url", "download_refresh_url", "alt_url"):
             video.pop(key, None)
         video["media_available"] = False
     return stored
@@ -6173,6 +6308,17 @@ def _atc_cfg() -> dict:
     }
 
 
+class _ParserServiceError(ApiError):
+    """内部重试分类；不给前端下发上游响应、凭据或服务商名称。"""
+    def __init__(self, status: int, message: str, *, reason="failed", retryable=False):
+        super().__init__(status, message, {"Retry-After": "5"} if reason == "busy" else None)
+        self.reason, self.retryable = reason, retryable
+
+
+ATC_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+ATC_MAX_POLLS = 60
+
+
 def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
     """调 ATC 开放 API；对外只抛不包含密钥/完整 URL 的稳定错误。"""
     url = cfg["base"] + path + "?" + urlparse.urlencode(params)
@@ -6182,21 +6328,26 @@ def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
     req.add_header("User-Agent", pick_ua())
     try:
         with urlreq.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8", "replace")
+            raw = resp.read(ATC_MAX_RESPONSE_BYTES + 1)
     except urlerr.HTTPError as exc:
+        exc.close()
         if exc.code in (401, 403):
-            raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
+            raise _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="auth")
         if exc.code == 429:
-            raise ApiError(503, "视频解析请求较多，请稍后重试")
-        raise ApiError(502, "视频解析服务连接异常，请稍后重试")
+            raise _ParserServiceError(503, "视频解析请求较多，请稍后重试",
+                                      reason="busy", retryable=True)
+        raise _ParserServiceError(502, "视频解析服务连接异常，请稍后重试",
+                                  retryable=exc.code >= 500)
     except (urlerr.URLError, TimeoutError, OSError):
-        raise ApiError(502, "视频解析服务连接异常，请稍后重试")
+        raise _ParserServiceError(502, "视频解析服务连接异常，请稍后重试", retryable=True)
+    if len(raw) > ATC_MAX_RESPONSE_BYTES:
+        raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
     try:
         payload = json.loads(raw)
-    except ValueError:
-        raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
+    except (ValueError, UnicodeError):
+        raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
     if not isinstance(payload, dict):
-        raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
+        raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
     return payload
 
 
@@ -6206,11 +6357,12 @@ def _atc_rejected(resp: dict, action: str = "任务") -> ApiError:
     lowered = msg.lower()
     if code in ("401", "403") or any(
             token in lowered for token in ("api key", "secret", "验证失败", "鉴权")):
-        return ApiError(503, "视频解析服务暂时不可用，请稍后重试")
-    if "并发" in msg or "上限" in msg:
-        return ApiError(503, "视频解析请求较多，请稍后重试",
-                        {"Retry-After": "5"})
-    return ApiError(502, f"视频解析{action}失败，请稍后重试")
+        return _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="auth")
+    if code == "601" or any(token in lowered for token in ("会员", "权益", "余额", "额度")):
+        return _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="entitlement")
+    if code == "429" or "并发" in msg or "concurrent" in lowered:
+        return _ParserServiceError(503, "视频解析请求较多，请稍后重试", reason="busy", retryable=True)
+    return _ParserServiceError(502, f"视频解析{action}失败，请稍后重试")
 
 
 def _atc_extract(work_url: str, include_text: bool = False) -> dict:
@@ -6224,6 +6376,7 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
         raise ApiError(503, "视频解析任务较多，请稍后重试",
                        {"Retry-After": "5"})
     try:
+        deadline = time.monotonic() + ATC_JOB_TIMEOUT
         params = {"workUrl": work_url}
         if include_text:
             params["taskType"] = "TEXT"
@@ -6231,36 +6384,32 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
         if submitted.get("code") != 200 or not submitted.get("data"):
             raise _atc_rejected(submitted, "任务提交")
         created = submitted["data"]
-        if isinstance(created, dict):
-            if _atc_status_value(created) in ("SUCCESS", "SUCCEEDED", "DONE") or (
-                    not include_text and _atc_basic_result_ready(created)):
-                return created
-            task_id = _atc_task_id(created)
-        else:
-            task_id = str(created)
+        if _atc_result_complete(created, include_text=include_text):
+            return created
+        task_id = _atc_task_id(created)
         if not task_id:
             raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
 
-        deadline = time.monotonic() + ATC_JOB_TIMEOUT
-        while time.monotonic() < deadline:
-            time.sleep(ATC_POLL_INTERVAL)
-            queried = _atc_request(
-                "GET", "/video/query", {"taskId": task_id}, cfg)
-            if queried.get("code") != 200:
-                raise _atc_rejected(queried, "任务查询")
+        poll_delay = ATC_POLL_INTERVAL
+        for _ in range(ATC_MAX_POLLS):
+            if time.monotonic() + poll_delay >= deadline:
+                break
+            time.sleep(poll_delay)
+            poll_delay = ATC_POLL_INTERVAL
+            try:
+                queried = _atc_request(
+                    "GET", "/video/query", {"taskId": task_id}, cfg)
+                if queried.get("code") != 200:
+                    raise _atc_rejected(queried, "任务查询")
+            except _ParserServiceError as exc:
+                if exc.retryable:
+                    poll_delay = max(ATC_POLL_INTERVAL, int(exc.headers.get("Retry-After", 0)))
+                    continue  # 只重查已有任务，不重复提交或重复计费。
+                raise
             data = queried.get("data") or {}
             if not isinstance(data, dict):
                 raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
-            status = _atc_status_value(data)
-            if status in ("FAILED", "FAILURE", "ERROR"):
-                message = str(data.get("errorMessage") or "任务执行失败")[:160]
-                raise ApiError(404 if any(x in message for x in (
-                    "不存在", "删除", "私密")) else 502,
-                    "作品无法解析，可能已失效、删除或设为私密"
-                    if any(x in message for x in ("不存在", "删除", "私密"))
-                    else "视频解析失败，请稍后重试")
-            if status in ("SUCCESS", "SUCCEEDED", "DONE") or (
-                    not include_text and _atc_basic_result_ready(data)):
+            if _atc_result_complete(data, include_text=include_text):
                 return data
         raise ApiError(504, "视频解析超时，请稍后重试")
     finally:
@@ -6272,8 +6421,8 @@ def _atc_basic_result_ready(data: dict) -> bool:
 
     Providers have returned the same fields both at the top level and inside
     ``data/result/video`` wrappers.  A profile URL, cover image, or author
-    object is metadata and must not make a task look complete; only a media
-    URL/list (or an image list for notes) qualifies.
+    object is metadata. This detects media presence only; a WAITING or FAILURE
+    payload can also have media. Task completion must use _atc_result_complete.
     """
     media_keys = {
         "videourl", "video_url", "videourllist", "video_url_list",
@@ -6379,7 +6528,8 @@ def _atc_task_id(payload) -> str:
                     found = scalar(node.get(key))
                     if found:
                         return found
-            for value in node.values():
+            for key in _ATC_RESULT_WRAPPERS:
+                value = node.get(key)
                 found = walk_explicit(value, depth + 1)
                 if found:
                     return found
@@ -6426,7 +6576,8 @@ def _atc_status_value(payload) -> str:
                     found = scalar(node.get(key))
                     if found:
                         return found
-            for value in node.values():
+            for key in _ATC_RESULT_WRAPPERS:
+                value = node.get(key)
                 found = walk(value, depth + 1)
                 if found:
                     return found
@@ -6443,6 +6594,25 @@ def _atc_status_value(payload) -> str:
     if not isinstance(payload, (dict, list, tuple, set)):
         return scalar(payload)
     return ""
+
+
+def _atc_result_complete(payload, *, include_text=False) -> bool:
+    """以任务状态为准；新版等待/失败响应也含媒体，不能提前缓存。
+
+    仅对没有状态的旧同步响应兼容媒体判定。作者等业务对象中的 status
+    不能改变任务状态，转录始终等待明确的成功状态。
+    """
+    if not isinstance(payload, dict):
+        return False
+    status = _atc_status_value(payload)
+    if status in ("FAILED", "FAILURE", "ERROR"):
+        message = str(_atc_result_data(payload).get("errorMessage") or "")[:160]
+        unavailable = any(x in message for x in ("不存在", "删除", "私密"))
+        raise _ParserServiceError(404 if unavailable else 502,
+            "作品无法解析，可能已失效、删除或设为私密" if unavailable
+            else "视频解析失败，请稍后重试")
+    return status in ("SUCCESS", "SUCCEEDED", "DONE") or (
+        not status and not include_text and _atc_basic_result_ready(payload))
 
 
 _MAX_MEDIA_DURATION_MS = 24 * 60 * 60 * 1000
@@ -6649,7 +6819,7 @@ def _atc_result_to_parse(work_url: str, data: dict,
             host = (urlparse.urlsplit(work_url).hostname or "site").lower()
             namespace = "web" + hashlib.sha256(host.encode()).hexdigest()[:8]
         item_id = f"{namespace}_{raw_item_id}"[:40]
-    title = str(data.get("title") or data.get("content")
+    title = str(data.get("title") or data.get("content") or data.get("video_description")
                 or native_item.get("desc") or native_item.get("title")
                 or "（无标题）").strip()
     title = title[:1000] or "（无标题）"
@@ -6691,21 +6861,22 @@ def _atc_result_to_parse(work_url: str, data: dict,
         # 显式判断 None，不能用 ``or`` 否则合法的 0 会被吞掉。
         "digg": stat_value("digg", "digg_count", "diggCount", "like_count", "likeCount"),
         "comment": stat_value("comment", "comment_count", "commentCount"),
-        "collect": stat_value("collect", "collect_count", "collectCount", "favorite_count"),
+        "collect": stat_value("collect", "collect_count", "collectCount", "favorite_count", "save_count"),
         "share": stat_value("share", "share_count", "shareCount"),
     }
     stats = {key: _douyin_number(value) for key, value in stats.items()}
-    content = str(data.get("content") or title)
-    tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
+    content = str(data.get("content") or "").strip()[:20000]
+    tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content or title)))[:50]
     result = {
         "kind": kind, "item_id": item_id, "source": "parser", "title": title,
+        "content": content,
         "platform": platform_id,
-        "share_supported": platform_id == "douyin",
+        "share_supported": platform_id == "douyin" or (platform_id == "tiktok" and kind == "video"),
         "author": author, "avatar": avatar, "author_url": author_url,
-        "create_time": None, "stats": stats, "tags": tags,
+        "create_time": _douyin_number(data.get("create_time")), "stats": stats, "tags": tags,
         "music": None, "location": None, "base": base, "_link": work_url,
         "cover": _atc_public_url(
-            data.get("cover") or data.get("coverUrl")
+            data.get("cover") or data.get("coverUrl") or data.get("cover_image_url")
             or video_obj.get("cover") or video_obj.get("origin_cover")),
     }
 
@@ -6728,6 +6899,7 @@ def _atc_result_to_parse(work_url: str, data: dict,
         filename = f"{base}.mp4"
         video = {
             "source": "parser", "url": video_url, "direct_url": video_url,
+            "download_refresh_url": _video_download_refresh_url(item_id),
             "alt_url": "", "filename": filename, "media_available": bool(video_url),
             "width": (data.get("width") if data.get("width") is not None else
                       data.get("videoWidth") if data.get("videoWidth") is not None else
@@ -6739,7 +6911,7 @@ def _atc_result_to_parse(work_url: str, data: dict,
                        native_item.get("height")),
         }
         # 同源流不接受客户端 URL；仅对缓存中的抖音白名单 CDN 开放。
-        if _host_allowed(video_url):
+        if _primary_media_allowed(video_url):
             video["proxy_url"] = _atc_video_proxy_url(item_id)
             video["download_url"] = _atc_video_download_url(item_id, filename)
         result["video"] = video
@@ -6767,9 +6939,18 @@ def _atc_result_to_parse(work_url: str, data: dict,
         "following_count": _douyin_number(author_following), "aweme_count": _douyin_number(author_count),
         "enriched": False,
     }
-    if not author_url and author_sec:
+    if not author_url and platform_id == "tiktok" and re.fullmatch(r"[\w.-]{1,100}", author_unique):
+        author_url = f"https://www.tiktok.com/@{author_unique}"
+        result["author_url"] = author_detail["author_url"] = author_url
+    if not author_url and author_sec and platform_id == "douyin":
         author_url = f"https://www.douyin.com/user/{urlparse.quote(author_sec, safe='')}"
         result["author_url"] = author_detail["author_url"] = author_url
+    if platform_id == "tiktok":
+        # Public original link only; the saved input used for refresh stays in the backend.
+        match = re.search(r"/@([\w.-]+)/video/(\d{8,30})", work_url)
+        if match:
+            result["original_url"] = f"https://www.tiktok.com/@{match[1]}/video/{match[2]}"
+    result["author_detail"] = author_detail
     _author_cache[item_id] = (time.time(), author_detail)
 
     # 即便上游在基础模式意外附带了转录字段，也不在普通解析路径保存。
@@ -7040,7 +7221,9 @@ def _atc_claim_pending(owner: str) -> Optional[dict]:
                 return None
             row = conn.execute(
                 "SELECT * FROM atc_jobs WHERE status='pending' "
-                "ORDER BY created,id LIMIT 1").fetchone()
+                "AND (COALESCE(error,'')='' OR COALESCE(updated,0)<=?) "
+                "ORDER BY created,id LIMIT 1",
+                (now - max(5, ATC_POLL_INTERVAL),)).fetchone()
             if not row:
                 conn.rollback()
                 return None
@@ -7074,7 +7257,7 @@ def _atc_claim_submitted(owner: str) -> Optional[dict]:
                 "SELECT * FROM atc_jobs WHERE status='submitted' "
                 "AND COALESCE(updated,0)<=? AND COALESCE(lease_until,0)<? "
                 "ORDER BY updated,id LIMIT 1",
-                (now - ATC_POLL_INTERVAL, now)).fetchone()
+                (now - max(5, ATC_POLL_INTERVAL), now)).fetchone()
             if not row:
                 conn.rollback()
                 return None
@@ -7118,6 +7301,21 @@ def _atc_store_job_result(job: dict, data: dict) -> None:
     if job["purpose"] == "transcript":
         _atc_save_result(job["item_id"], data, work_url=job["work_url"], include_text=True)
         return
+    if job["purpose"] == "download":
+        # 下载刷新只更新主媒体缓存，不拉官方补充、不覆盖分享页的信息快照。
+        payload = _atc_result_data(data)
+        video = payload.get("video") if isinstance(payload.get("video"), dict) else {}
+        urls = (_atc_public_urls(payload.get("videoUrl"))
+                + _atc_public_urls(payload.get("videoUrlList"))
+                + _atc_public_urls(payload.get("video_url"))
+                + _atc_public_urls(payload.get("video_urls"))
+                + _atc_public_urls(video.get("url"))
+                + _atc_public_urls(video.get("play_addr"))
+                + _atc_public_urls(video.get("download_addr")))
+        if not urls:
+            raise ApiError(502, "暂未获取到可用的下载链接，请稍后重试")
+        _atc_save_result(job["item_id"], {"videoUrl": urls[0]}, work_url=job["work_url"])
+        return
     douyin = _is_douyin_work_url(job["work_url"])
     result = _atc_result_to_parse(job["work_url"], data, job["item_id"], allow_partial=douyin)
     if douyin:
@@ -7140,6 +7338,9 @@ def _atc_try_job_fallback(job: dict) -> bool:
 
 def _atc_submit_claimed(job: dict, cfg: dict) -> None:
     now = int(time.time())
+    if now - int(job["created"]) > ATC_JOB_TIMEOUT:
+        _atc_claim_update(job, "failed", error="任务处理超时，请稍后重试")
+        return
     completed_payload = False
     try:
         params = {"workUrl": job["work_url"]}
@@ -7148,24 +7349,22 @@ def _atc_submit_claimed(job: dict, cfg: dict) -> None:
         resp = _atc_request("POST", "/video/extract", params, cfg)
         if resp.get("code") == 200 and resp.get("data"):
             created = resp["data"]
-            status = _atc_status_value(created)
-            if (status in ("SUCCESS", "SUCCEEDED", "DONE")
-                    or (job["purpose"] != "transcript"
-                        and _atc_basic_result_ready(created))):
+            if _atc_result_complete(created, include_text=job["purpose"] == "transcript"):
                 completed_payload = True
                 _atc_store_job_result(job, created)
                 _atc_claim_update(job, "done", error=None)
                 return
             task_id = _atc_task_id(created)
             if not task_id:
-                raise RuntimeError("任务响应缺少 taskId")
+                raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
             _atc_claim_update(job, "submitted", task_id=task_id, error=None)
-            return
-        if "并发" in str(resp.get("msg") or ""):
-            _atc_claim_update(job, "pending", error="对方并发已满，排队重试中")
             return
         raise _atc_rejected(resp, "任务提交")
     except Exception as exc:
+        if isinstance(exc, _ParserServiceError) and exc.reason == "busy":
+            # 明确拒绝受理才重新提交；连接中断不盲目重发，避免生成重复任务。
+            _atc_claim_update(job, "pending", error="解析请求较多，排队重试中")
+            return
         if not completed_payload and _atc_try_job_fallback(job):
             _atc_claim_update(job, "done", error=None)
             return
@@ -7187,30 +7386,26 @@ def _atc_poll_claimed(job: dict, cfg: dict) -> None:
             raise _atc_rejected(resp, "任务查询")
         raw_data = resp.get("data") or {}
         if not isinstance(raw_data, dict):
-            raise RuntimeError("任务结果格式无效")
-        status = _atc_status_value(raw_data)
-        basic_ready = (job["purpose"] != "transcript"
-                       and _atc_basic_result_ready(raw_data))
-        if status in ("SUCCESS", "SUCCEEDED", "DONE") or basic_ready:
+            raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
+        if _atc_result_complete(raw_data, include_text=job["purpose"] == "transcript"):
             completed_payload = True
             _atc_store_job_result(job, raw_data)
             _atc_claim_update(job, "done", error=None)
-        elif status in ("FAILED", "FAILURE", "ERROR"):
-            if _atc_try_job_fallback(job):
-                _atc_claim_update(job, "done", error=None)
-                return
-            _atc_claim_update(
-                job, "failed",
-                error="任务处理失败，请稍后重试")
         else:
             _atc_claim_update(job, "submitted", error=None)
     except Exception as exc:
         if completed_payload:
             _atc_claim_update(job, "failed", error="暂未获取到作品内容，请稍后重试")
             return
-        # 单次轮询异常不判死；释放租约，超时由 created 兜底。
+        if isinstance(exc, ApiError) and not getattr(exc, "retryable", False):
+            if _atc_try_job_fallback(job):
+                _atc_claim_update(job, "done", error=None)
+                return
+            _atc_claim_update(job, "failed", error=exc.message)
+            return
+        # 网络抖动可重查已有 taskId；鉴权、权益和明确失败不空转五分钟。
         _atc_claim_update(
-            job, "submitted", error=f"轮询异常: {type(exc).__name__}"[:200])
+            job, "submitted", error="任务查询暂不可用，稍后重试")
 
 
 def _atc_worker_loop(worker_no: int) -> None:
@@ -8437,16 +8632,19 @@ def _open_atc_video_upstream(item_id: str, headers: dict, validator=None):
 
 
 def _open_primary_video_upstream(item_id: str, headers: dict, validator=None):
-    """只从 ATC 服务端缓存取 URL，且仍限定在抖音媒体白名单。"""
+    """只读取主服务缓存的 URL，限定抖音与 TikTok 媒体域名。"""
     cached = _atc_cache_get(item_id)
     if not _atc_url_fresh(cached, _atc_cfg()["url_ttl"]):
         raise ApiError(403, "媒体地址已过期，请重新解析或刷新页面")
     upstream = cached["video_url"]
-    if not _host_allowed(upstream):
+    if not _primary_media_allowed(upstream):
         raise ApiError(502, "视频线路未通过安全校验")
     resp = None
     accepted = False
     try:
+        headers = dict(headers)
+        if _atc_platform_for_url(cached.get("work_url") or "") == "tiktok":
+            headers["Referer"] = "https://www.tiktok.com/"
         resp, _ = open_url(
             upstream, headers=headers,
             retry_http_statuses=(408, 425, 429, 500, 502, 503, 504),
@@ -8463,8 +8661,8 @@ def _open_primary_video_upstream(item_id: str, headers: dict, validator=None):
             raise ValueError(f"unexpected video content type {content_type}")
         geturl = getattr(resp, "geturl", None)
         final_url = geturl() if callable(geturl) else ""
-        if final_url and not _host_allowed(final_url):
-            raise ValueError("video redirect left the Douyin media allowlist")
+        if final_url and not _primary_media_allowed(final_url):
+            raise ValueError("video redirect left the media allowlist")
         if validator:
             validator(resp)
         accepted = True
@@ -8817,6 +9015,96 @@ def api_video(vid: str, request: Request, exp: int = 0, sig: str = "",
         stream,
         finalize=finalize, status_code=status,
         media_type="video/mp4", headers=headers)
+
+
+class DownloadLinkBody(BaseModel):
+    # 仅用于比较缓存是否已被其他请求更新；绝不把客户端 URL 作为请求目标。
+    failed_url: str = Field(default="", max_length=4096)
+
+
+def _request_download_link(item_id: str, failed_url: str) -> dict:
+    """点击时复用新地址或合并刷新任务；轮询只查询同一个有界任务。"""
+    cfg = _atc_cfg()
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                    "SELECT 1 FROM blocked_share_items WHERE kind='video' AND item_id=?",
+                    (item_id,)).fetchone():
+                raise ApiError(451, "该作品已被下架")
+            row = conn.execute("SELECT * FROM atc_cache WHERE item_id=?", (item_id,)).fetchone()
+            cached = dict(row) if row else {}
+            job = conn.execute(
+                "SELECT * FROM atc_jobs WHERE item_id=? AND purpose='download' ORDER BY id DESC LIMIT 1",
+                (item_id,)).fetchone()
+            age = now - int(job["updated"] or 0) if job else 60
+            fresh = _atc_url_fresh(cached, cfg["url_ttl"])
+            # 同一旧地址的并发报告直接复用已完成结果，即使上游仍返回相同 URL，
+            # 也不能在一次点击的轮询过程中无限提交任务。
+            just_done = bool(job and job["status"] == "done" and 0 <= age < 30
+                             and int(cached.get("url_fetched_at") or 0) >= job["created"])
+            if fresh and (not failed_url or failed_url != cached["video_url"] or just_done):
+                result = {"status": "ready", "url": cached["video_url"],
+                          "download_refresh_url": _video_download_refresh_url(item_id)}
+                if _primary_media_allowed(cached["video_url"]):
+                    result["proxy_url"] = _atc_video_proxy_url(item_id)
+                    result["download_url"] = _atc_video_download_url(item_id)
+                conn.commit()
+                return result
+            if job and job["status"] in ("pending", "submitting", "submitted"):
+                if now - job["created"] > ATC_JOB_TIMEOUT:
+                    conn.execute("UPDATE atc_jobs SET status='failed',error='下载链接更新超时',"
+                                 "updated=?,lease_owner=NULL,lease_until=NULL WHERE id=?", (now, job["id"]))
+                    conn.commit()
+                    raise ApiError(504, "下载链接更新超时，请稍后再试")
+                conn.commit()
+                return {"status": "processing", "retry_after_ms": 2000}
+            if job and 0 <= age < 30:
+                raise ApiError(502, "暂时无法更新下载链接，请稍后重试", {"Retry-After": "30"})
+            if not cfg["enabled"]:
+                raise ApiError(503, "下载链接更新服务暂不可用，请稍后重试")
+            source = cached.get("work_url") or ""
+            if not source:
+                saved = conn.execute(
+                    "SELECT source_url FROM shares WHERE item_id=? AND status='ok' "
+                    "AND (expires_at=0 OR expires_at>?) AND source_url IS NOT NULL "
+                    "ORDER BY created DESC LIMIT 1", (item_id, now)).fetchone()
+                source = saved["source_url"] if saved else ""
+            links = _extract_supported_work_urls(source, 1)
+            if not links:
+                raise ApiError(404, "原分享链接已失效，请重新粘贴分享内容解析")
+            pending = conn.execute(
+                "SELECT COUNT(*) FROM atc_jobs WHERE purpose='download' "
+                "AND status IN ('pending','submitting','submitted')").fetchone()[0]
+            if pending >= 32:
+                raise ApiError(503, "下载请求较多，请稍后重试", {"Retry-After": "5"})
+            conn.execute(
+                "INSERT INTO atc_jobs(item_id,work_url,purpose,status,created,updated) "
+                "VALUES(?,?,'download','pending',?,?)", (item_id, links[0], now, now))
+            conn.commit()
+            return {"status": "processing", "retry_after_ms": 2000}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+@app.post("/api/media/video/{item_id}/download-link")
+def api_video_download_link(item_id: str, body: DownloadLinkBody, request: Request,
+                            exp: int = 0, sig: str = ""):
+    if not re.fullmatch(r"[\w-]{8,40}", item_id):
+        raise ApiError(400, "非法的作品 ID")
+    _require_media_token("download_link", item_id, exp, sig)
+    lease = _media_lease(request)
+    try:
+        result = _request_download_link(item_id, body.failed_url)
+        return JSONResponse(result, status_code=202 if result["status"] == "processing" else 200,
+                            headers={"Cache-Control": "private, no-store"})
+    finally:
+        _media_release(lease)
 
 
 @app.get("/api/atc/video/{item_id}", include_in_schema=False)
@@ -9236,6 +9524,8 @@ class UserToggleBody(BaseModel):
 def admin_toggle_user(uid: int, body: UserToggleBody, request: Request):
     _require_admin(request)
     db_exec("UPDATE users SET disabled=? WHERE id=?", (1 if body.disabled else 0, uid))
+    if body.disabled:
+        db_exec("DELETE FROM user_sessions WHERE user_id=?", (uid,))
     return {"ok": True}
 
 
@@ -9258,50 +9548,62 @@ def admin_api_logs(request: Request, limit: int = 100):
 
 # ---- 视频解析服务（配置 / 测试 / 播放优先级）----
 
+def _parser_test_error(exc: Exception) -> str:
+    """管理员可诊断配置问题，但仍不展示原始响应或凭据。"""
+    reason = getattr(exc, "reason", "")
+    if reason == "auth":
+        return "解析服务鉴权失败，请核对后台密钥是否有效"
+    if reason == "entitlement":
+        return "解析服务账号权益不足，请检查会员状态与可用额度"
+    return exc.message if isinstance(exc, ApiError) else "测试任务查询失败，请稍后重试"
+
+
+def _parser_test_success(data: dict, ms) -> dict:
+    normalized = _atc_result_data(data)
+    video = normalized.get("video") if isinstance(normalized.get("video"), dict) else {}
+    return {"state": "success", "ms": ms, "duration": normalized.get("duration"),
+            "has_video": bool(normalized.get("videoUrl") or normalized.get("videoUrlList")
+                              or video.get("url")),
+            "has_text": bool(normalized.get("textContent"))}
+
+
 @app.get("/api/admin/atc", include_in_schema=False)
 @app.get("/api/admin/parser", name="get_parser_settings")
 def admin_atc_get(request: Request):
     _require_admin(request)
     status = _atc_status()
-    # 有在途的测试任务时顺带推进一次（管理操作，频率极低）
+    # 面板刷新也遵守查询间隔及有界截止时间。
     try:
         test = json.loads(app_setting("atc_test_state", "") or "{}")
     except ValueError:
         test = {}
+    if not isinstance(test, dict):
+        test = {}
     if test.get("state") == "submitted" and test.get("task_id"):
+        now = int(time.time())
+        test.setdefault("created", now)
+        if now - int(test.get("updated") or 0) < max(5, ATC_POLL_INTERVAL):
+            return status
         cfg = _atc_cfg()
+        test["updated"] = now
         try:
-            resp = _atc_request("GET", "/video/query",
-                                {"taskId": test["task_id"]}, cfg)
+            if now - int(test["created"]) >= ATC_JOB_TIMEOUT:
+                raise ApiError(504, "测试任务超时，请稍后重试")
+            resp = _atc_request("GET", "/video/query", {"taskId": test["task_id"]}, cfg)
             if resp.get("code") != 200:
                 raise _atc_rejected(resp, "测试任务查询")
             data = resp.get("data") or {}
             if not isinstance(data, dict):
                 raise ApiError(502, "测试任务结果暂不可用，请稍后重试")
-            st = _atc_status_value(data)
-            normalized = _atc_result_data(data)
-            normalized_video = (normalized.get("video")
-                                if isinstance(normalized.get("video"), dict) else {})
-            if st in ("SUCCESS", "SUCCEEDED", "DONE") or _atc_basic_result_ready(data):
-                test = {"state": "success", "ms": test.get("ms"),
-                        "duration": normalized.get("duration"),
-                        "has_video": bool(
-                            normalized.get("videoUrl")
-                            or normalized.get("videoUrlList")
-                            or normalized_video.get("url")),
-                        "has_text": bool(normalized.get("textContent"))}
-            elif st in ("FAILED", "FAILURE"):
-                test = {"state": "failed",
-                        "error": "测试任务处理失败，请稍后重试"}
-            set_app_setting("atc_test_state", json.dumps(test, ensure_ascii=False))
-            status["test"] = json.dumps(test, ensure_ascii=False)
+            if _atc_result_complete(data):
+                test = _parser_test_success(data, test.get("ms"))
+            else:
+                test.pop("error", None)
         except Exception as exc:
-            detail = (exc.message if isinstance(exc, ApiError)
-                      else "测试任务查询失败")
-            test = {"state": "failed", "error": detail[:200]}
-            set_app_setting("atc_test_state", json.dumps(
-                test, ensure_ascii=False))
-            status["test"] = json.dumps(test, ensure_ascii=False)
+            if not getattr(exc, "retryable", False):
+                test = {"state": "failed"}
+            test["error"] = _parser_test_error(exc)
+        set_app_setting("atc_test_state", json.dumps(test, ensure_ascii=False))
     status["test"] = _public_parser_test_state()
     return status
 
@@ -9357,8 +9659,7 @@ class AtcTestBody(BaseModel):
 @app.post("/api/admin/atc/test", include_in_schema=False)
 @app.post("/api/admin/parser/test", name="test_parser")
 def admin_atc_test(body: AtcTestBody, request: Request):
-    """测试连接：按默认解析模式只传 workUrl，不请求文案。
-    状态写 app_settings.atc_test_state（task_id + 提交耗时），由 GET 轮询推进。"""
+    """测试普通解析；保存任务 ID，由后台面板有界轮询推进。"""
     _require_admin(request)
     cfg = _atc_cfg()
     if not (cfg["key"] and cfg["secret"]):
@@ -9366,40 +9667,26 @@ def admin_atc_test(body: AtcTestBody, request: Request):
     work_url = body.work_url.strip() or "https://v.douyin.com/uc_Eukb0zUM/"
     t0 = time.time()
     try:
-        resp = _atc_request("POST", "/video/extract",
-                            {"workUrl": work_url}, cfg)
-    except Exception as e:
-        detail = e.message if isinstance(e, ApiError) else "服务连接异常，请稍后重试"
+        resp = _atc_request("POST", "/video/extract", {"workUrl": work_url}, cfg)
+        if resp.get("code") != 200 or not resp.get("data"):
+            raise _atc_rejected(resp, "测试任务提交")
+        ms = int((time.time() - t0) * 1000)
+        created = resp["data"]
+        if _atc_result_complete(created):
+            state = _parser_test_success(created, ms)
+        else:
+            task_id = _atc_task_id(created)
+            if not task_id:
+                raise ApiError(502, "任务提交响应缺少 taskId")
+            state = {"state": "submitted", "task_id": task_id, "ms": ms,
+                     "created": int(t0), "updated": int(time.time())}
+    except Exception as exc:
+        detail = _parser_test_error(exc)
         set_app_setting("atc_test_state", json.dumps(
             {"state": "failed", "error": detail}, ensure_ascii=False))
-        raise ApiError(502, f"连接失败：{detail}")
-    ms = int((time.time() - t0) * 1000)
-    if resp.get("code") != 200 or not resp.get("data"):
-        rejected = _atc_rejected(resp, "测试任务提交")
-        set_app_setting("atc_test_state", json.dumps(
-            {"state": "failed", "error": rejected.message}, ensure_ascii=False))
-        raise rejected
-    created = resp["data"]
-    if isinstance(created, dict) and (
-            _atc_status_value(created) in ("SUCCESS", "SUCCEEDED", "DONE")
-            or _atc_basic_result_ready(created)):
-        normalized = _atc_result_data(created)
-        normalized_video = (normalized.get("video")
-                            if isinstance(normalized.get("video"), dict) else {})
-        state = {"state": "success", "ms": ms,
-                 "duration": normalized.get("duration"),
-                 "has_video": bool(normalized.get("videoUrl")
-                                   or normalized.get("videoUrlList")
-                                   or normalized_video.get("url")),
-                 "has_text": bool(normalized.get("textContent"))}
-        set_app_setting("atc_test_state", json.dumps(state, ensure_ascii=False))
-        return {"ok": True, **state}
-    task_id = _atc_task_id(created)
-    if not task_id:
-        raise ApiError(502, "任务提交响应缺少 taskId")
-    set_app_setting("atc_test_state", json.dumps(
-        {"state": "submitted", "task_id": task_id, "ms": ms}))
-    return {"ok": True, "task_id": task_id, "ms": ms}
+        raise ApiError(exc.status if isinstance(exc, ApiError) else 502, detail)
+    set_app_setting("atc_test_state", json.dumps(state, ensure_ascii=False))
+    return {"ok": True, **{k: v for k, v in state.items() if k not in ("created", "updated")}}
 
 
 # ---- 分享页管理（含侵权下架）----
@@ -9948,7 +10235,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "A video and gallery parser for 50+ content platforms. Paste a public post link from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, WeChat Channels, Twitter/X, TikTok, YouTube and more to preview the original media and post details. Basic parsing requires no source-platform login, transcript extraction is off by default, and the site stores no media files.",
             "features": ["Unified parsing for 50+ platforms", "Douyin, Xiaohongshu, Kuaishou and Bilibili", "Weibo, WeChat Channels and Twitter/X", "TikTok and YouTube", "Video and gallery preview", "Batch parsing and Excel export", "Douyin share pages", "Optional speech transcript", "No media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, while video downloads are streamed through the site's proxy."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, video downloads prefer direct original-media requests and try the site's proxy if those fail."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page stores the post’s metadata, including its caption, engagement counts and available author details; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
@@ -9974,7 +10261,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
     site_id = f"{origin}/#website"
     graph = [
         {"@type": "Organization", "@id": org_id, "name": meta["site"],
-         "url": f"{origin}/", "logo": f"{origin}/og.png"},
+         "url": f"{origin}/", "logo": f"{origin}{_frontend_asset('/og.png')}"},
         {"@type": "WebSite", "@id": site_id, "name": meta["site"],
          "url": f"{origin}/", "publisher": {"@id": org_id},
          "inLanguage": ["zh-CN", "en"]},
@@ -9996,7 +10283,6 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
         return s.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;")
 
     return f'''<title>{esc(meta["title"])}</title>
-<meta name="app-version" content="{APP_VERSION}">
 <meta name="description" content="{esc(meta["desc"])}">
 <meta name="keywords" content="{esc(meta["kw"])}">
 <meta name="robots" content="index,follow,max-image-preview:large">
@@ -10017,7 +10303,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
 <meta property="og:title" content="{esc(meta["ogt"])}">
 <meta property="og:description" content="{esc(meta["ogd"])}">
 <meta property="og:url" content="{canon}">
-<meta property="og:image" content="{origin}/og.png">
+<meta property="og:image" content="{origin}{_frontend_asset('/og.png')}">
 <meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -10026,9 +10312,41 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="{esc(meta["ogt"])}">
 <meta name="twitter:description" content="{esc(meta["ogd"])}">
-<meta name="twitter:image" content="{origin}/og.png">
+<meta name="twitter:image" content="{origin}{_frontend_asset('/og.png')}">
 <script type="application/ld+json">{jsonld}</script>
 <script>window.__LANG={lang!r};window.__ORIGIN={origin!r};</script>'''
+
+
+# 自包含 HTML 的 JS/CSS 随页面更新；静态资源以构建时间戳区分缓存版本。
+# 在进程启动时固定，同一版本的每次请求不随机破坏缓存。
+_FRONTEND_MTIME = max(path.stat().st_mtime for path in
+                      [Path(__file__), *Path("static").rglob("*")] if path.is_file())
+FRONTEND_VERSION = f"{APP_VERSION}-" + time.strftime("%Y%m%d%H%M%S", time.gmtime(_FRONTEND_MTIME))
+
+
+def _frontend_asset(path: str) -> str:
+    return f"{path}?v={FRONTEND_VERSION}"
+
+
+def _frontend_template(name: str) -> str:
+    html = (Path("static") / name).read_text("utf-8")
+    if name in ("index.html", "share.html"):
+        catalog = json.dumps(UI_MESSAGES, ensure_ascii=False).replace("<", "\\u003c")
+        script = Path("static/ui-i18n.js").read_text("utf-8")
+        html = html.replace("<head>", f"<head>\n<script>globalThis.__UI_MESSAGES={catalog};\n{script}</script>", 1)
+    html = html.replace("<head>", '<head>\n'
+                        f'<meta name="app-version" content="{APP_VERSION}">\n'
+                        f'<meta name="frontend-version" content="{FRONTEND_VERSION}">', 1)
+    # 只处理受控模板中的本地资源，不修改分享快照、外链或业务 API 参数。
+    return re.sub(r'''((?:src|href)=["'])(/(?:platform-logos/[\w-]+\.svg|og\.(?:png|svg)))(["'])''',
+                  lambda match: match[1] + _frontend_asset(match[2]) + match[3], html)
+
+
+def _frontend_response(html: str, status_code: int = 200) -> HTMLResponse:
+    return HTMLResponse(html, status_code=status_code, headers={
+        "Cache-Control": "private, no-store", "Pragma": "no-cache",
+        "X-App-Version": APP_VERSION, "X-Frontend-Version": FRONTEND_VERSION,
+    })
 
 
 _PLATFORM_LOGO_NAMES = frozenset({
@@ -10038,7 +10356,7 @@ _PLATFORM_LOGO_NAMES = frozenset({
 
 
 @app.get("/platform-logos/{name}.svg", include_in_schema=False)
-def platform_logo(name: str):
+def platform_logo(name: str, v: str = ""):
     """Serve the small, allow-listed platform marks used by the home page."""
     if name not in _PLATFORM_LOGO_NAMES:
         return Response(status_code=404)
@@ -10046,7 +10364,8 @@ def platform_logo(name: str):
         Path("static/platform-logos") / f"{name}.svg",
         media_type="image/svg+xml",
         headers={
-            "Cache-Control": "public, max-age=31536000, immutable",
+            "Cache-Control": ("public, max-age=31536000, immutable"
+                              if v == FRONTEND_VERSION else "no-cache"),
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -10057,18 +10376,18 @@ def index(request: Request):
     log_pageview(request)
     lang = _pick_lang(request)
     origin = _origin(request)
-    html = Path("static/index.html").read_text("utf-8")
+    html = _frontend_template("index.html")
     html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin))
                 .replace("{{ORIGIN}}", origin))
-    resp = HTMLResponse(html)
+    resp = _frontend_response(html)
     resp.headers["Cache-Control"] = "private, no-store"
     resp.headers["Pragma"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
 
-def _share_head(view: Optional[dict], origin: str) -> str:
+def _share_head(view: Optional[dict], origin: str, lang: str = "zh") -> str:
     """分享页的 per-share 头信息。**一律 noindex** —— 不收录他人作品内容。"""
     def esc(s):
         return (str(s or "").replace("&", "&amp;").replace('"', "&quot;")
@@ -10076,29 +10395,31 @@ def _share_head(view: Optional[dict], origin: str) -> str:
 
     if view and view["state"] in ("pending", "processing"):
         url = esc(view.get("url") or f"{origin}/s/{view.get('sid', '')}")
-        return f'''<title>视频正在准备中 · 抖音分享</title>
-<meta name="description" content="链接已创建，内容正在后台获取，完成后页面会自动更新。">
+        return f'''<title>{_ui_text('视频正在准备中', lang)} · {_ui_text('分享页', lang)}</title>
+<meta name="description" content="{_ui_text('链接已创建，内容正在后台获取，完成后页面会自动更新。', lang)}">
 <meta name="robots" content="noindex,nofollow">
 <meta name="theme-color" content="#0E1013">
 <meta property="og:type" content="website">
-<meta property="og:title" content="视频正在准备中">
-<meta property="og:description" content="内容获取完成后，打开该链接即可播放。">
-<meta property="og:image" content="{esc(origin)}/og.png">
+<meta property="og:title" content="{_ui_text('视频正在准备中', lang)}">
+<meta property="og:description" content="{_ui_text('内容获取完成后，打开该链接即可播放。', lang)}">
+<meta property="og:image" content="{esc(origin)}{_frontend_asset('/og.png')}">
 <meta property="og:image:type" content="image/png">
 <meta property="og:url" content="{url}">'''
     if not view or view["state"] != "ok":
-        return ('<title>内容不可用 · 抖音分享</title>\n'
+        return (f"<title>{_ui_text('内容不可用', lang)} · {_ui_text('分享页', lang)}</title>\n"
                 '<meta name="robots" content="noindex,nofollow">\n'
                 '<meta name="theme-color" content="#0E1013">')
     # 卡片大标题 = 抖音文案原文（与抖音里一模一样）；作者放进描述行。
     # 微信抓取网页 meta 生成卡片：title/og:title→标题，og:image→缩略图，description→摘要。
     # 卡片底部的"来源/抬头"由微信按域名自动填（域名或其绑定的公众号名称），网页无法自定义。
-    title = (view["title"] or "抖音作品")[:60]
-    author = view["author"] or "抖音创作者"
-    desc = f"@{author} 的抖音作品 · 点开即可观看，无需安装 App"
+    platform = "TikTok" if (view.get("data") or {}).get("platform") == "tiktok" else ("Douyin" if lang == "en" else "抖音")
+    title = (view["title"] or platform + " video")[:60]
+    author = view["author"] or _ui_text("视频创作者", lang)
+    desc = (f"{platform} video by @{author} · Watch without the app" if lang == "en"
+            else f"@{author} 的 {platform} 作品 · 点开即可观看，无需安装 App")
     # 卡片图：抖音封面转成无签名 JPEG（webp 微信缩略图支持不稳定、签名 14 天过期）；
     # 兜底用 og.png 而非 og.svg —— 微信不渲染 SVG，会退化成无图的纯链接。
-    cover = _card_cover(view["cover"]) or f"{origin}/og.png"
+    cover = _card_cover(view["cover"]) or _atc_public_url(view["cover"]) or f"{origin}{_frontend_asset('/og.png')}"
     return f'''<title>{esc(title)}</title>
 <meta name="description" content="{esc(desc)}">
 <meta name="robots" content="noindex,nofollow">
@@ -10121,6 +10442,7 @@ def _share_head(view: Optional[dict], origin: str) -> str:
 def share_page(sid: str, request: Request):
     """分享页：服务端渲染，微信内可直接打开与播放。"""
     origin = _origin(request)
+    lang = _pick_lang(request)
     row = db_exec("SELECT * FROM shares WHERE id=?", (sid,), "one")
     view = None
     if row:
@@ -10131,19 +10453,21 @@ def share_page(sid: str, request: Request):
         if view["state"] not in ("pending", "processing"):
             _share_event(request, sid, "view")
 
-    html = Path("static/share.html").read_text("utf-8")
+    html = _frontend_template("share.html")
     # 注入 <script> 前把 < 转义成 <，防止标题里的 </script> 打断脚本
     payload = json.dumps(view or {"state": "notfound", "sid": sid},
                          ensure_ascii=False).replace("<", "\\u003c")
-    html = (html.replace("{{HTMLLANG}}", "zh-CN")
-                .replace("{{SHARE_HEAD}}", _share_head(view, origin))
+    html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
+                .replace("{{LANG}}", lang)
+                .replace("{{SHARE_HEAD}}", _share_head(view, origin, lang))
                 .replace("{{ORIGIN}}", origin)
                 .replace("{{WECHAT}}", "true" if _is_wechat(request) else "false")
                 .replace("{{SHARE_DATA}}", payload))
-    resp = HTMLResponse(html, status_code=200 if view else 404)
+    resp = _frontend_response(html, status_code=200 if view else 404)
     resp.headers["Cache-Control"] = "private, no-store"
     resp.headers["Pragma"] = "no-cache"
-    resp.headers["Vary"] = "User-Agent"
+    resp.headers["Vary"] = "User-Agent, Accept-Language, Cookie"
+    resp.set_cookie("lang", lang, max_age=31536000, samesite="lax", secure=COOKIE_SECURE)
     return resp
 
 
@@ -10152,13 +10476,11 @@ def api_docs(request: Request):
     log_pageview(request)
     lang = _pick_lang(request)
     origin = _origin(request)
-    html = Path("static/api-docs.html").read_text("utf-8")
+    html = _frontend_template("api-docs.html")
     html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin, "/api-docs"))
                 .replace("{{ORIGIN}}", origin))
-    resp = HTMLResponse(html)
-    # no-cache = 每次请求都回源校验（配合 ETag 未变返回 304），部署后用户无需强刷
-    resp.headers["Cache-Control"] = "no-cache"
+    resp = _frontend_response(html)
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -10169,12 +10491,11 @@ def transcript_page(request: Request):
     log_pageview(request)
     lang = _pick_lang(request)
     origin = _origin(request)
-    html = Path("static/transcript.html").read_text("utf-8")
+    html = _frontend_template("transcript.html")
     html = (html.replace("{{HTMLLANG}}", SUPPORTED_LANGS[lang])
                 .replace("{{SEO_HEAD}}", _seo_head(lang, origin, "/transcript"))
                 .replace("{{ORIGIN}}", origin))
-    resp = HTMLResponse(html)
-    resp.headers["Cache-Control"] = "no-cache"
+    resp = _frontend_response(html)
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
     return resp
 
@@ -10207,10 +10528,30 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _captcha_stats = {"load": 0, "ok": 0, "fail": 0}
 
 
+@app.get("/api/auth/math")
+def auth_math(request: Request):
+    if not _captcha_rate_ok(_client_ip(request)):
+        raise ApiError(429, "操作过于频繁，请稍后再试")
+    return _make_math_challenge(request)
+
+
+class MathAnswerBody(BaseModel):
+    cid: str = Field(default="", max_length=128)
+    answer: str = Field(default="", max_length=16)
+
+
+@app.post("/api/auth/math/verify")
+def auth_math_verify(body: MathAnswerBody, request: Request):
+    if not _captcha_rate_ok(_client_ip(request)):
+        raise ApiError(429, "操作过于频繁，请稍后再试")
+    return {"ok": True, "math_token": _verify_math_challenge(body.cid, body.answer, request)}
+
+
 @app.get("/api/auth/captcha")
 def auth_captcha(request: Request):
     if not _captcha_rate_ok(_client_ip(request)):        # 防验证码 CPU-DoS
         raise ApiError(429, "操作过于频繁，请稍后再试")
+    _require_math_grant(request)
     _captcha_stats["load"] += 1
     return make_captcha(request)
 
@@ -10256,8 +10597,8 @@ def _do_auth_guard(request: Request, body: RegisterBody):
         raise ApiError(400, "请先完成滑块验证（验证已失效，请重试）")
 
 
-def _issue_session(uid: int) -> JSONResponse:
-    tok = _new_user_session(uid)
+def _issue_session(uid: int, request: Request) -> JSONResponse:
+    tok = _new_user_session(uid, request.cookies.get("sess", ""))
     resp = JSONResponse({"ok": True})
     resp.set_cookie("sess", tok, httponly=True, samesite="lax",
                     secure=COOKIE_SECURE, max_age=USER_SESSION_TTL)
@@ -10278,7 +10619,7 @@ def auth_register(body: RegisterBody, request: Request):
     uid = db_exec("INSERT INTO users(email,pw_salt,pw_hash,created_at,last_login,reg_ip) "
                   "VALUES(?,?,?,?,?,?)",
                   (email, salt, h, int(time.time()), int(time.time()), ""))
-    return _issue_session(uid)
+    return _issue_session(uid, request)
 
 
 @app.post("/api/auth/login")
@@ -10291,13 +10632,13 @@ def auth_login(body: RegisterBody, request: Request):
     if row["disabled"]:
         raise ApiError(403, "该账号已被停用")
     db_exec("UPDATE users SET last_login=? WHERE id=?", (int(time.time()), row["id"]))
-    return _issue_session(row["id"])
+    return _issue_session(row["id"], request)
 
 
 @app.post("/api/auth/logout")
 def auth_logout(request: Request):
     tok = request.cookies.get("sess", "")
-    _user_sessions.pop(tok, None)
+    _delete_user_session(tok)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("sess")
     return resp
@@ -10305,15 +10646,12 @@ def auth_logout(request: Request):
 
 @app.get("/api-console")
 def api_console():
-    # FileResponse 自带 ETag/Last-Modified；no-cache 强制每次回源校验，部署即生效
-    return FileResponse("static/api-console.html",
-                        headers={"Cache-Control": "no-cache"})
+    return _frontend_response(_frontend_template("api-console.html"))
 
 
 @app.get("/admin_d")
 def admin_page():
-    return FileResponse("static/admin.html",
-                        headers={"Cache-Control": "no-cache"})
+    return _frontend_response(_frontend_template("admin.html"))
 
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
@@ -10394,17 +10732,19 @@ def sitemap(request: Request):
 
 
 @app.get("/og.svg")
-def og_image():
+def og_image(v: str = ""):
     # SVG 是可维护源；static/og.png 由 tools/render_og.swift 从同一文件生成。
     return FileResponse("static/og.svg", media_type="image/svg+xml",
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"
+                                 if v == FRONTEND_VERSION else "no-cache"})
 
 
 @app.get("/og.png")
-def og_png():
+def og_png(v: str = ""):
     # 社交/微信卡片首选位图：微信、多数抓取器不渲染 SVG，PNG 才能出图（og.svg 保留兜底）
     return FileResponse("static/og.png", media_type="image/png",
-                        headers={"Cache-Control": "public, max-age=86400"})
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"
+                                 if v == FRONTEND_VERSION else "no-cache"})
 
 
 @app.get("/healthz")

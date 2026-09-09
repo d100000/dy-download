@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/localized-vm');
 
 const homepage = fs.readFileSync('static/index.html', 'utf8');
 const start = homepage.indexOf('const fmtDur =');
@@ -100,16 +100,22 @@ test('video and gallery cards conditionally render engagement without empty spac
   const renderEnd = homepage.indexOf('async function downloadAll(', renderStart);
   assert.ok(renderStart >= 0 && renderEnd > renderStart);
   const renderContext = {
+    URL,
     LANG: 'zh', esc: String, platformName: () => '抖音', sharePageSupported: () => false,
     videoPlaySrc: () => '', videoDatasetHTML: () => '', authorRow: () => '', extrasBlock: () => '',
   };
-  vm.runInNewContext(source + homepage.slice(renderStart, renderEnd), renderContext);
+  const directStart = homepage.indexOf('function videoDirectDownloadURL(');
+  const directEnd = homepage.indexOf('function downloadFallbackURL(', directStart);
+  vm.runInNewContext(source + homepage.slice(directStart, directEnd)
+    + homepage.slice(renderStart, renderEnd), renderContext);
   for (const render of [renderContext.videoHTML, renderContext.albumHTML]) {
     const item = {item_id: 'test', title: '测试作品', video: {}, images: []};
     assert.doesNotMatch(render(item), /class="engagement-row"/);
     assert.match(render({...item, stats: {comment: 0}}), /<dt>评论<\/dt><dd>0<\/dd>/);
     assert.doesNotMatch(render({...item, stats: {digg: null, comment: ''}}), /class="engagement-row"/);
   }
+  assert.match(renderContext.videoHTML({item_id: 'test', title: '测试作品', source: 'parser',
+    video: {direct_url: 'https://v26-default.365yg.com/video/original/'}}), /onclick="downloadVideoItem\(this\)"/);
 });
 
 test('video elements wire native metadata events', () => {

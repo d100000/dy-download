@@ -92,7 +92,7 @@ footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--border);color
 
 <div class="endpoint">
   <div class="ep-head"><span class="method">POST</span><span class="path">/api/shares</span><span class="sub" style="margin:0">无需 API Key</span></div>
-  <div class="ep-desc" data-i18n-html="ep_share">异步创建本地分享页。接收阶段只在本地校验并规范化唯一一个 <code>https://v.douyin.com/&lt;短码&gt;/</code>，不访问源平台；持久化占位页和后台任务后立即返回 <code>202 Accepted</code>。建议每次创建发送 <code>Idempotency-Key</code>，网络重试将返回同一 sid。</div>
+  <div class="ep-desc" data-i18n-html="ep_share">异步创建本地分享页。接收阶段只在本地校验并规范化唯一一个抖音短链，或 TikTok 视频链接（<code>www.tiktok.com/@作者/video/作品ID</code>、<code>vm.tiktok.com</code> / <code>vt.tiktok.com</code>），不访问源平台；持久化占位页和后台任务后立即返回 <code>202 Accepted</code>。建议每次创建发送 <code>Idempotency-Key</code>，网络重试将返回同一 sid。</div>
   <h3 class="sec" data-i18n="req">请求示例</h3>
   <pre>curl -X POST 'https://你的域名/api/shares' \
   -H 'Content-Type: application/json' \
@@ -218,6 +218,7 @@ Retry-After: 2
     <tr><td><code>video.proxy_url</code></td><td data-i18n="f4">可选。本站同源 HMAC 播放地址，适合受限网络环境</td></tr>
     <tr><td><code>images[]</code></td><td data-i18n="f5">图集作品（kind = note）的原图列表，含 url / filename</td></tr>
     <tr><td><code>stats</code></td><td data-i18n="f6">点赞（digg）、评论、收藏和分享数；抖音缺失值由服务器补全，仍无法获取时为 null</td></tr>
+    <tr><td><code>title / content</code></td><td data-i18n="f8">作品标题与可选正文分别保留；content 未提供或为空时使用 title，不包含语音转录文案</td></tr>
     <tr><td><code>warning</code></td><td data-i18n="f7">成功但带警告时出现（如部分数据缺失）</td></tr>
   </tbody>
 </table></div>
@@ -288,7 +289,7 @@ const I18N={en:{
   s1c_h:"Make a call", s1c_p:"Async share pages can be created directly; paid Open API calls require the <code>X-API-Key</code> header.",
   s2:"Authentication", s2_p:"The async share-page endpoints use the website's free quota and require no API key. Open API routes under <code>/api/v1/*</code> authenticate only through the <code>X-API-Key: your_key</code> request header. Never put a key in a URL query parameter.",
   s3:"Endpoints", req:"Request", resp:"Response",
-  ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one <code>https://v.douyin.com/&lt;code&gt;/</code> URL locally; it does not contact Douyin. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
+  ep_share:"Create a local share page asynchronously. The request path only validates and normalizes exactly one Douyin short URL or TikTok video URL (<code>www.tiktok.com/@creator/video/id</code>, <code>vm.tiktok.com</code> or <code>vt.tiktok.com</code>) locally; it does not contact the source platform. After durably storing the placeholder and background task it immediately returns <code>202 Accepted</code>. Send an <code>Idempotency-Key</code> so network retries return the same sid.",
   ep_author:"Read structured author details for a parsed item. Nickname, avatar, profile URL, <code>sec_uid</code> and post engagement fields come from the normalized result; the first lookup may briefly enrich profile details. Upstream implementation details are not exposed.",
   ep_share_status:"Read the minimal public state. Poll by <code>poll_after_ms</code> while pending/processing. If a ready response has <code>media_available=false</code>, continue with <code>media_poll_after_ms</code>. When ready, copy <code>share_url_versioned</code> for WeChat. Failed responses contain only stable public error codes, never internal proxy details. The <code>/s/{sid}</code> page already handles polling.",
   ep_share_delete:"Delete or cancel your share page. Signed-in owners use their session; anonymous creators send the creation response's <code>manage_token</code> in the <code>X-Share-Manage-Token</code> header. The token never appears in public status, URLs, or pages. An unclaimed task is refunded; once parsing has started, publication is cancelled but one quota unit remains charged.",
@@ -299,6 +300,7 @@ const I18N={en:{
   ep2_code:'{ "code": 0, "message": "ok",\n  "data": {\n    "job_id": "job_xxx", "status": "done", "total": 2, "done": 2, "ok": 1,\n    "cost_cents": 1, "created": 1786000000, "finished": 1786000008,\n    "results": [\n      { "link": "https://v.douyin.com/xxxx/", "ok": true,\n        "data": {\n          "kind": "video", "platform": "douyin", "share_supported": true,\n          "item_id": "7123456789", "title": "post title",\n          "author": "author name", "cover": "cover URL", "duration_ms": 15333,\n          "video": { "url": "Douyin official short-lived signed CDN URL",\n                     "download_url": "optional signed download URL (12h expiry)",\n                     "width": 1080, "height": 1920, "filename": "title.mp4" },\n          "stats": { "digg": 12000, "comment": 340, "collect": 89, "share": 56 },\n          "music": { "title": "bgm" }, "tags": ["tag1", "tag2"] } },\n      { "link": "https://www.xiaohongshu.com/explore/yyyy", "ok": false, "error": "link expired" }\n    ] } }',
   ep3:"Check the current key's balance and usage.",
   s3b:"Job status & result fields", st_h:"Job status (status)", th_mean:"Meaning",
+  f8:"Post title and optional body are preserved separately. Use title when content is missing or empty; this field does not contain speech transcription.",
   st1:"Accepted, waiting in queue", st2:"Running (some items started or finished)", st3:"All items settled (check per-item ok)",
   f_h:"Fields of a succeeded item's data (kind = video)", th_field:"Field",
   f0:"Detected source platform and whether this site can create a share page for the item",
