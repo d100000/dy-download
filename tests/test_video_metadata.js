@@ -158,3 +158,13 @@ test('resolution helper never invents a 720P fallback', () => {
     '读取中…');
   assert.doesNotMatch(homepage, />720P</);
 });
+
+test('missing homepage titles and captions omit the module; real captions remain escaped', () => {
+  const ctx = {esc: value => String(value).replace(/</g, '&lt;').replace(/>/g, '&gt;')};
+  vm.runInNewContext(homepage.slice(homepage.indexOf('function resultCaption'), homepage.indexOf('function extrasBlock')), ctx);
+  for (const title of [undefined, null, '', ' ', '暂无标题', '(无标题)', '（无标题）', 'Untitled']) {
+    assert.equal(ctx.resultTitleHTML({title}), '');
+  }
+  assert.equal(ctx.resultTitleHTML({title:'暂无标题', content:'真实正文'}), '<div class="v-title">真实正文</div>');
+  assert.equal(ctx.resultTitleHTML({title:'<img>'}), '<div class="v-title">&lt;img&gt;</div>');
+});

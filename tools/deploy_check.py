@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import sqlite3
 import stat
 from urllib import request
@@ -98,11 +97,6 @@ def main():
                       or (Path(args.data_dir) / '.app-secret').is_file())
         checks.append({'id': 'signing_key', 'status': 'PASS' if stable else 'WARN',
                        'detail': '仅检查密钥来源存在；还须确认服务使用同一密钥且已备份'})
-        binary = (os.environ.get('DOUYIN_BROWSER_BIN') or shutil.which('chromium')
-                  or shutil.which('google-chrome-stable') or shutil.which('google-chrome'))
-        available = bool(binary and os.path.isfile(binary) and os.access(binary, os.X_OK))
-        checks.append({'id': 'browser_binary', 'status': 'WARN',
-                       'detail': '已找到浏览器；仍需后台检查真实启动' if available else '未找到浏览器，请在运行环境核对'})
     print(json.dumps({'expected_version': expected, 'checks': checks,
                       'scope': '只读预检；不代表主服务鉴权、完整下载、微信或计费实测通过'},
                      ensure_ascii=False, indent=2))

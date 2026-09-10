@@ -248,6 +248,9 @@
     "分享页不存在或已删除，请重新生成分享页": "This share was not found or was deleted. Create a new share link.",
     "分享链接已过期，请重新生成分享页": "This share link has expired. Create a new share link.",
     "分享内容暂不可下载，请稍后重试": "This shared content cannot be downloaded right now. Please try again later.",
-    "分享内容已变化，请刷新页面后再试": "This shared content has changed. Refresh the page and try again."
+    "分享内容已变化，请刷新页面后再试": "This shared content has changed. Refresh the page and try again.",
+    "在抖音查看原作品 ↗": "View original on Douyin ↗",
+    "在 TikTok 查看原作品 ↗": "View original on TikTok ↗",
+    "内容版权归原作者所有。本站保存作品信息，不保存视频或图片文件。": "Content belongs to its original creator. We store post details, not video or image files."
   }
 }

@@ -34,14 +34,12 @@ import queue
 import random
 import re
 import secrets
-import signal
 import shutil
 import socket
 import sqlite3
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -59,7 +57,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.30.0"
+APP_VERSION = "1.31.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -3382,29 +3380,24 @@ ATC_PLATFORM_HOSTS = {
 # webmssdk 在浏览器上下文生成的动态签名，服务端用 urllib 直接拼 URL 会得到
 # 空响应或风控页。主解析缺失信息或失败时，使用以下官方补充链路：
 #
-#   短链 → 官方作品页（受控 Chromium，捕获 detail JSON）→ 原生字段归一化
+#   短链 → 官方作品页 HTTP 响应（SSR / JSON-LD）→ 原生字段归一化
 #   → 短时 CDN 地址（仅内存缓存）→ 同源 Range 流（播放/下载兜底）
 #
-# 不依赖第三方解析 API，也不伪造 ``a_bogus``/``x-secsdk`` 签名。没有浏览器
-# 的部署仍会尝试解析官方 SSR/JSON-LD 元数据；若官方没有返回媒体地址，会给出
+# 此为主解析后的 HTTP 补全/备用路径，不启动浏览器，也不伪造平台签名。
+# 若官方 HTTP 响应没有返回媒体地址，会给出
 # 可重试的 503，而不会把“只有标题”的结果冒充成可下载视频。
 
 DOUYIN_WORK_HOST_SUFFIXES = ("douyin.com", "iesdouyin.com")
 DOUYIN_MEDIA_CACHE_TTL = _clamped_env_int(
     "DOUYIN_MEDIA_CACHE_TTL", 300, 30, 1800)
-DOUYIN_BROWSER_TIMEOUT = _clamped_env_int(
-    "DOUYIN_BROWSER_TIMEOUT", 35, 8, 90)
-DOUYIN_BROWSER_START_TIMEOUT = _clamped_env_int(
-    "DOUYIN_BROWSER_START_TIMEOUT", 8, 3, 30)
 _douyin_media_cache: dict = {}       # item_id -> {url, urls, fetched_at, expires_at}
 _douyin_note_media_cache: dict = {}  # item_id -> {urls, fetched_at, expires_at}
 _douyin_result_cache: dict = {}      # item_id -> (timestamp, normalized result)
 _douyin_media_lock = threading.RLock()
 _douyin_item_locks: dict = {}
 _douyin_item_locks_guard = threading.Lock()
-_douyin_browser_lock = threading.Lock()
-_douyin_browser_proxy_cache: dict = {}
-_douyin_browser_proxy_lock = threading.RLock()
+_douyin_media_proxy_cache: dict = {}
+_douyin_media_proxy_lock = threading.RLock()
 
 
 @contextmanager
@@ -3566,247 +3559,13 @@ def _douyin_resolve_share_url(short_url: str) -> tuple[str, str, str]:
     raise ApiError(404, "未能从抖音短链得到作品 ID，请确认链接未过期")
 
 
-class _CDPConnection:
-    """极小的 Chrome DevTools Protocol WebSocket 客户端（仅标准库）。
-
-    生产镜像不必安装 websocket/Playwright 依赖；协议只用到文本帧、ping/pong
-    和关闭帧。连接生命周期严格限制在一次解析内，浏览器 profile 也会被删除。
-    """
-
-    def __init__(self, ws_url: str, timeout: float = 10):
-        parsed = urlparse.urlsplit(ws_url)
-        if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
-            raise ValueError("invalid CDP websocket URL")
-        if parsed.scheme == "wss":
-            raise ValueError("wss CDP endpoints are not supported")
-        self.sock = socket.create_connection(
-            (parsed.hostname, parsed.port or 80), timeout=timeout)
-        self.sock.settimeout(timeout)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = (
-            f"GET {parsed.path or '/'}{('?' + parsed.query) if parsed.query else ''} HTTP/1.1\r\n"
-            f"Host: {parsed.hostname}:{parsed.port or 80}\r\n"
-            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n")
-        self.sock.sendall(request.encode("ascii"))
-        response = b""
-        while b"\r\n\r\n" not in response and len(response) < 65536:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                break
-            response += chunk
-        if not response.startswith(b"HTTP/1.1 101"):
-            self.close()
-            raise OSError("CDP websocket handshake failed")
-        self._next_id = 0
-        self._pending_messages = []
-
-    def _read_exact(self, size: int) -> bytes:
-        out = bytearray()
-        while len(out) < size:
-            chunk = self.sock.recv(size - len(out))
-            if not chunk:
-                raise EOFError("CDP websocket closed")
-            out.extend(chunk)
-        return bytes(out)
-
-    def _send_frame(self, opcode: int, payload: bytes = b"") -> None:
-        length = len(payload)
-        if length < 126:
-            header = bytes((0x80 | opcode, 0x80 | length))
-        elif length < (1 << 16):
-            header = bytes((0x80 | opcode, 0x80 | 126)) + struct.pack(">H", length)
-        else:
-            header = bytes((0x80 | opcode, 0x80 | 127)) + struct.pack(">Q", length)
-        mask = os.urandom(4)
-        masked = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-        self.sock.sendall(header + mask + masked)
-
-    def send_json(self, value: dict) -> None:
-        self._send_frame(0x1, json.dumps(value, separators=(",", ":")).encode("utf-8"))
-
-    def recv_json(self, use_pending: bool = True) -> dict:
-        """读取一条 CDP 消息。
-
-        ``command`` 发送请求后必须绕过旧事件队列直接读 socket；否则在页面
-        导航期间积压的大量 Network 事件会把刚返回的 command response 挡在
-        队列末尾，表现为 Target.attach/Network.getResponseBody 超时。
-        """
-        if use_pending and self._pending_messages:
-            return self._pending_messages.pop(0)
-        fragments = []
-        while True:
-            first, second = self._read_exact(2)
-            opcode = first & 0x0F
-            fin = bool(first & 0x80)
-            masked = bool(second & 0x80)
-            length = second & 0x7F
-            if length == 126:
-                length = struct.unpack(">H", self._read_exact(2))[0]
-            elif length == 127:
-                length = struct.unpack(">Q", self._read_exact(8))[0]
-            mask = self._read_exact(4) if masked else b""
-            payload = self._read_exact(length) if length else b""
-            if masked:
-                payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload))
-            if opcode == 0x8:
-                raise EOFError("CDP websocket closed")
-            if opcode == 0x9:
-                self._send_frame(0xA, payload)
-                continue
-            if opcode in (0x1, 0x0):
-                fragments.append(payload)
-                if fin:
-                    return json.loads(b"".join(fragments).decode("utf-8"))
-            elif opcode == 0xA:
-                continue
-
-    def command(self, method: str, params: Optional[dict] = None,
-                session_id: str = "", timeout: float = 10) -> dict:
-        self._next_id += 1
-        ident = self._next_id
-        message = {"id": ident, "method": method}
-        if params is not None:
-            message["params"] = params
-        if session_id:
-            message["sessionId"] = session_id
-        self.send_json(message)
-        # 先检查此前暂存的事件中是否已经有本次响应（例如上一个 command
-        # 读取过头）；正常情况下响应会直接从 socket 到达。
-        for index, queued in enumerate(self._pending_messages):
-            if queued.get("id") == ident:
-                self._pending_messages.pop(index)
-                if "error" in queued:
-                    raise RuntimeError(str(queued["error"]))
-                return queued.get("result") or {}
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            # 不经过 pending FIFO，避免事件洪峰饿死 command response。
-            message = self.recv_json(use_pending=False)
-            if message.get("id") == ident:
-                if "error" in message:
-                    raise RuntimeError(str(message["error"]))
-                return message.get("result") or {}
-            if len(self._pending_messages) < 2048:
-                self._pending_messages.append(message)
-        raise TimeoutError("CDP command timed out")
-
-    def close(self) -> None:
-        try:
-            self._send_frame(0x8, b"")
-        except Exception:
-            pass
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-
-
-def _douyin_browser_binary() -> str:
-    configured = (os.environ.get("DOUYIN_BROWSER_BIN") or "").strip()
-    candidates = [configured] if configured else []
-    candidates.extend([
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome",
-        "/usr/bin/chromium", "/usr/bin/chromium-browser",
-    ])
-    for name in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser"):
-        found = shutil.which(name)
-        if found:
-            candidates.append(found)
-    for candidate in candidates:
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return ""
-
-
-def _douyin_browser_enabled() -> bool:
-    value = (os.environ.get("DOUYIN_BROWSER_ENABLED", "auto") or "auto").strip().lower()
-    if value in ("0", "false", "no", "off"):
-        return False
-    if value in ("1", "true", "yes", "on"):
-        return True
-    return bool(_douyin_browser_binary())
-
-
-def _free_local_port() -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-    finally:
-        sock.close()
-
-
-def _douyin_browser_proxy_candidate(proxy: dict):
-    """把一条代理转成 Chromium 参数；不支持的记录返回 None。"""
-    try:
-        parsed = urlparse.urlsplit(str(proxy.get("url") or ""))
-        if not parsed.hostname or parsed.port is None:
-            return None
-        scheme = (parsed.scheme or "http").lower()
-        scheme = {"socks5h": "socks5", "socks4a": "socks4"}.get(scheme, scheme)
-        if scheme not in ("http", "https", "socks4", "socks5"):
-            return None
-        # Chromium supports HTTP(S) proxy authentication through Fetch events.
-        # A managed mihomo mixed-port accepts both protocols, so use HTTP for
-        # the browser while retaining the original URL for urllib media fetches.
-        browser_scheme = "http" if proxy.get("managed") and scheme.startswith("socks") else scheme
-        if ((parsed.username or parsed.password)
-                and browser_scheme not in ("http", "https")):
-            return None
-        host = parsed.hostname
-        if ":" in host and not host.startswith("["):
-            host = f"[{host}]"
-        return proxy, f"{browser_scheme}://{host}:{int(parsed.port)}"
-    except (TypeError, ValueError):
-        return None
-
-
-def _douyin_browser_proxy_choices() -> list:
-    """按代理池策略返回有界的 Chromium 出口候选。"""
-    choices = []
-    for proxy in proxy_mgr.candidates()[:max(1, proxy_mgr.retries)]:
-        candidate = _douyin_browser_proxy_candidate(proxy)
-        if candidate:
-            choices.append(candidate)
-    if not proxy_mgr.force_proxy:
-        choices.append(None)  # 管理员显式允许时，所有代理失败后才直连。
-    return choices or [False]
-
-
-def _douyin_browser_proxy():
-    """兼容旧调用；完整解析链会迭代 ``_douyin_browser_proxy_choices``。"""
-    return _douyin_browser_proxy_choices()[0]
-
-
-def _douyin_browser_credentials(proxy: Optional[dict], proxy_arg: str):
-    """Extract bounded proxy credentials for CDP, never for process arguments."""
-    if not proxy or not proxy_arg:
-        return None
-    try:
-        parsed = urlparse.urlsplit(str(proxy.get("url") or ""))
-        scheme = urlparse.urlsplit(proxy_arg).scheme.lower()
-        if scheme not in ("http", "https") or not parsed.username:
-            return None
-        user = urlparse.unquote(parsed.username)
-        password = urlparse.unquote(parsed.password or "")
-        if (not user or len(user) > 256 or len(password) > 256
-                or any(ch in user or ch in password for ch in "\r\n")):
-            return None
-        return user, password
-    except (TypeError, ValueError):
-        return None
-
-
-def _douyin_browser_proxy_for_item(item_id: str) -> Optional[dict]:
-    with _douyin_browser_proxy_lock:
-        record = _douyin_browser_proxy_cache.get(str(item_id))
+def _douyin_media_proxy_for_item(item_id: str) -> Optional[dict]:
+    with _douyin_media_proxy_lock:
+        record = _douyin_media_proxy_cache.get(str(item_id))
         if not isinstance(record, dict):
             return None
         if float(record.get("expires_at") or 0) <= time.time():
-            _douyin_browser_proxy_cache.pop(str(item_id), None)
+            _douyin_media_proxy_cache.pop(str(item_id), None)
             return None
         value = record.get("proxy")
         if not isinstance(value, dict):
@@ -3816,259 +3575,28 @@ def _douyin_browser_proxy_for_item(item_id: str) -> Optional[dict]:
         active = any(p.get("enabled") and str(p.get("url") or "") == url
                      for p in list(proxy_mgr.proxies))
         if not active:
-            _douyin_browser_proxy_cache.pop(str(item_id), None)
+            _douyin_media_proxy_cache.pop(str(item_id), None)
             return None
         return dict(value)
 
 
-def _remember_douyin_browser_proxy(item_id: str, proxy: Optional[dict]) -> None:
-    with _douyin_browser_proxy_lock:
+def _remember_douyin_media_proxy(item_id: str, proxy: Optional[dict]) -> None:
+    with _douyin_media_proxy_lock:
         if proxy:
-            _douyin_browser_proxy_cache[str(item_id)] = {
+            _douyin_media_proxy_cache[str(item_id)] = {
                 "proxy": dict(proxy),
                 "expires_at": time.time() + max(DOUYIN_MEDIA_CACHE_TTL, 300),
             }
-            if len(_douyin_browser_proxy_cache) > 2048:
+            if len(_douyin_media_proxy_cache) > 2048:
                 oldest = sorted(
-                    _douyin_browser_proxy_cache.items(),
+                    _douyin_media_proxy_cache.items(),
                     key=lambda pair: float(pair[1].get("expires_at") or 0))
-                for key, _ in oldest[:len(_douyin_browser_proxy_cache) - 1536]:
-                    _douyin_browser_proxy_cache.pop(key, None)
+                for key, _ in oldest[:len(_douyin_media_proxy_cache) - 1536]:
+                    _douyin_media_proxy_cache.pop(key, None)
         else:
-            _douyin_browser_proxy_cache.pop(str(item_id), None)
+            _douyin_media_proxy_cache.pop(str(item_id), None)
 
 
-def _douyin_browser_extract_once(item_id: str, kind: str,
-                                 proxy_choice) -> Optional[dict]:
-    """使用一个已验证出口启动隔离 Chromium 并捕获 detail JSON。"""
-    browser_proxy, proxy_arg = proxy_choice or (None, "")
-    browser_credentials = _douyin_browser_credentials(browser_proxy, proxy_arg)
-    # A malformed/unsafe credential must never turn into an unauthenticated
-    # request when the deployment requires a proxy.  In non-forced mode the
-    # caller may still use the direct official page path.
-    if browser_proxy and (browser_proxy.get("url") or "").find("@") >= 0 \
-            and not browser_credentials and proxy_mgr.force_proxy:
-        return None
-    if not _douyin_browser_lock.acquire(timeout=max(1, DOUYIN_BROWSER_TIMEOUT)):
-        return None
-    profile = None
-    process = None
-    conn = None
-    try:
-        binary = _douyin_browser_binary()
-        if not binary:
-            return None
-        profile = tempfile.mkdtemp(prefix="douyin-browser-")
-        port = _free_local_port()
-        command = [
-            binary, "--headless=new", "--disable-gpu", "--no-sandbox",
-            "--disable-dev-shm-usage", "--disable-extensions", "--disable-sync",
-            "--disable-background-networking", "--disable-blink-features=AutomationControlled",
-            "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}",
-            "--proxy-bypass-list=<-loopback>;127.0.0.1;localhost",
-            f"--user-data-dir={profile}",
-        ]
-        if proxy_arg:
-            command.append(f"--proxy-server={proxy_arg}")
-        command.append("about:blank")
-        process = subprocess.Popen(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True)
-        version = None
-        start_deadline = time.monotonic() + DOUYIN_BROWSER_START_TIMEOUT
-        while time.monotonic() < start_deadline and process.poll() is None:
-            try:
-                with urlreq.urlopen(
-                        f"http://127.0.0.1:{port}/json/version", timeout=0.5) as response:
-                    version = json.loads(response.read().decode("utf-8", "ignore"))
-                break
-            except Exception:
-                time.sleep(0.08)
-        if not isinstance(version, dict) or not version.get("webSocketDebuggerUrl"):
-            return None
-        conn = _CDPConnection(version["webSocketDebuggerUrl"], timeout=5)
-        target_id = conn.command("Target.createTarget", {"url": "about:blank"}).get("targetId")
-        if not target_id:
-            return None
-        attached = conn.command("Target.attachToTarget",
-                                {"targetId": target_id, "flatten": True})
-        session_id = attached.get("sessionId") or ""
-        if not session_id:
-            return None
-        conn.command("Network.enable", {}, session_id)
-        conn.command("Page.enable", {}, session_id)
-        if browser_credentials:
-            # Fetch is enabled only for authenticated proxy sessions.  Every
-            # paused request is immediately continued below; auth challenges
-            # receive credentials in the CDP channel, never in a URL/header.
-            conn.command("Fetch.enable", {
-                "handleAuthRequests": True,
-                "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-            }, session_id)
-        try:
-            conn.command("Network.setCacheDisabled", {"cacheDisabled": True}, session_id)
-            conn.command("Network.setBlockedURLs", {"urls": [
-                "*://*.douyinvod.com/*", "*://*.douyincdn.com/*",
-                "*://*.ibytedtos.com/*",
-            ]}, session_id)
-        except Exception:
-            pass
-        conn.command("Page.navigate", {"url": _douyin_work_url(kind, item_id)},
-                     session_id, timeout=15)
-        pending = {}
-        deadline = time.monotonic() + DOUYIN_BROWSER_TIMEOUT
-
-        def decode_response(request_id: str):
-            for _ in range(2):
-                try:
-                    body_result = conn.command(
-                        "Network.getResponseBody", {"requestId": request_id},
-                        session_id, timeout=8)
-                    body = body_result.get("body") or ""
-                    if body_result.get("base64Encoded"):
-                        body = base64.b64decode(body).decode("utf-8", "replace")
-                    if not body or len(body) > 8 * 1024 * 1024:
-                        return None
-                    payload = json.loads(body)
-                    if not isinstance(payload, dict):
-                        return None
-                    detail = payload.get("aweme_detail")
-                    return detail if isinstance(detail, dict) else payload
-                except Exception:
-                    time.sleep(0.05)
-            return None
-
-        while time.monotonic() < deadline:
-            try:
-                message = conn.recv_json()
-            except socket.timeout:
-                # CDP socket has a short read timeout so a quiet page does not
-                # block shutdown forever; a slow official response may still
-                # arrive before the overall browser deadline.
-                continue
-            if message.get("sessionId") != session_id:
-                continue
-            method = message.get("method")
-            params = message.get("params") or {}
-            if method == "Fetch.authRequired":
-                request_id = str(params.get("requestId") or "")
-                challenge = params.get("authChallenge") or {}
-                if request_id:
-                    source = str(challenge.get("source") or "").lower()
-                    auth_response = "Default"
-                    auth_params = {"response": auth_response}
-                    if source == "proxy" and browser_credentials:
-                        auth_params = {
-                            "response": "ProvideCredentials",
-                            "username": browser_credentials[0],
-                            "password": browser_credentials[1],
-                        }
-                    try:
-                        # CDP names this field authChallengeResponse (not
-                        # authChallenge); the latter is the challenge received
-                        # in the event and makes authenticated proxies hang.
-                        conn.command("Fetch.continueWithAuth", {
-                            "requestId": request_id,
-                            "authChallengeResponse": auth_params,
-                        }, session_id, timeout=5)
-                    except Exception:
-                        pass
-                continue
-            if method == "Fetch.requestPaused":
-                request_id = str(params.get("requestId") or "")
-                if request_id:
-                    try:
-                        conn.command("Fetch.continueRequest",
-                                     {"requestId": request_id},
-                                     session_id, timeout=5)
-                    except Exception:
-                        pass
-                continue
-            if method == "Network.responseReceived":
-                response = params.get("response") or {}
-                response_url = str(response.get("url") or "")
-                try:
-                    parsed_url = urlparse.urlsplit(response_url)
-                    host = (parsed_url.hostname or "").lower().rstrip(".")
-                    path = parsed_url.path.lower()
-                except Exception:
-                    host, path = "", ""
-                official_host = any(
-                    host == suffix or host.endswith("." + suffix)
-                    for suffix in ("douyin.com", "iesdouyin.com", "snssdk.com"))
-                if (not official_host
-                        or ("/aweme/v1/web/aweme/detail" not in path
-                            and "/aweme/v1/aweme/detail" not in path)
-                        or int(response.get("status") or 0) != 200):
-                    continue
-                request_id = params.get("requestId")
-                if request_id:
-                    pending[str(request_id)] = True
-            elif method == "Network.loadingFinished":
-                request_id = str(params.get("requestId") or "")
-                if request_id not in pending:
-                    continue
-                pending.pop(request_id, None)
-                payload = decode_response(request_id)
-                if payload is not None:
-                    _remember_douyin_browser_proxy(item_id, browser_proxy)
-                    return payload
-        for request_id in list(pending)[:4]:
-            payload = decode_response(request_id)
-            if payload is not None:
-                _remember_douyin_browser_proxy(item_id, browser_proxy)
-                return payload
-        return None
-    except Exception:
-        return None
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        if process is not None:
-            try:
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGTERM)
-            except Exception:
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
-            try:
-                process.wait(timeout=3)
-            except Exception:
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-        if profile:
-            shutil.rmtree(profile, ignore_errors=True)
-        _douyin_browser_lock.release()
-
-
-def _douyin_browser_extract(item_id: str, kind: str = "video") -> Optional[dict]:
-    """迭代代理池候选；单个坏代理不再让整次官方解析失败。"""
-    if (not re.fullmatch(r"\d{8,30}", str(item_id or ""))
-            or not _douyin_browser_enabled()):
-        _parse_event("official", "browser_missing", "warn")
-        return None
-    for index, proxy_choice in enumerate(_douyin_browser_proxy_choices()):
-        if proxy_choice is False:
-            continue
-        if index:
-            proxy_mgr.note_retry()
-        _parse_event("network", "proxy" if proxy_choice else "direct", attempt=index + 1)
-        payload = _douyin_browser_extract_once(item_id, kind, proxy_choice)
-        if payload is not None:
-            return payload
-        _parse_event("official", "browser_empty", "warn", attempt=index + 1)
-    return None
 
 def _douyin_extract_json_after(text: str, marker: str):
     """从脚本标记后提取一个平衡的 JSON 对象/数组。"""
@@ -4142,8 +3670,8 @@ def _douyin_fetch_html(kind: str, item_id: str) -> tuple[str, list]:
             timeout=20)
         if used_proxy:
             # SSR/JSON-LD 里的签名媒体也可能绑定抓取时出口；
-            # 与 Chromium 链路一样固定后续图片/视频请求。
-            _remember_douyin_browser_proxy(item_id, used_proxy)
+            # 固定后续图片/视频请求的代理出口。
+            _remember_douyin_media_proxy(item_id, used_proxy)
         try:
             raw = response.read(4 * 1024 * 1024)
         except TypeError:
@@ -4408,10 +3936,10 @@ def _sweep_douyin_memory() -> None:
             if len(cache) > 2048:
                 for key in list(cache)[:len(cache) - 1536]:
                     cache.pop(key, None)
-    with _douyin_browser_proxy_lock:
-        for item_id, record in list(_douyin_browser_proxy_cache.items()):
+    with _douyin_media_proxy_lock:
+        for item_id, record in list(_douyin_media_proxy_cache.items()):
             if float(record.get("expires_at") or 0) <= now:
-                _douyin_browser_proxy_cache.pop(item_id, None)
+                _douyin_media_proxy_cache.pop(item_id, None)
     # 作者浮层只是短时富化缓存，不得随作品数无界增长。
     for item_id, (ts, _) in list(_author_cache.items()):
         if now - ts > 3600:
@@ -4625,7 +4153,7 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
     if direct_url:
         _douyin_cache_media(
             item_id, all_video_urls,
-            proxy=_douyin_browser_proxy_for_item(item_id))
+            proxy=_douyin_media_proxy_for_item(item_id))
     # 即使当前响应没有 URL，也提供受签名保护的刷新端点；端点会重新走官方网页。
     video["proxy_url"] = _douyin_video_proxy_url(item_id)
     video["download_url"] = _douyin_video_download_url(item_id, filename)
@@ -4660,17 +4188,9 @@ def _parse_douyin_item_direct(kind: str, item_id: str,
             # 视频/图集 CDN 签名已过期：不能把 result cache 中的旧 URL
             # 重新缓存，继续向下走官方网页捕获新签名。
 
-        _parse_event("official", "browser")
-        payload = _douyin_browser_extract(item_id, kind)
-        result = _douyin_native_result(
-            payload, work_url or _douyin_work_url(kind, item_id), item_id, kind) if payload else None
-        if result and (result.get("kind") == "note"
-                       or (result.get("video") or {}).get("media_available")):
-            _douyin_result_cache[item_id] = (time.time(), result)
-            return result
-
-        # 没有 Chromium 时仍解析官方页面中的 SSR/JSON-LD；这些字段足够展示
-        # 标题、作者、封面和统计，但不把缺媒体结果标成“可下载”。
+        # Only read structured metadata already present in the HTTP response.
+        # Do not start a browser or wait for client-side scripts/challenges.
+        result = None
         try:
             _parse_event("official", "html")
             _, payloads = _douyin_fetch_html(kind, item_id)
@@ -5151,10 +4671,53 @@ def _refresh_share(row: dict) -> dict:
             conn.close()
 
 
+def _share_original_url(row: dict, data: dict) -> str:
+    """Expose only a public work URL, never share text, tracking or media URLs.
+
+    Read saved sources for older hashed IDs without resolving links over the network.
+    The caller must check that the share is accessible before calling this helper.
+    """
+    item_id = str(row.get("item_id") or "")
+    platform_name = str(data.get("platform") or ("douyin" if data.get("source")
+                        in ("douyin", "douyin_direct", "douyin_web") else "")).lower()
+    candidates = [row.get("source_url"), data.get("original_url"),
+                  data.get("_link"), data.get("work_url")]
+    if item_id:
+        candidates.append(_saved_parse_source(item_id))
+    for candidate in candidates:
+        try:
+            link = _normalize_parse_source(str(candidate or ""))
+            url = urlparse.urlsplit(link)
+            if (url.scheme not in ("http", "https") or url.username or url.password
+                    or url.port not in (None, 80, 443)):
+                continue
+            host = (url.hostname or "").lower()
+            kind, real_id = _douyin_item_from_url(link)
+            if platform_name != "tiktok" and host in (
+                    "douyin.com", "www.douyin.com", "www.iesdouyin.com", "iesdouyin.com") and real_id:
+                return _douyin_work_url(kind, real_id)
+            if platform_name != "tiktok" and host == "v.douyin.com" and re.fullmatch(r"/[\w-]+/?", url.path):
+                return "https://v.douyin.com" + url.path
+            if platform_name != "douyin" and host in ("www.tiktok.com", "tiktok.com") and re.fullmatch(
+                    r"/@[\w.-]+/video/\d{8,30}/?", url.path):
+                return "https://www.tiktok.com" + url.path
+            if platform_name != "douyin" and host in ("vm.tiktok.com", "vt.tiktok.com") and re.fullmatch(r"/[\w-]+/?", url.path):
+                return "https://" + host + url.path
+        except (ValueError, TypeError):
+            continue
+    if platform_name == "douyin" and re.fullmatch(r"\d{8,30}", item_id):
+        return _douyin_work_url(row.get("kind") or "video", item_id)
+    return ""
+
+
 def _share_view(row: dict, origin: str = "") -> dict:
     """把 shares 行转成分享页要用的数据结构（含重拼后的播放地址）。"""
     data = json.loads(row["payload"] or "{}")
     state = _share_state(row)
+    original_url = _share_original_url(row, data) if state == "ok" else ""
+    data.pop("original_url", None)
+    if original_url:
+        data["original_url"] = original_url
     cfg = _atc_cfg() if state == "ok" else {
         "enabled": False, "play_enhance": False,
         "url_ttl": 0, "play_priority": ["atc", "proxy", "dy1", "dy2"]}
@@ -5709,10 +5272,6 @@ def _record_metadata_failure(stage: str) -> None:
     code = "metadata_unavailable"
     if proxy_mgr.force_proxy and not proxy_mgr.candidates():
         code = "proxy_required"
-    elif stage == "metadata" and not _douyin_browser_binary():
-        code = "browser_missing"
-    elif stage == "metadata" and not _douyin_browser_enabled():
-        code = "browser_disabled"
     with _metadata_retry_lock:
         _metadata_last_failure.update(at=int(time.time()), stage=stage, code=code)
 
@@ -9387,7 +8946,7 @@ def _open_douyin_image_upstream(item_id: str, index: int):
                 "retry_http_statuses": (408, 425, 429, 500, 502, 503, 504),
                 "ban_on_auth_error": False,
             }
-            pinned_proxy = _douyin_browser_proxy_for_item(item_id)
+            pinned_proxy = _douyin_media_proxy_for_item(item_id)
             if pinned_proxy:
                 kwargs["proxy_override"] = pinned_proxy
             resp, _ = open_url(upstream, **kwargs)
@@ -9440,9 +8999,9 @@ def _open_douyin_video_upstream(item_id: str, headers: dict, validator=None):
             resp = None
             accepted = False
             try:
-                # CDN 签名可能绑定生成时的出口 IP；浏览器抓取时若使用了
+                # CDN 签名可能绑定生成时的出口 IP；HTTP 抓取时若使用了
                 # 代理，媒体请求也固定到同一出口，避免首个 Range 直接 403。
-                pinned_proxy = _douyin_browser_proxy_for_item(item_id)
+                pinned_proxy = _douyin_media_proxy_for_item(item_id)
                 open_kwargs = {
                     "headers": headers,
                     "retry_http_statuses": (408, 425, 429, 500, 502, 503, 504),
@@ -9481,10 +9040,10 @@ def _open_douyin_video_upstream(item_id: str, headers: dict, validator=None):
                     raise ApiError(416, "请求范围超出媒体长度", headers_out)
                 _close_upstream(exc)
             except ApiError as exc:
-                # Chromium 抓取与媒体请求若使用了不同代理出口，CDN 可能
+                # HTTP 抓取与媒体请求若使用了不同代理出口，CDN 可能
                 # 返回鉴权/网关错误；清掉绑定后让下一轮重新选择出口。
                 if pinned_proxy and exc.status in (401, 403, 502, 503):
-                    _remember_douyin_browser_proxy(item_id, None)
+                    _remember_douyin_media_proxy(item_id, None)
                     continue
                 raise
             except Exception:
@@ -10413,11 +9972,7 @@ def _incomplete_share_samples() -> dict:
 
 
 def _function_check_environment() -> dict:
-    binary = _douyin_browser_binary()
     checks = [_check_item("version", "pass", "version", FRONTEND_VERSION)]
-    checks.append(_check_item("browser", "pending" if binary and _douyin_browser_enabled() else "fail",
-                              "browser_found" if binary and _douyin_browser_enabled() else
-                              "browser_disabled" if binary else "browser_missing"))
     cfg = _atc_cfg()
     configured = bool(cfg["enabled"] and cfg["key"] and cfg["secret"])
     checks.append(_check_item("parser", "pending" if configured else "warn",
@@ -10450,54 +10005,6 @@ def _check_error_code(exc: Exception) -> str:
     reason = getattr(exc, "reason", "")
     return {"auth": "parser_auth", "entitlement": "parser_entitlement",
             "busy": "parser_busy"}.get(reason, "request_failed")
-
-
-def _function_browser_probe() -> bool:
-    """沿用正式补全的 CDP 启动方式；不依赖会被子进程管道拖住的 dump-dom。"""
-    binary = _douyin_browser_binary()
-    if not binary or not _douyin_browser_enabled():
-        return False
-    with tempfile.TemporaryDirectory(prefix="douyin-check-") as profile:
-        port = _free_local_port()
-        proc = subprocess.Popen([
-            binary, "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
-            "--disable-gpu", "--disable-background-networking", "--disable-extensions",
-            "--no-first-run", f"--user-data-dir={profile}",
-            "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}", "about:blank",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-        conn = None
-        try:
-            deadline = time.monotonic() + DOUYIN_BROWSER_START_TIMEOUT
-            version = None
-            while time.monotonic() < deadline and proc.poll() is None:
-                try:
-                    with urlreq.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=.5) as response:
-                        version = json.loads(response.read(65536))
-                    break
-                except Exception:
-                    time.sleep(.08)
-            if not isinstance(version, dict) or not version.get("webSocketDebuggerUrl"):
-                return False
-            conn = _CDPConnection(version["webSocketDebuggerUrl"], timeout=2)
-            target = conn.command("Target.createTarget", {"url": "about:blank"}, timeout=3)
-            attached = conn.command("Target.attachToTarget", {
-                "targetId": target["targetId"], "flatten": True}, timeout=3)
-            result = conn.command("Runtime.evaluate", {
-                "expression": "document.documentElement.tagName", "returnByValue": True,
-            }, attached["sessionId"], timeout=3)
-            return (result.get("result") or {}).get("value") == "HTML"
-        finally:
-            if conn is not None:
-                conn.close()
-            try:
-                os.killpg(proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait(timeout=2)
 
 
 def _function_media_probe(data: dict) -> dict:
@@ -10575,14 +10082,6 @@ def _function_check_worker(work_url: str, sid: str) -> None:
             _function_check_record("repair", "warn" if result["missing"] else "pass",
                                    "repair_partial" if result["missing"] else "repair_ok", result)
             return
-        _function_check_record("browser", "running", "browser_running")
-        try:
-            ok = _function_browser_probe()
-            code = ("browser_ok" if ok else "browser_missing" if not _douyin_browser_binary()
-                    else "browser_disabled" if not _douyin_browser_enabled() else "browser_failed")
-            _function_check_record("browser", "pass" if ok else "fail", code)
-        except Exception:
-            _function_check_record("browser", "fail", "browser_failed")
         primary, native = None, None
         _function_check_record("parser", "running", "parser_running")
         try:
@@ -11193,8 +10692,6 @@ def _health_loop():
 
 @app.on_event("startup")
 def _start_health():
-    if not _douyin_browser_binary() or not _douyin_browser_enabled():
-        print("⚠ 官方元数据补全缺少可用浏览器；请在管理后台的功能检查中查看依赖与修复提示。", flush=True)
     # 崩溃遗留的网页配额先退款；API 作业先恢复/对账，再清理过期明细。
     # cleanup 放在 legacy recovery 后，避免提前删掉旧 api_logs 导致无法重建已结算项。
     _prepare_share_parse_jobs()

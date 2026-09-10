@@ -333,7 +333,7 @@ class DownloadRefreshTests(unittest.TestCase):
         self.assertNotIn('test-secret', response.text)
 
     def save_snapshot(self):
-        data = {'item_id': self.item_id, 'kind': 'video', 'platform': 'douyin',
+        data = {'item_id': self.item_id, 'kind': 'video', 'platform': 'tiktok' if 'tiktok.com' in self.work_url else 'douyin',
                 'source': 'parser', 'title': '已保存的标题', 'author': '作者',
                 'stats': {'digg': 0, 'comment': 12}, 'video': {'source': 'parser',
                 'url': self.old_url, 'filename': 'original.mp4'}}
@@ -367,7 +367,9 @@ class DownloadRefreshTests(unittest.TestCase):
             view = server.api_share_get(share['sid'], make_request())
         self.assertEqual(view['title'], '自定义标题')
         self.assertEqual(view['data']['stats']['comment'], 12)
-        self.assertNotIn(self.work_url, json.dumps(view))
+        self.assertEqual(view['data']['original_url'], self.work_url)
+        self.assertNotIn('source_url', view['data'])
+        self.assertNotIn('_link', view['data'])
         self.assertEqual(self.submit().status_code, 202)
 
     def test_official_snapshot_reuses_refreshed_primary_media_on_next_visit(self):

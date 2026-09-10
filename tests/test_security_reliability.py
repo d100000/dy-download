@@ -94,15 +94,6 @@ def clear_billing():
 
 
 class StaticRegressionTests(unittest.TestCase):
-    def test_chromium_proxy_auth_uses_cdp_response_field(self):
-        source = Path("server.py").read_text("utf-8")
-        self.assertIn('"authChallengeResponse": auth_params', source)
-        self.assertNotIn('"authChallenge": auth_params', source)
-        self.assertEqual(
-            server._douyin_browser_credentials(
-                {"url": "http://alice:p%40ss@proxy.example:8080"},
-                "http://proxy.example:8080"),
-            ("alice", "p@ss"))
 
     def test_homepage_platform_logos_are_local_and_allowlisted(self):
         html = Path("static/index.html").read_text("utf-8")
@@ -2518,15 +2509,6 @@ class HardeningRegressionTests(unittest.TestCase):
             server._stop_atc_workers()
         self.assertFalse(any(thread.is_alive() for thread in server._atc_threads))
 
-    def test_chromium_setup_failure_releases_global_lock(self):
-        with mock.patch.object(server, "_douyin_browser_binary",
-                               return_value="/bin/true"), \
-                mock.patch.object(server.tempfile, "mkdtemp",
-                                  side_effect=OSError("disk full")):
-            self.assertIsNone(server._douyin_browser_extract_once(
-                "7123456789012345678", "video", None))
-        self.assertTrue(server._douyin_browser_lock.acquire(blocking=False))
-        server._douyin_browser_lock.release()
 
     def test_short_link_200_body_is_not_misread_as_self_redirect(self):
         item_id = "7123456789012345678"

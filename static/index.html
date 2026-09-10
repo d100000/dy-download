@@ -1161,7 +1161,7 @@ function renderBatch(count, fails){
     return `<tr>
       <td class="bt-idx tnum">${i+1}</td>
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
-      <td class="bt-title"><div class="bt-t">${esc(d.title)}</div><div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||uiText('未知'))}</div>${engagementHTML(d.stats)}</td>
+      <td class="bt-title">${resultTitleHTML(d, 'bt-t')}<div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||uiText('未知'))}</div>${engagementHTML(d.stats)}</td>
       <td><span class="bt-tag">${isNote?uiText('图集'):uiText('视频')}</span></td>
       <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,uiText('待读取'))}</td>
       <td class="bt-ops">
@@ -1247,7 +1247,7 @@ function openPlayer(i){
   }
   const body = m.querySelector('.pm-body');
   if (d.kind === 'note'){
-    body.innerHTML = `<div class="pm-title">${esc(d.title)}</div>${engagementHTML(d.stats)}<div class="pm-imgs">${
+    body.innerHTML = `${resultTitleHTML(d, 'pm-title')}${engagementHTML(d.stats)}<div class="pm-imgs">${
       (d.images||[]).map(im=>`<img src="${esc(albumImageSrc(im))}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
     const canDownload = Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video?.download_url || d.video?.proxy_url);
@@ -1259,7 +1259,7 @@ function openPlayer(i){
       data-read-metadata="1" data-batch-index="${i}"
       onerror="videoProxyFallback(this)"
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
-      <div class="pm-title">${esc(d.title)}</div>
+      ${resultTitleHTML(d, 'pm-title')}
       <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,uiText('读取中…'))}</span><span data-video-resolution>${videoResolutionText(d.video,uiText('读取中…'))}</span></div>
       ${engagementHTML(d.stats)}
       <div class="pm-act">${canDownload
@@ -1366,6 +1366,14 @@ function engagementHTML(stats){
   return items.length
     ? `<dl class="engagement-row" data-count="${items.length}" aria-label="${LANG === 'en' ? 'Engagement' : '互动数据'}">${items.join('')}</dl>`
     : '';
+}
+function resultCaption(d){
+  const meaningful = value => typeof value === 'string' && !['','（无标题）','(无标题)','暂无标题','无标题','Untitled','No title'].includes(value.trim()) ? value.trim() : '';
+  return meaningful(d.title) || meaningful(d.content);
+}
+function resultTitleHTML(d, className='v-title'){
+  const title = resultCaption(d);
+  return title ? `<div class="${className}">${esc(title)}</div>` : '';
 }
 function extrasBlock(d){
   let h = '';
@@ -2099,7 +2107,7 @@ function videoHTML(d){
       </div>
       <div class="info">
         <span class="badge">${esc(platform)} · ${uiText('视频 · 无水印')}</span>
-        <div class="v-title">${esc(d.title)}</div>
+        ${resultTitleHTML(d)}
         ${authorRow(d)}
         <div class="meta-row">
           <div class="meta-item"><div class="k" data-ui="时长">时长</div><div class="v${hasDuration?'':' is-pending'}" data-video-duration>${videoDurationText(d.duration_ms)}</div></div>
@@ -2114,7 +2122,7 @@ function videoHTML(d){
             ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)" data-ui="⬇ 下载视频">⬇ 下载视频</button>`
             : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}
           ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
-          <button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>
+          ${resultCaption(d) ? '<button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>' : ''}
         </div>
         <div class="ts-box" data-item="${esc(d.item_id)}">
           <div class="ts-head">
@@ -2138,14 +2146,14 @@ function albumHTML(d){
     <div class="album-head">
       <div class="info" style="gap:10px">
         <span class="badge">${esc(platform)} · ${uiText('图集 · {count} 张原图', {count: imgs.length})}</span>
-        <div class="v-title">${esc(d.title)}</div>
+        ${resultTitleHTML(d)}
         ${authorRow(d)}
         ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
         ${engagementHTML(d.stats)}
         ${extrasBlock(d)}
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>
+        ${resultCaption(d) ? '<button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>' : ''}
         ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
         <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadAlbumAll(this)" data-ui="⬇ 下载全部">⬇ 下载全部</button>
       </div>

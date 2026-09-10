@@ -44,14 +44,13 @@ class FunctionChecksTests(unittest.TestCase):
                 r = client.request(method, path, json=body)
                 self.assertIn(r.status_code, (401, 403))
 
-    def test_environment_reports_missing_browser_and_strict_empty_pool(self):
-        with mock.patch.object(server, '_douyin_browser_binary', return_value=''), \
-                mock.patch.object(server.proxy_mgr, 'candidates', return_value=[]), \
+    def test_environment_needs_no_browser_and_reports_strict_empty_pool(self):
+        with mock.patch.object(server.proxy_mgr, 'candidates', return_value=[]), \
                 mock.patch.object(type(server.proxy_mgr), 'force_proxy', new_callable=mock.PropertyMock, return_value=True), \
                 mock.patch.object(server, '_atc_cfg', return_value={'enabled': True, 'key': 'secret-key', 'secret': 'secret-value'}):
             result = server._function_check_environment()
         checks = {x['id']: x for x in result['checks']}
-        self.assertEqual(checks['browser']['code'], 'browser_missing')
+        self.assertNotIn('browser', checks)
         self.assertEqual(checks['proxy']['code'], 'proxy_required')
         self.assertEqual(checks['parser']['status'], 'pending')
         self.assertNotIn('secret-key', json.dumps(result))
@@ -184,8 +183,7 @@ class FunctionChecksTests(unittest.TestCase):
 
     def test_worker_reports_primary_failure_separately_from_successful_fallback(self):
         native = dict(self.full, source='douyin_direct')
-        with mock.patch.object(server, '_function_browser_probe', return_value=True), \
-                mock.patch.object(server, '_atc_extract', side_effect=server._ParserServiceError(503, 'hidden', reason='auth')), \
+        with mock.patch.object(server, '_atc_extract', side_effect=server._ParserServiceError(503, 'hidden', reason='auth')), \
                 mock.patch.object(server, '_douyin_resolve_share_url', return_value=('video', '7670572727590577894', self.url)), \
                 mock.patch.object(server, '_parse_douyin_item_direct', return_value=native), \
                 mock.patch.object(server, '_function_media_probe', return_value=server._check_item('media','pass','media_byte_ok')):

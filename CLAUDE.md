@@ -22,7 +22,7 @@ docker build -t douyin-dl . && docker run -p 3344:8000 -e ADMIN_PASSWORD=a-stron
 页面：`/` 下载器 · `/transcript` 文案提取落地页 · `/api-docs` API 文档 · `/api-console` 用户 API 控制台 · `/admin_d` 管理后台（隐藏入口，首页不暴露） · `/s/{sid}` 分享页。
 站点级路由（改站点文案/新增可收录页面时要一并同步）：`/robots.txt`、`/llms.txt`、`/sitemap.xml`、`/og.svg`（内联 SVG 卡片图）、`/og.png`（`static/og.png` 位图，微信/多数抓取器不渲染 SVG，卡片兜底必须用它）。
 
-依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。抖音官方完整视频链路还需要系统可执行的 Chrome/Chromium（可用 `DOUYIN_BROWSER_BIN` 指定）；没有浏览器时只尝试官方 SSR/JSON-LD 元数据，不能保证返回媒体地址。仓库 Dockerfile 已安装 `/usr/bin/chromium`，裸机部署需自行安装浏览器或设置 `DOUYIN_BROWSER_BIN`；运行依赖通过 requirements-lock.txt 固定兼容版本；测试依赖见 requirements-dev.txt，统一入口 tools/test.sh，以包名发现测试，不要使用缺少 -t . 的 unittest discover。新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
+依赖刻意保持最小：`fastapi` / `uvicorn` / `PySocks`（socks 代理）/ `openpyxl`（批量导出 xlsx）/ `segno`（分享页二维码），**无 requests**。v1.31.0 起删除服务端浏览器抓取和 CDP，仅通过官方 HTTP 响应的 SSR/JSON-LD 补全；不保证官方返回全部信息/媒体，缺失不阻塞主服务已有媒体。Docker 不再安装浏览器，DOUYIN_BROWSER_* 配置已移除。运行依赖通过 requirements-lock.txt 固定兼容版本；测试依赖见 requirements-dev.txt，统一入口 tools/test.sh，以包名发现测试，不要使用缺少 -t . 的 unittest discover。新增任何运行时需要的文件（静态资源、模板）必须确保它在 `static/` 内且已提交，否则容器里 404/500。
 
 测试在 `tests/`（命令见上），改安全/计费/配额/媒体流/前端下载播放相关代码后必须跑：`test_security_reliability.py` 是后端套件（覆盖媒体签名与 Range/流租约、代理健康、原子配额、持久化计费、隐私存储、按平台解析与主动文案模式、播放日志及文案回归；导入 `server` 前已设临时 `DATA_DIR`/`MIHOMO_OFF=1`，不碰真实 `data/`）；三个 Node 测试（`test_download_flow.js`、`test_share_playback.js`、`test_video_metadata.js`）会把 `static/index.html`、`static/share.html`、`oss/static/index.html` 里的 JS 按**锚点字符串**（`function downloadTarget`、`let _playSession = 0;` 等）切出来在 vm 里跑——改前端下载/播放代码时必须保留锚点或同步更新测试。本地回归必须使用独立空闲端口和独立 `DATA_DIR`，不得把用户正在查看的端口切换到另一份测试数据库；服务重启需保留原数据目录和 `.app-secret`，否则存量分享将 404、旧签名将 403。测试不能替代真实链接实测：解析服务和源平台随时可变，改解析逻辑必须手动跑服务验证。无 lint 配置。`/healthz` 可做存活探针（含 `version` 字段）。
 
@@ -82,6 +82,8 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 
 ### 分享页（`/s/{sid}`）
 
+分享页正文不展示作品标题、文案、作者/资料/标签；保留媒体、可用互动数、媒体信息与原作品跳转。标题等元数据仍存于后台供下载文件名、社交卡片等用途。首页结果缺少标题/文案时不显示占位模块或复制文案按钮。
+
 把抖音和 TikTok 视频链接变成"微信里点开就能看"的页面。规划见 [docs/分享页功能规划.md](docs/分享页功能规划.md)。
 
 同样**不落地任何媒体字节**：`shares` 表只存净化后的元数据快照，抖音短时媒体地址和刷新所需的官方作品链接留在受保护列 / 内存缓存中，不进入公开 payload；其他平台的短时地址保存在 `atc_cache`。成功解析通过 `_remember_parse_result()` 把完整展示数据写入 `parse_snapshots`（24 小时 TTL，每 5 分钟清理），作者补充资料同步保存到有效快照；已生成分享仍按自身有效期保存。分享页读取不得调用上游或 `_atc_enqueue()`，媒体仅在播放/下载时按需刷新；不要恢复访问时自动刷新/轮询媒体的旧逻辑。`_parse_share()` 处理新短链，`_parse_item(kind,item_id)` 处理存量分享页刷新：主服务优先，抖音缺失信息走官方补全；升级前已存的 `vid` 仅作为历史兼容数据处理，不得成为新解析的旁路。
@@ -137,7 +139,7 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 
 ### 来源存储与播放续期
 
-`parse_snapshots.source_url/canonical_url` 单独保存从原输入提取的分享链接与可用的原平台作品链接，抖音作品规范化到无追踪参数的 video/note URL；不保存整段分享文案。公开 payload 继续移除内部来源与临时媒体签名。解析快照保留 24 小时，创建分享时把来源复制到 `shares.source_url`，随分享自身有效期保留；启动迁移从旧 `atc_cache.work_url` 补空来源。`_saved_source_in_conn()` 只恢复有效记录，刷新只改媒体缓存，不延长分享有效期、不重新计费、不清空完整元数据。
+`parse_snapshots.source_url/canonical_url` 单独保存从原输入提取的分享链接与可用的原平台作品链接，抖音作品规范化到无追踪参数的 video/note URL；不保存整段分享文案。公开 payload 继续移除内部来源与临时媒体签名，仅正常可访问的分享由 `_share_original_url()` 提供去追踪参数、限抖音/TikTok 作品地址的 `original_url` 供跳转；不得暴露原始分享文案、任意外链或失效/下架分享的来源。解析快照保留 24 小时，创建分享时把来源复制到 `shares.source_url`，随分享自身有效期保留；启动迁移从旧 `atc_cache.work_url` 补空来源。`_saved_source_in_conn()` 只恢复有效记录，刷新只改媒体缓存，不延长分享有效期、不重新计费、不清空完整元数据。
 
 分享页下载前通过 `refreshShareDownloadData()` 重读 `/api/share/{sid}`，只更新媒体字段与签名，不重复解析或扣次；404/过期/下架禁止继续使用旧地址，下载按钮全流程防连点。分享页 `prepareShareMedia()` 打开时仅加载媒体元数据，有效不调用解析；无地址、error 或 12 秒未读到元数据时复用有界下载刷新任务。播放错误先续期一次，再走已有备用线路。首页/批量预览同样按需续期，不能自动播放原本暂停的视频，也不能让迟到响应修改已替换的视频元素。中英提示使用 `uiText()`，新状态测试在 `test_playback_refresh.js` 与 `test_share_playback.js`。
 
@@ -151,7 +153,7 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 
 ### 环境变量
 
-`ADMIN_PASSWORD`(本地默认 douyin-admin；Docker 必填强密码) · `REQUIRE_ADMIN_PASSWORD`(Docker 默认 1，密码缺失/过短/默认值时拒绝启动) · `DATA_DIR`(默认 `data`) · `APP_SECRET`(可选；未设则原子生成 `data/.app-secret`) · `CAPTCHA_SECRET`(旧部署兼容/可单独覆盖) · `DATA_RETENTION_DAYS`(1–30，默认 30) · `FREE_ANON_DAILY`(3) · `FREE_USER_DAILY`(10) · `QUOTA_RESERVATION_TTL`(3600 秒) · `NEW_KEY_BALANCE`(每用户仅首 Key 试用余额，分) · `API_JOB_WORKERS`(2) · `API_JOB_LEASE_SECONDS`(600) · `API_JOB_HEARTBEAT_SECONDS`(30) · `MEDIA_TOKEN_TTL`(43200) · `MEDIA_REQUESTS_PER_MIN`(120) · `MEDIA_MAX_CONCURRENT`(6) · `IMAGE_REQUESTS_PER_MIN`(240) · `IMAGE_MAX_BYTES`(50 MiB) · `ATC_WORKERS`(1) · `PARSE_TEXT_MAX`(8192) · `BATCH_TEXT_MAX`(65536) · `DOUYIN_BROWSER_BIN`(Chrome/Chromium 可执行文件，可选) · `DOUYIN_BROWSER_ENABLED`(auto/1/0) · `DOUYIN_BROWSER_TIMEOUT` · `DOUYIN_BROWSER_START_TIMEOUT` · `TRUST_PROXY` · `TRUST_PROXY_HOPS`(1) · `COOKIE_SECURE` · `SHARE_DOMAINS`(分享域名池，逗号分隔) · `SHARE_TTL_ANON_DAYS`(7) · `SHARE_TTL_USER_DAYS`(30) · `MIHOMO_VERSION` / `MIHOMO_DL_BASE` / `MIHOMO_OFF`(内置内核版本/下载源/总开关) · `HOST`(run.sh 默认 127.0.0.1) · `PORT`(仅 `run.sh` 用)。
+`ADMIN_PASSWORD`(本地默认 douyin-admin；Docker 必填强密码) · `REQUIRE_ADMIN_PASSWORD`(Docker 默认 1，密码缺失/过短/默认值时拒绝启动) · `DATA_DIR`(默认 `data`) · `APP_SECRET`(可选；未设则原子生成 `data/.app-secret`) · `CAPTCHA_SECRET`(旧部署兼容/可单独覆盖) · `DATA_RETENTION_DAYS`(1–30，默认 30) · `FREE_ANON_DAILY`(3) · `FREE_USER_DAILY`(10) · `QUOTA_RESERVATION_TTL`(3600 秒) · `NEW_KEY_BALANCE`(每用户仅首 Key 试用余额，分) · `API_JOB_WORKERS`(2) · `API_JOB_LEASE_SECONDS`(600) · `API_JOB_HEARTBEAT_SECONDS`(30) · `MEDIA_TOKEN_TTL`(43200) · `MEDIA_REQUESTS_PER_MIN`(120) · `MEDIA_MAX_CONCURRENT`(6) · `IMAGE_REQUESTS_PER_MIN`(240) · `IMAGE_MAX_BYTES`(50 MiB) · `ATC_WORKERS`(1) · `PARSE_TEXT_MAX`(8192) · `BATCH_TEXT_MAX`(65536) · `TRUST_PROXY` · `TRUST_PROXY_HOPS`(1) · `COOKIE_SECURE` · `SHARE_DOMAINS`(分享域名池，逗号分隔) · `SHARE_TTL_ANON_DAYS`(7) · `SHARE_TTL_USER_DAYS`(30) · `MIHOMO_VERSION` / `MIHOMO_DL_BASE` / `MIHOMO_OFF`(内置内核版本/下载源/总开关) · `HOST`(run.sh 默认 127.0.0.1) · `PORT`(仅 `run.sh` 用)。
 
 **运行时可改的配置不走环境变量**：API 单价、微信公众号密钥、机场订阅、分享主域名、AnyToCopy 服务都在 `app_settings` 表（`api_price_cents` / `wx_appid` / `wx_secret` / `mihomo_sub_url` / `share_primary_domain` / `atc_api_key` / `atc_api_secret` / `atc_enabled` / `atc_transcript_enabled` / `atc_transcript_daily` / `atc_url_ttl` / `share_play_priority`，`atc_base_url` / `atc_play_enhance` 仅保留旧库兼容；后台改、即时生效）。AnyToCopy 基址固定为 `ATC_DEFAULT_BASE`，不能由后台覆盖，防止凭据发往非预期主机。代理列表与轮换策略在 `data/config.json`。新增"运营要随时调"的开关优先进 `app_settings` + 后台，而不是加环境变量。
 

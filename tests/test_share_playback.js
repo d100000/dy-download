@@ -261,27 +261,27 @@ test('share metadata only renders available video fields and supports albums', (
   assert.equal(c.metadataBlock({duration_ms: 1000, video: {width: 1920, height: 1080}}), '');
 });
 
-test('author profile uses saved fields, escapes text and rejects unsafe profile links', () => {
-  const c = metadataHarness();
-  assert.equal(c.profileBlock({}), '');
-  const profile = c.profileBlock({author_detail: {follower_count: 0, total_favorited: 620201, signature: '<script>evil</script>'}});
-  assert.match(profile, /<dt>粉丝<\/dt><dd>0<\/dd>/);
-  assert.match(profile, /620,201/);
-  assert.match(profile, /&lt;script&gt;/);
-  assert.doesNotMatch(profile, /<script>/);
-  assert.doesNotMatch(c.authorBlock({author_url: 'javascript:alert(1)'}), /href=/);
-  assert.doesNotMatch(c.authorBlock({author_url: 'https://user:secret@example.com'}), /href=/);
-  assert.match(c.authorBlock({author_url: 'https://www.douyin.com/user/abc'}), /作者主页/);
-});
-
-test('custom share titles keep the full original caption and tags available', () => {
+test('share body omits titles, captions and author information even when available', () => {
   const c = metadataHarness();
   const title = '完整文案'.repeat(200) + '<img>';
-  assert.match(c.captionBlock({title}), /原作品文案/);
-  assert.ok(c.captionBlock({title}).includes('完整文案'.repeat(200)));
-  assert.doesNotMatch(c.captionBlock({title}), /<img>/);
-  const tags = Array.from({length: 12}, (_, i) => 'tag' + i);
-  assert.match(c.extraBlock({tags}), /#tag11/);
+  const body = c.captionBlock({title, content:'正文', author:'作者'});
+  assert.doesNotMatch(body, /完整文案|正文|作者|复制文案|原作品文案/);
+  const render = html.slice(html.indexOf('function render(){'), html.indexOf('let _playSession ='));
+  assert.doesNotMatch(render, /class="title"|authorBlock|profileBlock|extraBlock|S\.author/);
+});
+
+test('original work button rejects unsafe and mismatched URLs, missing addresses hide it', () => {
+  const c = metadataHarness();
+  for (const url of ['', 'javascript:alert(1)', 'https://evil.test/video/12345678',
+    'https://www.douyin.com.evil.test/video/12345678', 'https://user:pass@www.douyin.com/video/12345678',
+    'https://www.douyin.com:8443/video/12345678', 'https://www.douyin.com/user/person',
+    'https://www.douyin.com/video/12345678?token=private', 'https://v3.douyinvod.com/video/12345678']) {
+    assert.doesNotMatch(c.captionBlock({original_url:url}), /href=/);
+  }
+  const url = 'https://www.douyin.com/note/7677684373646753142';
+  assert.match(c.captionBlock({original_url:url, platform:'douyin'}), /在抖音查看原作品/);
+  assert.match(c.captionBlock({original_url:url}), /target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(c.captionBlock({original_url:url, platform:'tiktok'}), /href=/);
 });
 
 test('ready shares read metadata snapshots and separately check media availability', () => {
@@ -317,10 +317,10 @@ test('English TikTok share counts and metadata preserve zero and original captio
   assert.match(counts, /<dt>Comments<\/dt><dd>0/);
   assert.doesNotMatch(counts, /<dt>Shares|<dt>Saves/);
   assert.match(c.metadataBlock({duration_ms: 12000}), /Duration/);
-  assert.match(c.authorBlock({platform: 'tiktok'}), /TikTok · Video creator/);
   const original_url = 'https://www.tiktok.com/@creator/video/6718335390845095173';
   const caption = c.captionBlock({title:'原始中文标题 #标签', original_url});
-  assert.ok(caption.includes('原始中文标题 #标签'));
+  assert.ok(!caption.includes('原始中文标题 #标签'));
+  assert.match(caption, /View original on TikTok/);
   assert.ok(caption.includes(original_url));
   assert.doesNotMatch(caption, /douyin.com/);
 });
