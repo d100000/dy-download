@@ -18,6 +18,9 @@
 
 import base64
 from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
+import inspect
 import gzip
 import hashlib
 import hmac
@@ -47,7 +50,7 @@ from urllib import error as urlerr
 from urllib import parse as urlparse
 from urllib import request as urlreq
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response, StreamingResponse)
 from pydantic import BaseModel, Field, StrictInt
@@ -56,7 +59,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.29.2"
+APP_VERSION = "1.30.0"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -184,6 +187,20 @@ DB_FILE = DATA_DIR / "app.db"
 _db_lock = threading.Lock()
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS parse_logs(
+  id TEXT PRIMARY KEY, ts INTEGER NOT NULL, updated INTEGER NOT NULL,
+  entry TEXT NOT NULL, user_id INTEGER, reference TEXT NOT NULL DEFAULT '',
+  link_hash TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT '',
+  item_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+  code TEXT NOT NULL, duration_ms INTEGER NOT NULL DEFAULT 0,
+  events TEXT NOT NULL DEFAULT '[]', missing TEXT NOT NULL DEFAULT '[]',
+  version TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_parse_logs_ts ON parse_logs(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_parse_logs_status ON parse_logs(status, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_parse_logs_user ON parse_logs(user_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_parse_logs_reference ON parse_logs(reference, ts DESC);
+
 CREATE TABLE IF NOT EXISTS usage_daily(
   day INTEGER, subject TEXT, count INTEGER DEFAULT 0,
   PRIMARY KEY(day, subject)
@@ -360,6 +377,202 @@ def db_exec(sql: str, params=(), fetch: Optional[str] = None):
             return out
         finally:
             conn.close()
+
+
+# 解析诊断采用白名单事件，不存原文、URL、凭据或异常字符串。
+_parse_trace = ContextVar("parse_trace", default=None)
+_PARSE_LOG_ENTRIES = ("web", "batch", "api", "share", "refresh", "transcript", "internal")
+_PARSE_LOG_CODES = {
+    "media_ready": ("媒体地址已更新；标题与互动数沿用已保存快照", "Media address refreshed; existing metadata snapshot retained"),
+    "transcript_ready": ("文案任务已完成", "Transcription task completed"),
+    "started": ("开始处理", "Processing started"),
+    "success": ("解析完成，核心信息完整", "Parsed with complete core metadata"),
+    "partial": ("解析成功，但仍缺少部分信息；展开查看缺失字段与补全结果", "Parsed with missing metadata; inspect supplementation steps"),
+    "failed": ("处理失败，未能获得有效结果", "Processing failed without a valid result"),
+    "interrupted": ("服务重启，处理未完成；请查看后续重试记录", "Interrupted by a restart; check subsequent attempts"),
+    "input_ok": ("已识别公开作品链接", "Public post link recognized"),
+    "invalid_input": ("输入无效或超出限制", "Invalid or oversized input"),
+    "quota_ok": ("已预留本次解析额度", "Parsing allowance reserved"),
+    "quota_denied": ("免费次数或可用余额不足，未发起解析", "No available allowance or balance; parsing not started"),
+    "quota_settled": ("解析额度已结算", "Parsing allowance settled"),
+    "quota_released": ("解析失败，已释放预留额度", "Parsing failed; reserved allowance released"),
+    "cache_hit": ("命中已有结果，检查媒体有效期与信息完整性", "Cached result found; checking freshness and metadata"),
+    "cache_miss": ("没有有效缓存，开始重新解析", "No valid cache; starting a new parse"),
+    "cache_expired": ("媒体缓存已过期，重新获取地址", "Cached media expired; refreshing the address"),
+    "cooldown": ("补全正在进行或处于冷却期，本次保留缓存信息", "Supplementation active or cooling down; retaining cached metadata"),
+    "primary_start": ("请求主解析服务", "Requesting the primary parsing service"),
+    "primary_ok": ("主解析结果已转换，继续检查缺失信息", "Primary result normalized; checking missing metadata"),
+    "submit": ("提交新的解析任务", "Submitting a new parsing task"),
+    "poll": ("查询已受理任务的结果", "Querying an accepted task"),
+    "waiting": ("任务处理中，等待下一次查询", "Task processing; waiting to query again"),
+    "retry": ("临时异常，稍后重查同一任务", "Temporary error; retrying the same task"),
+    "auth": ("主解析服务鉴权失败，请检查后台凭据", "Primary service authentication failed; check credentials"),
+    "entitlement": ("主解析服务权益或余额不足，请检查服务账户", "Primary service entitlement or balance is insufficient"),
+    "busy": ("主解析服务并发繁忙，暂不能处理", "Primary parsing service is busy"),
+    "not_configured": ("主解析服务未配置或未启用", "Primary parsing service is unconfigured or disabled"),
+    "timeout": ("处理超时，请检查网络或稍后重试", "Processing timed out; check connectivity or retry later"),
+    "network": ("连接失败，请检查网络与代理可用性", "Connection failed; check network and proxies"),
+    "response_invalid": ("服务返回格式无效或结果不完整", "Invalid response format or incomplete result"),
+    "unavailable": ("作品不可用，可能已删除、私密或链接失效", "Post unavailable; it may be deleted, private or expired"),
+    "proxy_required": ("已要求使用代理，但没有可用代理", "Proxy required but no proxy is available"),
+    "direct": ("本次平台请求使用服务器直连", "Using the server connection for this platform request"),
+    "proxy": ("本次平台请求使用代理", "Using a proxy for this platform request"),
+    "fallback": ("主解析未成功，尝试平台官方兜底", "Primary parsing failed; trying the platform fallback"),
+    "fallback_ok": ("平台官方兜底返回结果", "Platform fallback returned a result"),
+    "supplement": ("缺少作品或作者信息，尝试平台补全", "Post or author information missing; supplementing from the platform"),
+    "supplement_ok": ("平台补全结束，只合并缺失字段", "Supplementation finished; only missing fields merged"),
+    "supplement_failed": ("平台补全失败，保留已经获取的媒体与信息", "Supplementation failed; retaining available media and metadata"),
+    "metadata_complete": ("信息已完整，无需平台补全", "Metadata complete; supplementation unnecessary"),
+    "resolve": ("解析平台短链并确认真实作品 ID", "Resolving the short link and confirming the post ID"),
+    "mismatch": ("作品 ID 不匹配，放弃混合结果并重新获取原作品", "Post IDs differ; discarding mixed results and fetching the original post"),
+    "browser": ("启动浏览器读取平台作品数据", "Reading platform data through the browser"),
+    "browser_missing": ("浏览器未安装或未启用，尝试页面元数据", "Browser unavailable or disabled; trying page metadata"),
+    "browser_empty": ("浏览器未获取有效数据，可能受网络或平台限制", "Browser returned no data; network or platform restrictions may apply"),
+    "html": ("读取平台页面中的元数据", "Reading metadata from the platform page"),
+    "snapshot": ("已保存解析快照并补齐旧分享缺失字段", "Snapshot saved and missing fields in existing shares updated"),
+    "internal": ("内部处理异常；请结合最后完成的步骤排查", "Internal processing error; inspect the last completed step"),
+}
+_PARSE_LOG_STAGES = ("request", "quota", "cache", "primary", "resolve", "official", "network", "snapshot", "result")
+_PARSE_LOG_MISSING = ("title", "author", "digg", "comment", "collect", "share")
+
+
+def _parse_error_code(exc: Exception) -> str:
+    reason = getattr(exc, "reason", "")
+    if reason in _PARSE_LOG_CODES and reason != "failed":
+        return reason
+    status = getattr(exc, "status", getattr(exc, "code", None))
+    if isinstance(exc, (TimeoutError, socket.timeout)) or status in (408, 504):
+        return "timeout"
+    # 只匹配本站固定提示；异常内容绝不写入日志。
+    message = getattr(exc, "message", "")
+    if "没有可用代理" in message or "指定代理" in message:
+        return "proxy_required"
+    if status in (400, 413, 422):
+        return "invalid_input"
+    if status in (402, 429):
+        return "quota_denied"
+    if status == 404:
+        return "unavailable"
+    if isinstance(exc, (urlerr.URLError, OSError)):
+        return "network"
+    if isinstance(exc, (ValueError, TypeError)):
+        return "response_invalid"
+    return "failed" if isinstance(exc, ApiError) else "internal"
+
+
+def _parse_log_write(trace: dict) -> None:
+    # 诊断存储故障不得改变解析结果、扣费或退款。
+    try:
+        db_exec("UPDATE parse_logs SET updated=?,item_id=?,status=?,code=?,duration_ms=?,events=?,missing=? WHERE id=?",
+                (int(time.time()), trace.get("item_id", ""), trace["status"], trace["code"],
+                 max(0, int((time.monotonic() - trace["start"]) * 1000)),
+                 json.dumps(trace["events"], ensure_ascii=False),
+                 json.dumps(trace.get("missing", [])), trace["id"]))
+    except Exception:
+        pass
+
+
+def _parse_event(stage: str, code: str, level: str = "info", **details) -> None:
+    trace = _parse_trace.get()
+    if trace is None or stage not in _PARSE_LOG_STAGES or code not in _PARSE_LOG_CODES:
+        return
+    event = {"stage": stage, "code": code,
+             "level": level if level in ("info", "ok", "warn", "error") else "info",
+             "ms": max(0, int((time.monotonic() - trace["start"]) * 1000))}
+    # 仅允许诊断用整数/布尔/字段枚举；不允许任意字符串载荷。
+    for key in ("attempt", "http_status"):
+        value = details.get(key)
+        if type(value) is int and 0 <= value <= 10000:
+            event[key] = value
+    if "missing" in details:
+        event["missing"] = [x for x in details["missing"] if x in _PARSE_LOG_MISSING]
+    if details.get("reason") in _PARSE_LOG_CODES:
+        event["reason"] = details["reason"]
+    if level == "error":
+        trace["last_error"] = code
+    if len(trace["events"]) < 160:
+        trace["events"].append(event)
+    else:
+        # 保留前 159 步与最新一步，确保最终原因可见，并显式标记省略。
+        event["truncated"] = True
+        trace["events"][-1] = event
+    _parse_log_write(trace)
+
+
+@contextmanager
+def _parse_log_scope(entry: str, text: str = "", user_id=None, reference: str = "", resume=None):
+    existing = _parse_trace.get()
+    if existing is not None:
+        yield existing
+        return
+    trace = {"id": secrets.token_hex(12), "start": time.monotonic(),
+             "status": "running", "code": "started", "events": []}
+    if resume:
+        trace.update(id=resume["id"], events=json.loads(resume["events"]),
+                     start=time.monotonic() - max(0, time.time() - resume["ts"]))
+    token = _parse_trace.set(trace)
+    try:
+        try:
+            urls = _extract_supported_work_urls(text, 1)
+            platform_id = _atc_platform_for_url(urls[0]) if urls else ""
+            link_hash = _privacy_hash("parse-log-link", urls[0] if urls else text, str(_today()))
+            db_exec("INSERT OR IGNORE INTO parse_logs(id,ts,updated,entry,user_id,reference,link_hash,platform,status,code,version) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (trace["id"], int(time.time()), int(time.time()),
+                     entry if entry in _PARSE_LOG_ENTRIES else "internal",
+                     user_id if type(user_id) is int and user_id > 0 else None,
+                     reference if re.fullmatch(r"[\w:-]{1,80}", reference or "") else "",
+                     link_hash, platform_id, "running", "started", APP_VERSION))
+        except Exception:
+            pass
+        if not resume:
+            _parse_event("request", "started")
+        try:
+            yield trace
+        except Exception as exc:
+            trace.update(status="failed", code=_parse_error_code(exc))
+            _parse_event("result", trace["code"], "error")
+            raise
+        else:
+            result = trace.get("result")
+            if isinstance(result, dict) and result.get("item_id"):
+                item_id = str(result["item_id"])
+                trace["item_id"] = item_id if re.fullmatch(r"[\w-]{1,80}", item_id) else ""
+                trace["missing"] = _metadata_missing(result)
+            partial = bool(trace.get("missing"))
+            status, code = trace.get("outcome", ("partial" if partial else "success", "partial" if partial else "success"))
+            trace.update(status=status, code=code)
+            _parse_event("result", code, "error" if status == "failed" else "warn" if partial else "info" if status == "running" else "ok", missing=trace.get("missing", []))
+    finally:
+        _parse_trace.reset(token)
+
+
+def _traced_parse(entry: str):
+    """保持路由签名；嵌套解析复用同一时间线，并发请求使用独立上下文。"""
+    def decorate(fn):
+        signature = inspect.signature(fn)
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            values = signature.bind(*args, **kwargs).arguments
+            body, request = values.get("body"), values.get("request")
+            text = values.get("text", values.get("work_url", getattr(body, "text", "")))
+            user_id = None
+            if request is not None:
+                user = current_user(request)
+                user_id = user["id"] if user else None
+            with _parse_log_scope(entry, text, user_id) as trace:
+                result = fn(*args, **kwargs)
+                if isinstance(result, dict) and result.get("item_id"):
+                    trace["result"] = result
+                return result
+        return wrapped
+    return decorate
+
+
+def _logged_parse(text: str, entry: str, user_id=None, reference: str = "") -> dict:
+    with _parse_log_scope(entry, text, user_id, reference) as trace:
+        result = _parse_cached(text)
+        trace["result"] = result
+        return result
 
 
 def _privacy_hash(kind: str, value: str, scope: str = "") -> str:
@@ -1350,7 +1563,7 @@ def _cleanup_retained_data(force: bool = False) -> None:
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for table in ("request_logs", "page_views", "share_events", "api_logs"):
+            for table in ("request_logs", "page_views", "share_events", "api_logs", "parse_logs"):
                 conn.execute(f"DELETE FROM {table} WHERE ts<?", (cutoff,))
             # 投诉中的可选联系方式同样受保留期约束，不能因“未处理”而无限保存。
             conn.execute("DELETE FROM reports WHERE ts<?", (cutoff,))
@@ -2297,6 +2510,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
         if proxy_mgr.force_proxy:
             raise ApiError(503, "没有可用代理，且已开启「禁止服务器直连」——为避免暴露服务器 IP，"
                                 "不会直连抖音。请在管理后台添加并启用代理。")
+        _parse_event("network", "direct")
         r = _raw_open(url, follow, hdrs, timeout, None)
         proxy_mgr.mark_ok(None)
         return r, None
@@ -2308,6 +2522,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             proxy_mgr.note_retry()                  # 记录一次自动重试（换代理）
         t0 = time.time()
         try:
+            _parse_event("network", "proxy", attempt=i + 1)
             r = _raw_open(url, follow, hdrs, timeout, p)
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
             return r, p
@@ -3841,15 +4056,18 @@ def _douyin_browser_extract(item_id: str, kind: str = "video") -> Optional[dict]
     """迭代代理池候选；单个坏代理不再让整次官方解析失败。"""
     if (not re.fullmatch(r"\d{8,30}", str(item_id or ""))
             or not _douyin_browser_enabled()):
+        _parse_event("official", "browser_missing", "warn")
         return None
     for index, proxy_choice in enumerate(_douyin_browser_proxy_choices()):
         if proxy_choice is False:
             continue
         if index:
             proxy_mgr.note_retry()
+        _parse_event("network", "proxy" if proxy_choice else "direct", attempt=index + 1)
         payload = _douyin_browser_extract_once(item_id, kind, proxy_choice)
         if payload is not None:
             return payload
+        _parse_event("official", "browser_empty", "warn", attempt=index + 1)
     return None
 
 def _douyin_extract_json_after(text: str, marker: str):
@@ -4442,6 +4660,7 @@ def _parse_douyin_item_direct(kind: str, item_id: str,
             # 视频/图集 CDN 签名已过期：不能把 result cache 中的旧 URL
             # 重新缓存，继续向下走官方网页捕获新签名。
 
+        _parse_event("official", "browser")
         payload = _douyin_browser_extract(item_id, kind)
         result = _douyin_native_result(
             payload, work_url or _douyin_work_url(kind, item_id), item_id, kind) if payload else None
@@ -4453,6 +4672,7 @@ def _parse_douyin_item_direct(kind: str, item_id: str,
         # 没有 Chromium 时仍解析官方页面中的 SSR/JSON-LD；这些字段足够展示
         # 标题、作者、封面和统计，但不把缺媒体结果标成“可下载”。
         try:
+            _parse_event("official", "html")
             _, payloads = _douyin_fetch_html(kind, item_id)
         except ApiError:
             raise
@@ -4478,6 +4698,7 @@ def _parse_douyin_item_direct(kind: str, item_id: str,
 
 
 def _parse_douyin_share_direct(work_url: str) -> dict:
+    _parse_event("resolve", "resolve")
     kind, item_id, canonical = _douyin_resolve_share_url(work_url)
     if not item_id:
         raise ApiError(404, "未能识别抖音作品 ID")
@@ -4565,9 +4786,11 @@ def _parse_share(text: str) -> dict:
     links = _extract_supported_work_urls(text, 1)
     if not links:
         raise ApiError(400, "未找到受支持的平台链接，请粘贴公开作品分享链接")
+    _parse_event("request", "input_ok")
     return _atc_parse_work_url(links[0])
 
 
+@_traced_parse("refresh")
 def _parse_item(kind: str, item_id: str) -> dict:
     """按真实来源刷新：主服务优先，抖音缺失信息走官方补充。"""
     work_url = _saved_parse_source(item_id)
@@ -4604,11 +4827,13 @@ def _remember_parse_result(key: str, data: dict, now: float) -> dict:
         data.setdefault("video", {})["download_refresh_url"] = _video_download_refresh_url(data["item_id"])
     _save_parse_snapshot(data, source_text=key)
     _backfill_share_metadata(data)
+    _parse_event("snapshot", "snapshot", "ok")
     _cache_put(key, data, now)
     _cache_put(data["item_id"], data, now)
     return data
 
 
+@_traced_parse("internal")
 def _parse_cached(text: str) -> dict:
     key = text.strip()
     if not key:
@@ -4618,6 +4843,7 @@ def _parse_cached(text: str) -> dict:
     now = time.time()
     hit = _cache_get(key)
     if hit and now - hit[0] < CACHE_TTL:
+        _parse_event("cache", "cache_hit")
         cached_data = hit[1]
         cached_video = (cached_data.get("video")
                         if isinstance(cached_data, dict) else {})
@@ -4626,6 +4852,7 @@ def _parse_cached(text: str) -> dict:
         if (cached_source in ("atc", "parser") and cached_data.get("kind") != "note"
                 and not _atc_url_fresh(_atc_cache_get(cached_data.get("item_id")),
                                        _atc_cfg()["url_ttl"])):
+            _parse_event("cache", "cache_expired")
             hit = None
         else:
             direct_cached = (
@@ -4638,6 +4865,7 @@ def _parse_cached(text: str) -> dict:
                 else bool(_douyin_cached_media(item_id)))
             # 直连结果的短时媒体地址过期时，惰性刷新官方 detail。
             if direct_cached and not has_fresh_media:
+                _parse_event("cache", "cache_expired")
                 try:
                     refreshed = _atc_parse_work_url(
                         cached_data.get("_link") or _douyin_work_url(
@@ -4646,7 +4874,8 @@ def _parse_cached(text: str) -> dict:
                         kind_hint=cached_data.get("kind") or "video",
                     )
                     return _remember_parse_result(key, refreshed, time.time())
-                except Exception:
+                except Exception as exc:
+                    _parse_event("cache", _parse_error_code(exc), "warn")
                     # 刷新失败时只返回元数据和可再刷新的同源端点，
                     # 不能回退为结果缓存里已过期的 CDN 签名 URL。
                     safe = json.loads(json.dumps(cached_data, ensure_ascii=False))
@@ -4676,6 +4905,7 @@ def _parse_cached(text: str) -> dict:
                                 item_id, filename)
                     return safe
             return _retry_cached_metadata(key, cached_data)
+    _parse_event("cache", "cache_miss")
     data = _parse_share(text)
     return _remember_parse_result(key, data, time.time())
 
@@ -5448,12 +5678,14 @@ def _retry_cached_metadata(key: str, data: dict) -> dict:
     with _metadata_retry_lock:
         next_at, busy = _metadata_retries.get(item_id, (0, False))
         if busy or now < next_at:
+            _parse_event("official", "cooldown", "warn", missing=_metadata_missing(data))
             return data
         _metadata_retries[item_id] = (now + METADATA_RETRY_SECONDS, True)
     try:
         refreshed = _complete_douyin_result(work_url, json.loads(json.dumps(data)))
         return _remember_parse_result(key, refreshed, time.time())
-    except Exception:
+    except Exception as exc:
+        _parse_event("official", "supplement_failed", "warn", reason=_parse_error_code(exc))
         return data
     finally:
         with _metadata_retry_lock:
@@ -5897,7 +6129,7 @@ def api_share_create(body: ShareBody, request: Request):
         if not reservation["ok"]:
             raise _quota_error(reservation["limit"], reservation)
         try:
-            data = _parse_cached(body.text)
+            data = _logged_parse(body.text, "share", (current_user(request) or {}).get("id"))
         except Exception:
             release_quota(reservation)
             raise
@@ -6194,7 +6426,7 @@ def _finish_share_parse_failure(item: dict, code: str,
 
 def _run_claimed_share_parse(item: dict) -> None:
     try:
-        data = _parse_cached(item["source_url"])
+        data = _logged_parse(item["source_url"], "share", item.get("owner_user_id"), item["id"])
         _finish_share_parse_success(item, data)
     except ApiError as exc:
         if exc.status == 400:
@@ -6652,6 +6884,7 @@ ATC_MAX_POLLS = 60
 def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
     """调 ATC 开放 API；对外只抛不包含密钥/完整 URL 的稳定错误。"""
     url = cfg["base"] + path + "?" + urlparse.urlencode(params)
+    _parse_event("primary", "submit" if method == "POST" else "poll")
     req = urlreq.Request(url, method=method)
     req.add_header("X-API-Key", cfg["key"])
     req.add_header("X-API-Secret", cfg["secret"])
@@ -6660,6 +6893,7 @@ def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
         with urlreq.urlopen(req, timeout=30) as resp:
             raw = resp.read(ATC_MAX_RESPONSE_BYTES + 1)
     except urlerr.HTTPError as exc:
+        _parse_event("primary", "network", "warn", http_status=exc.code)
         exc.close()
         if exc.code in (401, 403):
             raise _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="auth")
@@ -6669,7 +6903,7 @@ def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
         raise _ParserServiceError(502, "视频解析服务连接异常，请稍后重试",
                                   retryable=exc.code >= 500)
     except (urlerr.URLError, TimeoutError, OSError):
-        raise _ParserServiceError(502, "视频解析服务连接异常，请稍后重试", retryable=True)
+        raise _ParserServiceError(502, "视频解析服务连接异常，请稍后重试", reason="network", retryable=True)
     if len(raw) > ATC_MAX_RESPONSE_BYTES:
         raise _ParserServiceError(502, "视频解析结果暂不可用，请稍后重试")
     try:
@@ -6699,9 +6933,9 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
     """提交并轮询一个 ATC 任务。普通解析不传 taskType。"""
     cfg = _atc_cfg()
     if not (cfg["key"] and cfg["secret"]):
-        raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
+        raise _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="not_configured")
     if not cfg["enabled"]:
-        raise ApiError(503, "视频解析服务暂时不可用，请稍后重试")
+        raise _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="not_configured")
     if not _atc_primary_slots.acquire(timeout=10):
         raise ApiError(503, "视频解析任务较多，请稍后重试",
                        {"Retry-After": "5"})
@@ -6734,6 +6968,7 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
             except _ParserServiceError as exc:
                 if exc.retryable:
                     poll_delay = max(ATC_POLL_INTERVAL, int(exc.headers.get("Retry-After", 0)))
+                    _parse_event("primary", "retry", "warn", reason=_parse_error_code(exc))
                     continue  # 只重查已有任务，不重复提交或重复计费。
                 raise
             data = queried.get("data") or {}
@@ -6741,6 +6976,7 @@ def _atc_extract(work_url: str, include_text: bool = False) -> dict:
                 raise ApiError(502, "视频解析结果暂不可用，请稍后重试")
             if _atc_result_complete(data, include_text=include_text):
                 return data
+            _parse_event("primary", "waiting")
         raise ApiError(504, "视频解析超时，请稍后重试")
     finally:
         _atc_primary_slots.release()
@@ -7338,13 +7574,18 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
     needs_detail = _douyin_needs_supplement(primary)
     # 图集需要真实作品 ID 才能生成受签名保护、可惰性刷新的图片端点。
     if not needs_detail and primary.get("kind") != "note":
+        _parse_event("official", "metadata_complete", "ok")
         return primary
+    _parse_event("official", "supplement", missing=_metadata_missing(primary))
     _metadata_attempt(old_id)
     stage = "resolve"
+    completed = False
     try:
+        _parse_event("resolve", "resolve")
         kind, item_id, canonical = _douyin_resolve_share_url(work_url)
         if re.fullmatch(r"\d{8,30}", old_id) and old_id != item_id:
             # 主服务返回了另一作品，不能把它的媒体、标题或作者混进当前结果。
+            _parse_event("resolve", "mismatch", "warn")
             primary, primary_author = {}, {}
             return _parse_douyin_item_direct(kind, item_id, canonical)
         if primary.get("kind") == "note" and _result_has_media(primary):
@@ -7381,7 +7622,9 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
             primary_author = _merge_missing_fields(primary_author, extra_author)
         primary_author["item_id"] = primary["item_id"]
         _author_cache[primary["item_id"]] = (time.time(), primary_author)
-    except Exception:
+        completed = True
+    except Exception as exc:
+        _parse_event("official", "supplement_failed", "warn", reason=_parse_error_code(exc))
         _record_metadata_failure(stage)
         # 补充接口受网络/风控影响时不丢弃主服务已成功的结果。
         if primary_author and old_id:
@@ -7392,21 +7635,30 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
         raise ApiError(503, "暂未获取到可用的媒体地址，请稍后重试")
     if _metadata_missing(primary):
         _record_metadata_failure(stage)
+    if completed:
+        _parse_event("official", "supplement_ok", "warn" if _metadata_missing(primary) else "ok", missing=_metadata_missing(primary))
     return primary
 
 
+@_traced_parse("internal")
 def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
                         kind_hint: str = "") -> dict:
     """统一优先级入口；仅抖音可使用当前服务器的官方补充接口。"""
     douyin = _is_douyin_work_url(work_url)
+    _parse_event("primary", "primary_start")
     try:
         data = _atc_extract(work_url, include_text=False)
         primary = _atc_result_to_parse(
             work_url, data, item_id_hint, kind_hint, allow_partial=douyin)
-    except ApiError:
+    except ApiError as exc:
+        _parse_event("primary", _parse_error_code(exc), "error")
         if not douyin:
             raise
-        return _parse_douyin_share_direct(work_url)
+        _parse_event("official", "fallback", "warn")
+        result = _parse_douyin_share_direct(work_url)
+        _parse_event("official", "fallback_ok", "ok", missing=_metadata_missing(result))
+        return result
+    _parse_event("primary", "primary_ok", "ok", missing=_metadata_missing(primary))
     return _complete_douyin_result(work_url, primary) if douyin else primary
 
 
@@ -7688,6 +7940,42 @@ def _atc_try_job_fallback(job: dict) -> bool:
         return False
 
 
+def _traced_media_job(fn):
+    @wraps(fn)
+    def wrapped(job: dict, cfg: dict):
+        if not job.get("id"):
+            return fn(job, cfg)
+        reference = f"media:{job['id']}"
+        try:
+            row = db_exec("SELECT * FROM parse_logs WHERE reference=? AND status='running' ORDER BY ts DESC LIMIT 1",
+                          (reference,), "one")
+        except Exception:
+            row = None
+        with _parse_log_scope("transcript" if job["purpose"] == "transcript" else "refresh",
+                              job.get("work_url", ""), reference=reference, resume=dict(row) if row else None) as trace:
+            value = fn(job, cfg)
+            try:
+                saved = db_exec("SELECT status FROM atc_jobs WHERE id=?", (job["id"],), "one")
+                state = saved["status"] if saved else "failed"
+            except Exception:
+                trace["outcome"] = ("interrupted", "internal")
+                return value
+            if state == "done":
+                trace["outcome"] = ("success", "transcript_ready" if job["purpose"] == "transcript" else "media_ready")
+            elif state == "failed":
+                code = ("timeout" if time.time() - job["created"] > ATC_JOB_TIMEOUT
+                        else trace.get("last_error", "failed"))
+                trace["outcome"] = ("failed", code)
+            else:
+                trace["outcome"] = ("running", "waiting")
+            item_id = str(job.get("item_id") or "")
+            if re.fullmatch(r"[\w-]{1,80}", item_id):
+                trace["item_id"] = item_id
+            return value
+    return wrapped
+
+
+@_traced_media_job
 def _atc_submit_claimed(job: dict, cfg: dict) -> None:
     now = int(time.time())
     if now - int(job["created"]) > ATC_JOB_TIMEOUT:
@@ -7713,6 +8001,7 @@ def _atc_submit_claimed(job: dict, cfg: dict) -> None:
             return
         raise _atc_rejected(resp, "任务提交")
     except Exception as exc:
+        _parse_event("primary", _parse_error_code(exc), "error")
         if isinstance(exc, _ParserServiceError) and exc.reason == "busy":
             # 明确拒绝受理才重新提交；连接中断不盲目重发，避免生成重复任务。
             _atc_claim_update(job, "pending", error="解析请求较多，排队重试中")
@@ -7725,6 +8014,7 @@ def _atc_submit_claimed(job: dict, cfg: dict) -> None:
             error=exc.message if isinstance(exc, ApiError) else "任务提交失败，请稍后重试")
 
 
+@_traced_media_job
 def _atc_poll_claimed(job: dict, cfg: dict) -> None:
     now = int(time.time())
     completed_payload = False
@@ -7746,6 +8036,7 @@ def _atc_poll_claimed(job: dict, cfg: dict) -> None:
         else:
             _atc_claim_update(job, "submitted", error=None)
     except Exception as exc:
+        _parse_event("primary", _parse_error_code(exc), "error")
         if completed_payload:
             _atc_claim_update(job, "failed", error="暂未获取到作品内容，请稍后重试")
             return
@@ -8049,17 +8340,21 @@ def _quota_error(limit: int, reservation: Optional[dict] = None):
 
 
 @app.post("/api/parse")
+@_traced_parse("web")
 def api_parse(body: ParseBody, request: Request):
     reservation = reserve_quota(request, 1, endpoint="parse")
     if not reservation["ok"]:
         raise _quota_error(reservation["limit"], reservation)
+    _parse_event("quota", "quota_ok", "ok")
     try:
         data = _parse_cached(body.text)
     except Exception:
         release_quota(reservation)
+        _parse_event("quota", "quota_released", "ok")
         log_request(request, "web", body.text[:100], False)
         raise
     settle_quota(reservation, 1)
+    _parse_event("quota", "quota_settled", "ok")
     log_request(request, "web", body.text[:100], True)
     return data
 
@@ -8286,7 +8581,7 @@ def _finish_job_item(item: dict, ok: bool, data: Optional[dict] = None,
 
 def _run_claimed_job_item(item: dict) -> None:
     try:
-        data = _parse_cached(item["link"])
+        data = _logged_parse(item["link"], "api", item.get("user_id"), f'{item["job_id"]}:{item["idx"]}')
     except ApiError as e:
         _finish_job_item(item, False, error_message=e.message)
     except Exception as e:
@@ -8791,7 +9086,7 @@ def api_parse_batch(body: BatchBody, request: Request):
     out, spent = [], 0
     for l in process:
         try:
-            out.append({"ok": True, "link": l, "data": _parse_cached(l)})
+            out.append({"ok": True, "link": l, "data": _logged_parse(l, "batch", (current_user(request) or {}).get("id"))})
             spent += 1
             log_request(request, "web", l, True)
         except ApiError as e:
@@ -9991,6 +10286,84 @@ def admin_toggle_user(uid: int, body: UserToggleBody, request: Request):
     return {"ok": True}
 
 
+def _parse_log_public(row, detail: bool = False) -> dict:
+    record = dict(row)
+    code = record.get("code")
+    record["code"] = code if code in _PARSE_LOG_CODES else "internal"
+    record["entry"] = record["entry"] if record["entry"] in _PARSE_LOG_ENTRIES else "internal"
+    record["status"] = record["status"] if record["status"] in ("running", "success", "partial", "failed", "interrupted") else "failed"
+    try:
+        record["missing"] = [x for x in json.loads(record["missing"]) if x in _PARSE_LOG_MISSING]
+    except (ValueError, TypeError):
+        record["missing"] = []
+    raw_events = record.pop("events", "[]")
+    if detail:
+        try:
+            events = json.loads(raw_events)
+        except (ValueError, TypeError):
+            events = []
+        record["events"] = []
+        for event in (events if isinstance(events, list) else [])[:160]:
+            if not isinstance(event, dict) or event.get("code") not in _PARSE_LOG_CODES:
+                continue
+            safe = {"code": event["code"], "stage": event.get("stage") if event.get("stage") in _PARSE_LOG_STAGES else "result",
+                    "level": event.get("level") if event.get("level") in ("ok", "info", "warn", "error") else "info"}
+            for key in ("ms", "attempt", "http_status"):
+                if type(event.get(key)) is int and 0 <= event[key] <= 86400000:
+                    safe[key] = event[key]
+            safe["missing"] = [x for x in event.get("missing", []) if x in _PARSE_LOG_MISSING] if isinstance(event.get("missing", []), list) else []
+            if event.get("reason") in _PARSE_LOG_CODES:
+                safe["reason"] = event["reason"]
+            if event.get("truncated") is True:
+                safe["truncated"] = True
+            record["events"].append(safe)
+    return record
+
+
+@app.get("/api/admin/parse-logs")
+def admin_parse_logs(request: Request, page: int = Query(1, ge=1, le=100000),
+                     size: int = Query(20, ge=1, le=100),
+                     status: str = Query("", max_length=20),
+                     entry: str = Query("", max_length=20),
+                     search: str = Query("", max_length=80),
+                     user_id: int = Query(0, ge=0),
+                     since: int = Query(0, ge=0)):
+    _require_admin(request)
+    if status and status not in ("running", "success", "partial", "failed", "interrupted"):
+        raise ApiError(400, "无效的日志状态")
+    if entry and entry not in _PARSE_LOG_ENTRIES:
+        raise ApiError(400, "无效的解析入口")
+    where, params = ["ts>=?"], [max(since, int(time.time()) - DATA_RETENTION_DAYS * 86400)]
+    for col, value in (("status", status), ("entry", entry), ("user_id", user_id)):
+        if value:
+            where.append(f"{col}=?")
+            params.append(value)
+    if search.strip():
+        # 字面包含检索；不把 %/_ 当通配符，不接收原始分享文本。
+        where.append("(instr(id,?)>0 OR instr(item_id,?)>0 OR instr(reference,?)>0 OR link_hash=?)")
+        params.extend([search.strip()] * 4)
+    condition = " AND ".join(where)
+    total = db_exec(f"SELECT count(*) FROM parse_logs WHERE {condition}", tuple(params), "one")[0]
+    rows = db_exec("SELECT id,ts,updated,entry,user_id,reference,link_hash,platform,item_id,status,code,duration_ms,missing,version "
+                   f"FROM parse_logs WHERE {condition} ORDER BY ts DESC,rowid DESC LIMIT ? OFFSET ?",
+                   tuple(params) + (size, (page - 1) * size), "all")
+    return JSONResponse({"logs": [_parse_log_public(row) for row in rows], "total": total,
+                         "page": page, "size": size, "retention_days": DATA_RETENTION_DAYS,
+                         "messages": _PARSE_LOG_CODES}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/admin/parse-logs/{log_id}")
+def admin_parse_log_detail(log_id: str, request: Request):
+    _require_admin(request)
+    if not re.fullmatch(r"[a-f0-9]{24}", log_id):
+        raise ApiError(404, "解析日志不存在或已清理")
+    row = db_exec("SELECT * FROM parse_logs WHERE id=? AND ts>=?", (log_id, int(time.time()) - DATA_RETENTION_DAYS * 86400), "one")
+    if row is None:
+        raise ApiError(404, "解析日志不存在或已清理")
+    return JSONResponse({"log": _parse_log_public(row, detail=True), "messages": _PARSE_LOG_CODES},
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/admin/logs/web")
 def admin_web_logs(request: Request, limit: int = 100):
     _require_admin(request)
@@ -10829,6 +11202,7 @@ def _start_health():
     _prepare_api_jobs()
     _prepare_atc_jobs()
     _cleanup_retained_data(force=True)
+    db_exec("UPDATE parse_logs SET status='interrupted',code='interrupted',updated=? WHERE status='running'", (int(time.time()),))
     # 所有可能阻断 startup 的迁移/清理完成后才启动非 daemon worker，避免半启动悬挂。
     _start_share_parse_workers(prepared=True)
     _start_api_job_workers(prepared=True)

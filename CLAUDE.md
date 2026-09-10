@@ -170,3 +170,7 @@ SQLite 在 `data/app.db`（WAL），所有访问经 `db_exec()` + 全局 `_db_lo
 `docs/产品文档.md`：解析方案的实测记录、抖音六层限制机制与代理池对策。`docs/软件介绍.md`：功能全貌与架构概述。`docs/分享页功能规划.md`：分享页的产品方案、微信兼容专项与待实测清单。`docs/商业化与产品规划.md`：三视角商业化方案。`docs/机场代理接入.md`：机场订阅（vmess/trojan 等）无法直接入池，用 mihomo 边车落地成本地 socks5 端口再加进代理池的部署方案。
 
 最新部署步骤与只读预检：`docs/项目部署文档.md`、`tools/deploy_check.py`；模板位于 `deploy/`。微信签名票据刷新与凭据编辑共用 `_wx_ticket_lock`，更改 AppID 或 AppSecret 均清除缓存；公开接口在网络/上游响应异常时中性降级，不返回异常原文。
+
+### 管理员解析时间线
+
+`parse_logs` 保存每次解析的有界白名单事件；`_parse_log_scope` + ContextVar 隔离并发，嵌套调用复用记录，网页/批量/API/分享入口保留自身入口标识。后台媒体与文案提交/轮询通过 `_traced_media_job` 复用运行中记录。日志写入失败不能影响解析、计费和退款；不得记录异常原文、完整链接、分享文本或请求头。新增阶段/原因必须同时补 `_PARSE_LOG_CODES` 中英词条，并保持 `_parse_log_public` 读取白名单净化。保留期清理和启动中断标记必须保留。相关测试 `test_parse_logs.py` / `test_parse_logs_ui.js`。

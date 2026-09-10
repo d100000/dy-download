@@ -189,6 +189,18 @@ th.sortable:hover{color:var(--text)}
 .check-share button{flex:none}
 .check-share small{display:block;color:var(--muted);margin-top:4px}
 @media(max-width:640px){nav{flex-wrap:wrap;gap:12px}.check-row{grid-template-columns:minmax(0,1fr) auto}.check-row>div{grid-row:2;grid-column:1/-1}.check-form{grid-template-columns:1fr}.check-form button{width:100%}}
+
+.parse-log-filters{align-items:end}.parse-log-filters label{display:grid;gap:5px;min-width:110px;font-size:12px;color:var(--muted)}
+.parse-log-filters select,.parse-log-filters input{width:100%;min-width:0}.parse-log-filters input[type=number]{max-width:110px}.parse-log-search{flex:1}
+.parse-log-table{min-width:740px}.parse-log-table td{vertical-align:top}.parse-log-table small{display:block;color:var(--muted);margin-top:4px}
+.parse-log-table .parse-log-reason{max-width:300px;overflow-wrap:anywhere}.parse-log-table .parse-log-id{max-width:200px;overflow-wrap:anywhere;white-space:normal;font-size:12px}
+.parse-log-state{padding:10px 20px;color:var(--muted)}.parse-log-state:empty{display:none}
+.parse-log-dialog{width:min(800px,calc(100% - 24px));padding:0}.parse-log-dialog .panel-head{position:sticky;top:0;background:var(--surface);z-index:1}
+.parse-log-summary{overflow-wrap:anywhere;margin-bottom:20px}.parse-log-summary p{margin:8px 0;color:var(--muted)}
+.parse-log-timeline{list-style:none;padding:0;margin:16px 0}.parse-log-timeline li{display:grid;grid-template-columns:72px minmax(0,1fr);gap:14px;border-top:1px solid var(--border);padding:14px 0;overflow-wrap:anywhere}
+.parse-log-timeline time{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}.parse-log-timeline small{display:block;color:var(--muted);margin-top:4px}
+.parse-log-timeline .warn b{color:var(--warn)}.parse-log-timeline .error b{color:var(--danger)}
+@media(max-width:640px){.parse-log-filters label{flex:1 1 120px}.parse-log-filters .parse-log-search{flex-basis:100%}.parse-log-filters input[type=number]{max-width:none}.parse-log-filters button{width:100%;justify-content:center}.parse-log-dialog .panel-body{padding:16px}.parse-log-timeline li{grid-template-columns:56px minmax(0,1fr);gap:10px}}
 </style>
 </head>
 <body>
@@ -227,8 +239,30 @@ th.sortable:hover{color:var(--text)}
       <button class="admin-tab" data-view="shares">分享页</button>
       <button class="admin-tab" data-view="playlogs">播放日志</button>
       <button class="admin-tab" data-view="atc">视频解析 API</button>
+      <button class="admin-tab" data-view="parselogs" data-pl="nav">解析日志</button>
       <button class="admin-tab" data-view="logs">请求日志</button>
     </div>
+
+    <div class="view" id="v-parselogs" style="display:none">
+      <div class="panel">
+        <div class="panel-head"><div><h3 data-pl="nav">解析日志</h3><p class="desc" id="parseLogIntro"></p></div><button class="btn btn-ghost btn-sm" id="parseLogRefresh" data-pl="refresh">刷新</button></div>
+        <form id="parseLogFilters" class="list-toolbar parse-log-filters">
+          <label><span data-pl="status">结果</span><select id="parseLogStatus"><option value="" data-pl="all">全部</option><option value="success" data-pl="success">完整成功</option><option value="partial" data-pl="partial">成功 · 信息不全</option><option value="failed" data-pl="failed">失败</option><option value="running" data-pl="running">处理中</option><option value="interrupted" data-pl="interrupted">已中断</option></select></label>
+          <label><span data-pl="entry">入口</span><select id="parseLogEntry"><option value="" data-pl="all">全部</option><option value="web" data-pl="web">网页解析</option><option value="batch" data-pl="batch">批量解析</option><option value="api" data-pl="api">开放 API</option><option value="share" data-pl="share">分享解析</option><option value="refresh" data-pl="refreshEntry">媒体续期</option><option value="transcript" data-pl="transcript">文案任务</option><option value="internal" data-pl="internal">内部解析</option></select></label>
+          <label><span data-pl="time">时间</span><select id="parseLogTime"><option value="0" data-pl="retained">保留期内</option><option value="1" data-pl="day">最近 24 小时</option><option value="7" data-pl="week">最近 7 天</option></select></label>
+          <label><span data-pl="user">用户 ID</span><input id="parseLogUser" type="number" min="1" step="1" inputmode="numeric"></label>
+          <label class="parse-log-search"><span data-pl="search">作品 / 记录 / 任务 ID</span><input id="parseLogSearch" type="text" maxlength="80"></label>
+          <button class="btn btn-ghost btn-sm" type="submit" data-pl="filter">筛选</button>
+        </form>
+        <p id="parseLogState" class="parse-log-state" role="status" aria-live="polite"></p>
+        <div class="tbl-wrap"><table class="parse-log-table"><thead><tr><th data-pl="when">开始时间 / 耗时</th><th data-pl="entry">入口</th><th data-pl="post">作品 / 用户</th><th data-pl="reason">结果与原因</th><th data-pl="action">操作</th></tr></thead><tbody id="parseLogBody"></tbody></table></div>
+        <div class="pager"><button type="button" id="parseLogPrev" data-pl="prev">上一页</button><span id="parseLogPage"></span><button type="button" id="parseLogNext" data-pl="next">下一页</button></div>
+      </div>
+    </div>
+    <dialog id="parseLogDialog" class="wallet-dialog parse-log-dialog" aria-labelledby="parseLogTitle">
+      <div class="panel-head"><h3 id="parseLogTitle" data-pl="detail">解析处理详情</h3><button type="button" class="btn btn-ghost btn-sm" id="parseLogClose" data-pl="close">关闭</button></div>
+      <div class="panel-body"><div id="parseLogSummary" class="parse-log-summary"></div><p id="parseLogDetailState" role="status" aria-live="polite"></p><ol id="parseLogTimeline" class="parse-log-timeline"></ol><button type="button" class="btn btn-ghost btn-sm" id="parseLogDetailRefresh" data-pl="refresh">刷新</button></div>
+    </dialog>
 
     <div class="view" id="v-checks" style="display:none">
       <div class="panel">
@@ -774,6 +808,7 @@ document.querySelectorAll('.admin-tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.view').forEach(v=>v.style.display='none');
   const v = t.dataset.view; $('#v-'+v).style.display='';
   if(v==='overview') loadAnalytics(); else if(v==='users') loadUsers();
+  else if(v==='parselogs') loadParseLogs();
   else if(v==='logs') loadLogs(); else if(v==='shares') loadShares();
   else if(v==='proxyset') loadMihomo(); else if(v==='keys') loadKeys();
   else if(v==='atc') loadAtc(); else if(v==='playlogs') loadPlayLogs();
@@ -1325,6 +1360,74 @@ $('#walletForm').onsubmit=async e=>{
   }catch(e){$('#walletMessage').textContent=e.message;}
   finally{walletSaving=false;walletBusy(false);$('#walletCancel').disabled=false;$('#walletSave').textContent=walletText('save');}
 };
+
+/* ---------------- 解析日志 ---------------- */
+const PL_TEXT = {
+  nav:['解析日志','Parsing logs'],refresh:['刷新','Refresh'],status:['结果','Result'],entry:['入口','Entry'],all:['全部','All'],
+  success:['完整成功','Complete'],partial:['成功 · 信息不全','Parsed · incomplete'],failed:['失败','Failed'],running:['处理中','Processing'],interrupted:['已中断','Interrupted'],
+  web:['网页解析','Web'],batch:['批量解析','Batch'],api:['开放 API','API'],share:['分享解析','Share'],refreshEntry:['媒体续期','Media refresh'],internal:['内部解析','Internal'],transcript:['文案任务','Transcription'],
+  time:['时间','Period'],retained:['保留期内','Retained logs'],day:['最近 24 小时','Last 24 hours'],week:['最近 7 天','Last 7 days'],user:['用户 ID','User ID'],
+  search:['作品 / 记录 / 任务 ID','Post / log / job ID'],filter:['筛选','Filter'],when:['开始时间 / 耗时','Started / duration'],post:['作品 / 用户','Post / user'],
+  reason:['结果与原因','Result and reason'],action:['操作','Action'],prev:['上一页','Previous'],next:['下一页','Next'],detail:['解析处理详情','Parsing details'],close:['关闭','Close'],
+  view:['查看详情','View details'],loading:['正在读取解析日志…','Loading parsing logs…'],empty:['暂无符合条件的记录。新解析开始后会自动记录，历史处理过程无法补录。','No matching logs. New parsing attempts are recorded automatically; past processing steps cannot be recovered.'],
+  error:['日志读取失败，请点击刷新重试。','Could not load logs. Refresh to retry.'],detailError:['详情读取失败或记录已清理，请刷新重试。','Could not load details or the record expired. Refresh to retry.'],
+  intro:['每条解析记录独立保存，保留 {days} 天。点击详情查看缓存、解析、补全与保存过程；不会记录密钥、下载签名或分享原文。','Each attempt is retained for {days} days. Inspect cache, parsing, supplementation and storage steps; credentials, signed downloads and input text are excluded.'],
+  page:['第 {page} 页 · 共 {total} 条','Page {page} · {total} records'],anonymous:['匿名 / 系统','Anonymous / system'],unknown:['尚未识别作品','Post not identified'],
+  missing:['缺失字段','Missing fields'],version:['处理版本','Version'],reference:['关联任务','Related job'],id:['记录 ID','Log ID'],truncated:['中间部分步骤已省略，保留最新进度。','Some intermediate steps were omitted; the latest progress is retained.'],
+  title:['标题','Title'],author:['作者','Author'],digg:['点赞','Likes'],comment:['评论','Comments'],collect:['收藏','Collections'],shareCount:['分享','Shares'],
+  request:['接收请求','Request'],quota:['额度处理','Allowance'],cache:['缓存检查','Cache'],primary:['主解析服务','Primary service'],resolve:['确认作品','Resolve post'],official:['平台补全','Platform'],network:['网络请求','Network'],snapshot:['保存快照','Snapshot'],result:['处理结果','Result'],attempt:['尝试','Attempt']
+};
+function plText(key, values={}){let value=(PL_TEXT[key]||[key,key])[FC_LANG];for(const [k,v] of Object.entries(values))value=value.replaceAll('{'+k+'}',String(v));return value;}
+function plMessage(code){return (parseLogMessages[code]||[plText('error'),plText('error')])[FC_LANG];}
+function plMissing(fields){return (fields||[]).map(x=>plText(x==='share'?'shareCount':x)).join(' · ');}
+function plBadge(status){const style={success:'ok',partial:'warn',failed:'bad',running:'idle',interrupted:'warn'}[status]||'idle';return `<span class="badge ${style}">${esc(plText(status))}</span>`;}
+function plTime(ts){return new Date(ts*1000).toLocaleString(FC_LANG?'en-US':'zh-CN',{hour12:false});}
+let parseLogMessages={},parseLogPage=1,parseLogTotal=0,parseLogRequest=0,parseLogDetailRequest=0,parseLogSelected='';
+document.querySelectorAll('[data-pl]').forEach(el=>el.textContent=plText(el.dataset.pl));
+function renderParseLogRows(rows){
+  $('#parseLogBody').innerHTML=rows.map(row=>`<tr><td class="tnum">${esc(plTime(row.ts))}<small>${esc((row.duration_ms/1000).toFixed(2))} s · ${esc(row.version)}</small></td><td>${esc(plText(row.entry==='refresh'?'refreshEntry':row.entry))}<small>${esc(row.platform||'—')}</small></td><td class="parse-log-id mono">${esc(row.item_id||plText('unknown'))}<small>${esc(row.user_id?'#'+row.user_id:plText('anonymous'))}</small></td><td class="parse-log-reason">${plBadge(row.status)}<small>${esc(plMessage(row.code))}</small>${row.missing?.length?`<small>${esc(plMissing(row.missing))}</small>`:''}</td><td><button class="btn btn-ghost btn-sm" data-parse-log-id="${esc(row.id)}">${esc(plText('view'))}</button></td></tr>`).join('');
+}
+async function loadParseLogs(){
+  const requestId=++parseLogRequest;
+  $('#parseLogRefresh').disabled=true;$('#parseLogPrev').disabled=true;$('#parseLogNext').disabled=true;
+  $('#parseLogState').textContent=plText('loading');
+  try{
+    const q=new URLSearchParams({page:String(parseLogPage),size:'20',status:$('#parseLogStatus').value,entry:$('#parseLogEntry').value,search:$('#parseLogSearch').value.trim()});
+    const user=$('#parseLogUser').value;if(user)q.set('user_id',user);
+    const days=Number($('#parseLogTime').value);if(days)q.set('since',String(Math.floor(Date.now()/1000)-days*86400));
+    const data=await api('/api/admin/parse-logs?'+q);
+    if(requestId!==parseLogRequest)return;
+    parseLogMessages=data.messages||{};parseLogTotal=data.total;
+    if(parseLogPage>1&&parseLogPage>Math.max(1,Math.ceil(data.total/20))){parseLogPage=Math.max(1,Math.ceil(data.total/20));return loadParseLogs();}
+    renderParseLogRows(data.logs||[]);
+    $('#parseLogIntro').textContent=plText('intro',{days:data.retention_days});
+    $('#parseLogState').textContent=data.logs?.length?'':plText('empty');
+    $('#parseLogPage').textContent=plText('page',{page:parseLogPage,total:data.total});
+    $('#parseLogPrev').disabled=parseLogPage<=1;$('#parseLogNext').disabled=parseLogPage*20>=data.total;
+  }catch(e){if(requestId===parseLogRequest){$('#parseLogBody').innerHTML='';$('#parseLogPage').textContent='';$('#parseLogState').textContent=plText('error');}}
+  finally{if(requestId===parseLogRequest)$('#parseLogRefresh').disabled=false;}
+}
+function renderParseLogDetail(row){
+  $('#parseLogSummary').innerHTML=`${plBadge(row.status)}<p>${esc(plMessage(row.code))}</p><p class="mono">${esc(plText('id'))}: ${esc(row.id)}<br>${esc(plText('post'))}: ${esc(row.item_id||plText('unknown'))} · ${esc(row.user_id?'#'+row.user_id:plText('anonymous'))}<br>${esc(plText('version'))}: ${esc(row.version)} · ${esc(plTime(row.ts))} · ${esc((row.duration_ms/1000).toFixed(2))} s</p>${row.reference?`<p>${esc(plText('reference'))}: ${esc(row.reference)}</p>`:''}${row.missing?.length?`<p>${esc(plText('missing'))}: ${esc(plMissing(row.missing))}</p>`:''}`;
+  $('#parseLogTimeline').innerHTML=(row.events||[]).map(event=>`<li class="${({ok:'ok',info:'info',warn:'warn',error:'error'})[event.level]||'info'}"><time>+${esc(((event.ms||0)/1000).toFixed(2))} s</time><div><b>${esc(plText(event.stage))}</b><div>${esc(plMessage(event.code))}</div>${event.reason?`<small>${esc(plMessage(event.reason))}</small>`:''}${event.http_status?`<small>HTTP ${esc(event.http_status)}</small>`:''}${event.attempt?`<small>${esc(plText('attempt'))} ${esc(event.attempt)}</small>`:''}${event.missing?.length?`<small>${esc(plText('missing'))}: ${esc(plMissing(event.missing))}</small>`:''}${event.truncated?`<small>${esc(plText('truncated'))}</small>`:''}</div></li>`).join('');
+}
+async function openParseLog(id){
+  parseLogSelected=id;const requestId=++parseLogDetailRequest;
+  if(!$('#parseLogDialog').open)$('#parseLogDialog').showModal();
+  $('#parseLogSummary').innerHTML='';$('#parseLogTimeline').innerHTML='';$('#parseLogDetailState').textContent=plText('loading');$('#parseLogDetailRefresh').disabled=true;
+  try{const data=await api('/api/admin/parse-logs/'+encodeURIComponent(id));if(requestId!==parseLogDetailRequest||!$('#parseLogDialog').open)return;parseLogMessages=data.messages||{};renderParseLogDetail(data.log);$('#parseLogDetailState').textContent='';}
+  catch(e){if(requestId===parseLogDetailRequest)$('#parseLogDetailState').textContent=plText('detailError');}
+  finally{if(requestId===parseLogDetailRequest)$('#parseLogDetailRefresh').disabled=false;}
+}
+$('#parseLogFilters').onsubmit=e=>{e.preventDefault();parseLogPage=1;loadParseLogs();};
+$('#parseLogRefresh').onclick=()=>loadParseLogs();
+$('#parseLogPrev').onclick=()=>{if(parseLogPage>1){parseLogPage--;loadParseLogs();}};
+$('#parseLogNext').onclick=()=>{if(parseLogPage*20<parseLogTotal){parseLogPage++;loadParseLogs();}};
+$('#parseLogBody').onclick=e=>{const button=e.target.closest('[data-parse-log-id]');if(button)openParseLog(button.dataset.parseLogId);};
+$('#parseLogClose').onclick=()=>$('#parseLogDialog').close();
+$('#parseLogDialog').onclose=()=>{parseLogDetailRequest++;};
+$('#parseLogDetailRefresh').onclick=()=>openParseLog(parseLogSelected);
+/* ---------------- /解析日志 ---------------- */
 
 /* 日志 */
 async function loadLogs(){
