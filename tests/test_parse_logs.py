@@ -63,7 +63,8 @@ class ParseLogTests(unittest.TestCase):
                 mock.patch.object(server, '_douyin_resolve_share_url', side_effect=TimeoutError('private url secret')):
             result = server._atc_parse_work_url(self.url)
         row = self.logs()[0]
-        self.assertEqual(result['video'], partial['video'])
+        self.assertEqual({k: v for k, v in result['video'].items() if k != 'filename'}, partial['video'])
+        self.assertEqual(result['video']['filename'], '抖音视频_345678.mp4')
         self.assertEqual(row['status'], 'partial')
         self.assertIn('digg', row['missing'])
         failure = next(e for e in row['events'] if e['code'] == 'supplement_failed')

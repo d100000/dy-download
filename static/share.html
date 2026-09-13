@@ -891,7 +891,7 @@ async function download(btn){
           || d.video.download_url || d.video.proxy_url))
       throw new Error(uiText('视频正在准备中，请稍候'));
     track('download');
-    return await browserDownload(d.video.url, d.video.filename || (S.title.slice(0,40) + '.mp4'),
+    return await browserDownload(d.video.url, d.video.filename || 'video.mp4',
       btn, d.video.download_url || d.video.proxy_url, true, videoDirectDownloadURL(d.video,d.source), d.video);
   } catch(error) {
     toast(error.message || uiText('下载失败，请稍后重试'));

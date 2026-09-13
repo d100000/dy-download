@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional
 from urllib import error as urlerr
@@ -57,7 +58,7 @@ from pydantic import BaseModel, Field, StrictInt
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.31.0"
+APP_VERSION = "1.31.1"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -2767,6 +2768,86 @@ def _safe_name(desc: str, fallback: str) -> str:
     return (name or fallback)[:60]
 
 
+def _short_download_title(value) -> str:
+    """短文件名只使用真实标题/文案，不把空标题提示当作作品名称。"""
+    if not isinstance(value, str):
+        return ""
+    name = unicodedata.normalize("NFC", value).strip()
+    placeholders = ("", "暂无标题", "无标题", "（无标题）", "(无标题)",
+                    "untitled", "no title", "unknown", "null", "none")
+    if name.casefold() in placeholders:
+        return ""
+    name = "".join(c for c in name if unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
+    name = re.sub(r"https?://\S+|#\s*[^\s#]+", "", name)
+    name = re.sub(r"\.(?:mp4|mov|webm|m4v|jpe?g|png|webp|gif|avif)$", "", name, flags=re.I)
+    if name.strip().casefold() in placeholders:
+        return ""
+    name = _safe_name(name, "").strip(" ._")[:12].rstrip(" ._")
+    if not any(c.isalnum() or unicodedata.category(c) == "So" for c in name):
+        return ""
+    # Windows 保留设备名，即便加扩展名也不能直接使用。
+    if re.fullmatch(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", name, re.I):
+        name = "_" + name[:11]
+    return name
+
+
+def _download_filenames(data: dict, fallback_title: str = "") -> dict:
+    """统一新解析、缓存和旧分享的文件名；不改标题、媒体地址或原始快照。"""
+    if data.get("kind") not in ("video", "note"):
+        return data
+    result = dict(data)
+    is_note = result["kind"] == "note"
+    base = next((name for value in (data.get("title"), data.get("content"), fallback_title)
+                 if (name := _short_download_title(value))), "")
+    if not base:
+        platform_name = str(data.get("platform") or "").lower()
+        if not platform_name and data.get("source") in ("douyin", "douyin_direct", "douyin_web"):
+            platform_name = "douyin"
+        prefix = {"douyin": "抖音", "tiktok": "TikTok"}.get(platform_name, "")
+        item_id = str(data.get("item_id") or "")
+        short_id = re.sub(r"[^a-zA-Z0-9]", "", item_id)[-6:]
+        if len(short_id) < 6:
+            short_id = hashlib.sha256(item_id.encode("utf-8", errors="replace")).hexdigest()[:6]
+        base = f"{prefix}{'图片' if is_note else '视频'}_{short_id}"
+    result["base"] = base
+
+    def rename(media, filename):
+        media = dict(media)
+        media["filename"] = filename
+        for key in ("download_url", "proxy_url"):
+            url = media.get(key)
+            if not isinstance(url, str):
+                continue
+            try:
+                parsed = urlparse.urlsplit(url)
+                # 只更新本站下载参数；外部 CDN URL/签名一字不改。
+                if parsed.scheme or parsed.netloc or not re.match(
+                        r"^/api/(?:media/video|douyin/(?:video|image)|atc/video|video)/", parsed.path):
+                    continue
+                params = urlparse.parse_qsl(parsed.query, keep_blank_values=True)
+                if not any(k == "name" or (k == "dl" and v == "1") for k, v in params):
+                    continue
+                params = [(k, v) for k, v in params if k != "name"] + [("name", filename)]
+                media[key] = urlparse.urlunsplit(parsed._replace(query=urlparse.urlencode(params)))
+            except ValueError:
+                continue
+        return media
+
+    if isinstance(data.get("video"), dict) and not is_note:
+        result["video"] = rename(data["video"], base + ".mp4")
+    if isinstance(data.get("images"), list) and is_note:
+        result["images"] = []
+        for index, image in enumerate(data["images"], 1):
+            if not isinstance(image, dict):
+                result["images"].append(image)
+                continue
+            extension = Path(str(image.get("filename") or "")).suffix.lower()
+            if extension not in (".jpeg", ".jpg", ".png", ".webp", ".gif", ".avif", ".heic", ".heif"):
+                extension = ".jpeg"
+            result["images"].append(rename(image, f"{base}_{index:02d}{extension}"))
+    return result
+
+
 def _media_signature(kind: str, resource: str, exp: int) -> str:
     payload = f"media:v1\n{kind}\n{resource}\n{int(exp)}".encode()
     return hmac.new(APP_SECRET, payload, hashlib.sha256).hexdigest()
@@ -4345,6 +4426,7 @@ def _remember_parse_result(key: str, data: dict, now: float) -> dict:
         data["author_detail"] = detail
     if data.get("kind") == "video" and re.fullmatch(r"[\w-]{8,40}", str(data.get("item_id") or "")):
         data.setdefault("video", {})["download_refresh_url"] = _video_download_refresh_url(data["item_id"])
+    data = _download_filenames(data)
     _save_parse_snapshot(data, source_text=key)
     _backfill_share_metadata(data)
     _parse_event("snapshot", "snapshot", "ok")
@@ -4423,8 +4505,8 @@ def _parse_cached(text: str) -> dict:
                             safe_video["proxy_url"] = _douyin_video_proxy_url(item_id)
                             safe_video["download_url"] = _douyin_video_download_url(
                                 item_id, filename)
-                    return safe
-            return _retry_cached_metadata(key, cached_data)
+                    return _download_filenames(safe)
+            return _download_filenames(_retry_cached_metadata(key, cached_data))
     _parse_event("cache", "cache_miss")
     data = _parse_share(text)
     return _remember_parse_result(key, data, time.time())
@@ -4888,6 +4970,8 @@ def _share_view(row: dict, origin: str = "") -> dict:
     if isinstance(video, dict):
         for private_key in ("work_url", "source_url"):
             video.pop(private_key, None)
+    if state == "ok":
+        data = _download_filenames(data, fallback_title=row.get("title") or "")
     view = {
         "sid": row["id"],
         "kind": row["kind"],
@@ -5390,7 +5474,7 @@ def _share_storage_payload(data: dict) -> dict:
     按抖音官方内存缓存或兼容平台缓存重新注入地址，避免数据库泄露签名。
     """
     try:
-        stored = json.loads(json.dumps(data or {}, ensure_ascii=False))
+        stored = json.loads(json.dumps(_download_filenames(data or {}), ensure_ascii=False))
     except (TypeError, ValueError):
         stored = dict(data or {}) if isinstance(data, dict) else {}
     detail = _snapshot_author(stored)
@@ -7216,9 +7300,9 @@ def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
         _parse_event("official", "fallback", "warn")
         result = _parse_douyin_share_direct(work_url)
         _parse_event("official", "fallback_ok", "ok", missing=_metadata_missing(result))
-        return result
+        return _download_filenames(result)
     _parse_event("primary", "primary_ok", "ok", missing=_metadata_missing(primary))
-    return _complete_douyin_result(work_url, primary) if douyin else primary
+    return _download_filenames(_complete_douyin_result(work_url, primary) if douyin else primary)
 
 
 def _atc_cache_get(item_id: str) -> Optional[dict]:

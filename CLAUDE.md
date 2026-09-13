@@ -139,6 +139,8 @@ v1.24.0 起 `force_proxy` 默认 false，代理优先，空池 / 全部失败后
 
 ### 来源存储与播放续期
 
+下载文件名统一通过 `_download_filenames()` 生成：标题/文案前 12 字符，空值和占位标题改为平台 + 视频/图片 + 作品末 6 位，图集加序号。它复制结果并仅更新 filename/base 和同源下载 URL 的 name 参数，不改完整标题、外部 CDN URL 或 HMAC。解析后、缓存回读及旧分享回读都要覆盖；旧分享无需写库迁移。
+
 `parse_snapshots.source_url/canonical_url` 单独保存从原输入提取的分享链接与可用的原平台作品链接，抖音作品规范化到无追踪参数的 video/note URL；不保存整段分享文案。公开 payload 继续移除内部来源与临时媒体签名，仅正常可访问的分享由 `_share_original_url()` 提供去追踪参数、限抖音/TikTok 作品地址的 `original_url` 供跳转；不得暴露原始分享文案、任意外链或失效/下架分享的来源。解析快照保留 24 小时，创建分享时把来源复制到 `shares.source_url`，随分享自身有效期保留；启动迁移从旧 `atc_cache.work_url` 补空来源。`_saved_source_in_conn()` 只恢复有效记录，刷新只改媒体缓存，不延长分享有效期、不重新计费、不清空完整元数据。
 
 分享页下载前通过 `refreshShareDownloadData()` 重读 `/api/share/{sid}`，只更新媒体字段与签名，不重复解析或扣次；404/过期/下架禁止继续使用旧地址，下载按钮全流程防连点。分享页 `prepareShareMedia()` 打开时仅加载媒体元数据，有效不调用解析；无地址、error 或 12 秒未读到元数据时复用有界下载刷新任务。播放错误先续期一次，再走已有备用线路。首页/批量预览同样按需续期，不能自动播放原本暂停的视频，也不能让迟到响应修改已替换的视频元素。中英提示使用 `uiText()`，新状态测试在 `test_playback_refresh.js` 与 `test_share_playback.js`。

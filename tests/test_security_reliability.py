@@ -229,7 +229,8 @@ class MultiPlatformLinkTests(unittest.TestCase):
                 mock.patch.object(
                     server, "_parse_douyin_item_direct", return_value=parsed) as parse:
             result = server._parse_item("video", item_id)
-        self.assertIs(result, parsed)
+        self.assertEqual({k: result[k] for k in parsed}, parsed)
+        self.assertEqual(result['base'], '抖音视频_345678')
         parse.assert_called_once_with(
             "video", item_id, "https://www.douyin.com/video/123456789012345678/")
 
