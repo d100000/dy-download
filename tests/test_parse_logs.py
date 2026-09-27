@@ -32,7 +32,8 @@ class ParseLogTests(unittest.TestCase):
 
     def test_zero_counts_are_success_and_input_and_media_secrets_are_never_stored(self):
         with mock.patch.object(server, '_parse_share', return_value=self.result), \
-                mock.patch.object(server, '_save_parse_snapshot'), mock.patch.object(server, '_backfill_share_metadata'):
+                mock.patch.object(server, '_save_parse_snapshot', side_effect=lambda data, **kwargs: data), \
+                mock.patch.object(server, '_backfill_share_metadata'):
             result = server._logged_parse('private text ' + self.url + '?token=secret', 'web', 7)
         row = self.logs()[0]
         self.assertEqual(row['status'], 'success')

@@ -261,11 +261,13 @@ test('share metadata only renders available video fields and supports albums', (
   assert.equal(c.metadataBlock({duration_ms: 1000, video: {width: 1920, height: 1080}}), '');
 });
 
-test('share body omits titles, captions and author information even when available', () => {
+test('share body displays escaped effective titles while keeping author profiles hidden', () => {
   const c = metadataHarness();
   const title = '完整文案'.repeat(200) + '<img>';
+  c.S.title = title;
   const body = c.captionBlock({title, content:'正文', author:'作者'});
-  assert.doesNotMatch(body, /完整文案|正文|作者|复制文案|原作品文案/);
+  assert.match(body, /完整文案.*&lt;img&gt;/);
+  assert.doesNotMatch(body, /<img>|正文|作者|复制文案|原作品文案/);
   const render = html.slice(html.indexOf('function render(){'), html.indexOf('let _playSession ='));
   assert.doesNotMatch(render, /class="title"|authorBlock|profileBlock|extraBlock|S\.author/);
 });
@@ -292,9 +294,10 @@ test('ready shares read metadata snapshots and separately check media availabili
       S: {state: 'ok', kind: 'video', media_available: available},
       render: () => calls.push('render'), setupWxShare: () => calls.push('wx'),
       prepareShareMedia: () => calls.push('media'),
+      recordPageView: () => calls.push('view'), startTitleRefresh: () => calls.push('title'),
       scheduleStatusPoll: () => { throw Error('ready shares must not poll'); },
     });
-    assert.deepEqual(calls, ['render', 'wx', 'media']);
+    assert.deepEqual(calls, ['view', 'render', 'title', 'wx', 'media']);
   }
 });
 
@@ -310,7 +313,7 @@ test('neutral parser source honors direct-media priority', () => {
 });
 
 test('English TikTok share counts and metadata preserve zero and original captions', () => {
-  const c = metadataHarness({}, {item_id:'tiktok_6718335390845095173'});
+  const c = metadataHarness({}, {item_id:'tiktok_6718335390845095173',title:'原始中文标题 #标签'});
   c.LANG = 'en';
   const counts = c.engagementBlock({stats: {digg: 1234, comment: 0}});
   assert.match(counts, /<dt>Likes<\/dt><dd>1,234/);
@@ -319,7 +322,7 @@ test('English TikTok share counts and metadata preserve zero and original captio
   assert.match(c.metadataBlock({duration_ms: 12000}), /Duration/);
   const original_url = 'https://www.tiktok.com/@creator/video/6718335390845095173';
   const caption = c.captionBlock({title:'原始中文标题 #标签', original_url});
-  assert.ok(!caption.includes('原始中文标题 #标签'));
+  assert.ok(caption.includes('原始中文标题 #标签'));
   assert.match(caption, /View original on TikTok/);
   assert.ok(caption.includes(original_url));
   assert.doesNotMatch(caption, /douyin.com/);

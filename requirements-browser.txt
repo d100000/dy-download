@@ -1,0 +1,8 @@
+# 可选：与主解析并行运行的服务端标题浏览器；不加入基础运行依赖。
+# Playwright 1.60 是兼容现有 Python 3.9 环境的版本；升级后重新安装 Chromium。
+# 安装此文件后还需：python -m playwright install --only-shell chromium
+# Linux 首次安装加 --with-deps；详见 README 的浏览器标题补全安装说明。
+-c requirements-lock.txt
+playwright==1.60.0
+pyee==13.0.1
+greenlet==3.2.4

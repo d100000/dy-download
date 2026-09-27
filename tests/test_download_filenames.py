@@ -74,7 +74,7 @@ class DownloadFilenameTests(unittest.TestCase):
     def test_old_share_reads_new_names_without_parsing_or_rewriting_snapshot(self):
         data = self.video('这是旧分享保存下来的完整视频标题')
         with mock.patch.object(server, 'current_user', return_value=None):
-            share = server._share_create(make_request(), data, '不应用于下载的自定义标题')
+            share = server._share_create(make_request(), data, '同步用于下载的自定义标题')
         sid = share['sid']
         self.addCleanup(server.db_exec, 'DELETE FROM shares WHERE id=?', (sid,))
         # 模拟升级前保存的长名称，回读不能原样采用旧文件名。
@@ -84,8 +84,8 @@ class DownloadFilenameTests(unittest.TestCase):
         row = dict(server.db_exec('SELECT * FROM shares WHERE id=?', (sid,), 'one'))
         with mock.patch.object(server, '_atc_extract', side_effect=AssertionError('no reparse')):
             view = server._share_view(row)
-        self.assertEqual(view['data']['video']['filename'], data['title'][:12] + '.mp4')
-        self.assertEqual(view['title'], '不应用于下载的自定义标题')
+        self.assertEqual(view['data']['video']['filename'], '同步用于下载的自定义标题'[:12] + '.mp4')
+        self.assertEqual(view['title'], '同步用于下载的自定义标题')
         self.assertEqual(server.db_exec('SELECT payload FROM shares WHERE id=?', (sid,), 'one')['payload'], row['payload'])
 
     def test_cache_hit_returns_new_names_without_modifying_cached_value(self):

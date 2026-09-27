@@ -1,5 +1,7 @@
 {
   "en": {
+    "TikTok 作品": "TikTok post",
+    "标题来自分享文案，可能不完整": "This title comes from the shared text and may be incomplete.",
     "今日免费次数已用完，账户余额不足，请联系管理员充值后重试": "Your daily free uses are exhausted and your balance is insufficient. Contact the administrator to add funds.",
     "免费次数及账户余额不足，未解析": "Not parsed: insufficient free uses and account balance.",
     "账户余额已变化，请刷新后重试": "The account balance has changed. Refresh it and try again.",
@@ -40,6 +42,7 @@
     "下载链接更新服务暂不可用，请稍后重试": "The download refresh service is unavailable. Please try again later.",
     "原分享链接已失效，请重新粘贴分享内容解析": "The saved source link is unavailable. Paste the original share link again.",
     "视频解析服务暂时不可用，请稍后重试": "The video service is unavailable. Please try again later.",
+    "视频解析服务配置异常，请联系管理员": "The video service configuration is invalid. Please contact the administrator.",
     "视频解析服务连接异常，请稍后重试": "Could not connect to the video service. Please try again later.",
     "服务暂时不可用，请稍后重试": "The service is unavailable. Please try again later.",
     "解析失败，请稍后重试": "Could not parse the link. Please try again later.",
@@ -251,6 +254,12 @@
     "分享内容已变化，请刷新页面后再试": "This shared content has changed. Refresh the page and try again.",
     "在抖音查看原作品 ↗": "View original on Douyin ↗",
     "在 TikTok 查看原作品 ↗": "View original on TikTok ↗",
-    "内容版权归原作者所有。本站保存作品信息，不保存视频或图片文件。": "Content belongs to its original creator. We store post details, not video or image files."
+    "内容版权归原作者所有。本站保存作品信息，不保存视频或图片文件。": "Content belongs to its original creator. We store post details, not video or image files.",
+    "分享赚通用额度": "Earn General credits by sharing",
+    "好友通过分享页进入、登录并成功解析，通过安全校验后可为你增加 1 次通用额度。同一作品最多奖励 5 次，每位好友仅为你奖励 1 次；相同浏览器或网络不计。": "Earn 1 General credit when a friend follows this share page, signs in and successfully parses a link, subject to eligibility checks. Up to 5 credits per original post and one reward per friend to you; shared browsers or networks do not qualify.",
+    "今日免费次数、通用额度和账户余额不足，请联系管理员充值后重试": "Your daily free uses, General credits and account balance are insufficient. Contact the administrator to top up.",
+    "免费次数、通用额度及账户余额不足，未解析": "Not parsed: insufficient daily free uses, General credits and account balance.",
+    "奖励规则：登录后生成分享页。不同好友通过分享页进入本站、登录并成功解析后，通过安全校验即可为你增加 1 次通用额度。每位好友只能为你奖励 1 次，同一作品的分享链接合计最多奖励 5 次。自己访问、仅打开链接及重复请求不计奖励。为防刷量，同一浏览器或网络环境的不同用户也可能不计奖。": "Create a share page while signed in. When a different friend follows it, signs in and successfully parses a link, you can earn 1 General credit after eligibility checks. Each friend can reward you once; links for the same original post earn up to 5 credits in total. Self-referrals, page views alone and repeat requests do not qualify. Abuse checks may also exclude different people using the same browser or network.",
+    "从这里进入、登录并成功解析，可为分享者增加 1 次通用额度，需通过安全校验。": "Continue here, sign in and successfully parse a link to help the sharer earn 1 General credit, subject to eligibility checks."
   }
 }

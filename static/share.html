@@ -292,11 +292,39 @@ function playerInlineStyle(video){
 function track(kind, extra){
   try {
     const b = JSON.stringify(Object.assign({kind}, extra || {}));
-    if (navigator.sendBeacon) navigator.sendBeacon('/api/share/' + S.sid + '/event',
-      new Blob([b], {type:'application/json'}));
-    else fetch('/api/share/' + S.sid + '/event', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body:b, keepalive:true});
+    const url = '/api/share/' + encodeURIComponent(S.sid) + '/event';
+    if (navigator.sendBeacon && navigator.sendBeacon(url,
+      new Blob([b], {type:'application/json'}))) return;
+    fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+      body:b, keepalive:true}).catch(()=>{});
   } catch {}
+}
+/* 一次可见页面记一次浏览；后台轮询和分享卡片抓取不产生浏览事件。 */
+let _pageViewID = '';
+let _pageViewSent = false;
+function pageViewID(){
+  if (_pageViewID) return _pageViewID;
+  const key = 'share-ready-view:' + S.sid;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) || 'null');
+    sessionStorage.removeItem(key);
+    if (saved && Date.now() - saved.at < 30000 && Date.now() >= saved.at
+      && performance.getEntriesByType('navigation')[0]?.type === 'reload'
+      && /^[A-Za-z0-9_-]{16,96}$/.test(saved.id)) _pageViewID = saved.id;
+  } catch {}
+  if (!_pageViewID){
+    try { _pageViewID = crypto.randomUUID(); }
+    catch { _pageViewID = Date.now().toString(36) + '_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2); }
+  }
+  return _pageViewID;
+}
+function recordPageView(){
+  if (_pageViewSent || document.hidden || !S.sid || !['ok','pending','processing'].includes(S.state)) return;
+  _pageViewSent = true;
+  track('page_view', {page_view_id:pageViewID()});
+}
+function preservePageViewForReadyReload(){
+  try { sessionStorage.setItem('share-ready-view:' + S.sid, JSON.stringify({id:pageViewID(), at:Date.now()})); } catch {}
 }
 function toast(msg){
   const t = document.getElementById('toast');
@@ -322,7 +350,7 @@ function hideMask(){ document.getElementById('mask').classList.remove('show'); }
 /* 抖音风格分享文案：标题 + 一句引导 + 链接（两行以内，标题过长截断） */
 function shareText(){
   const url = S.url || location.href;
-  const t = String(S.title || sharePlatform() + ' video').replace(/\s+/g, ' ').trim();
+  const t = shareTitle().replace(/\s+/g, ' ').trim();
   const short = t.length > 40 ? t.slice(0, 40) + '…' : t;
   const by = S.author ? `@${S.author} · ${sharePlatform()}` : sharePlatform();
   return `【${short}】${by}\n${uiText('点开直接看，无需安装 App')} 👉 ${url}`;
@@ -347,7 +375,7 @@ function shareToFriend(){
   const url = S.url || location.href;
   if (navigator.share){
     navigator.share({
-      title: S.title || sharePlatform() + ' video',
+      title: shareTitle(),
       text: shareText(),
       url,
     }).catch(()=>{});
@@ -426,6 +454,7 @@ async function pollShareStatus(){
     _statusNotice = '';
     if (d.status === 'ready'){
       clearTimeout(_statusTimer); _statusTimer = null;
+      preservePageViewForReadyReload();
       location.reload();
       return;
     }
@@ -450,8 +479,9 @@ async function pollShareStatus(){
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){ clearTimeout(_statusTimer); _statusTimer = null; return; }
+  recordPageView();
   if (S.state === 'pending' || S.state === 'processing') scheduleStatusPoll(100);
-
+  else if (S.state === 'ok') refreshShareTitle();
 });
 
 function retryMedia(){
@@ -467,6 +497,117 @@ function publicLink(value){
     const url = new URL(String(value || ''));
     return ['https:','http:'].includes(url.protocol) && !url.username && !url.password ? url.href : '';
   } catch { return ''; }
+}
+function shareTitle(){
+  const meaningful = value => typeof value === 'string' && !['','（无标题）','(无标题)','暂无标题','无标题','untitled','no title'].includes(value.trim().toLowerCase()) ? value.trim() : '';
+  return meaningful(S.title) || meaningful(S.data?.title) || meaningful(S.data?.content)
+    || uiText(S.data?.platform === 'tiktok' ? 'TikTok 作品' : '抖音作品');
+}
+function syncShareTitle(){
+  const title = shareTitle();
+  const heading = document.getElementById('shareTitle');
+  if (heading) heading.textContent = title;
+  const hint = document.getElementById('shareTitleHint');
+  if (hint) hint.hidden = S.data?.title_source !== 'share_text';
+  document.title = title;
+  for (const selector of ['meta[property="og:title"]','meta[property="og:image:alt"]','meta[name="twitter:title"]']){
+    const meta = document.querySelector(selector);
+    if (meta) meta.setAttribute('content', title.slice(0, 300));
+  }
+  updateWxShare();
+}
+let _titleRefresh = null;
+let _titleQuickTimer = null, _titleQuickUntil = 0;
+function scheduleQuickTitleRefresh(){
+  clearTimeout(_titleQuickTimer);
+  _titleQuickTimer = null;
+  if (S.state !== 'ok' || S.data?.metadata_status !== 'pending' || Date.now() >= _titleQuickUntil) return;
+  _titleQuickTimer = setTimeout(() => {
+    _titleQuickTimer = null;
+    if (document.hidden) return;
+    return refreshShareTitle();
+  }, 750);
+}
+async function refreshShareTitle(){
+  if (!S.sid || S.state !== 'ok' || document.hidden) return;
+  if (_titleRefresh) return _titleRefresh;
+  _titleRefresh = (async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    try {
+      // 仅读取已保存的分享信息，不替换媒体或重建播放器。
+      const response = await fetch('/api/share/' + encodeURIComponent(S.sid), {
+        credentials:'same-origin', cache:'no-store', signal:controller.signal,
+        headers:{'Accept':'application/json'},
+      });
+      if (!response.ok) return;
+      const current = await response.json();
+      if (current.state !== 'ok' || current.sid !== S.sid || current.item_id !== S.item_id || current.kind !== S.kind) return;
+      if (current.data && ((current.data.item_id !== undefined && current.data.item_id !== S.item_id)
+          || (current.data.kind !== undefined && current.data.kind !== S.kind))) return;
+      if (typeof current.title === 'string'){
+        S.title = current.title;
+        if (S.data && current.data) {
+          S.data.title = current.data.title;
+          S.data.content = current.data.content;
+          S.data.title_source = current.data.title_source;
+          S.data.title_status = current.data.title_status;
+          S.data.metadata_status = current.data.metadata_status;
+          for (const key of ['content_status','author','avatar','author_url','cover','metadata_source']){
+            if (typeof current.data[key] === 'string' && current.data[key]) S.data[key] = current.data[key];
+          }
+          for (const key of ['create_time','duration_ms','snapshot_at']){
+            const value = current.data[key];
+            if (typeof value === 'number' && Number.isFinite(value) && value > 0) S.data[key] = value;
+          }
+          if (current.data.stats && typeof current.data.stats === 'object'){
+            S.data.stats = S.data.stats || {};
+            for (const key of ['digg','comment','share','collect']){
+              const value = current.data.stats[key];
+              if (Number.isSafeInteger(value) && value >= 0) S.data.stats[key] = value;
+            }
+          }
+          if (Array.isArray(current.data.metadata_fields)) S.data.metadata_fields = current.data.metadata_fields.filter(key => typeof key === 'string');
+          if (S.data.video) for (const key of ['width','height']){
+            const value = current.data.video?.[key];
+            if (!S.data.video[key] && Number.isSafeInteger(value) && value > 0) S.data.video[key] = value;
+          }
+          if (S.data.video && typeof current.data.video?.filename === 'string')
+            S.data.video.filename = current.data.video.filename;
+          if (Array.isArray(S.data.images) && Array.isArray(current.data.images)
+            && S.data.images.length === current.data.images.length){
+            S.data.images.forEach((image, index) => {
+              const updated = current.data.images[index];
+              if (image && updated && image.index === updated.index && typeof updated.filename === 'string')
+                image.filename = updated.filename;
+            });
+          }
+        }
+        syncShareTitle();
+        const engagement = document.getElementById('shareEngagement');
+        if (engagement) engagement.innerHTML = engagementBlock(S.data || {});
+        const metadata = document.getElementById('mediaMetadata');
+        if (metadata) metadata.innerHTML = metadataBlock(S.data || {});
+        const playingVideo = document.querySelector('#playerBox video');
+        if (playingVideo) syncPlayerMetadata(playingVideo);
+        const captured = document.getElementById('snapshotNote');
+        if (captured && S.data?.snapshot_at){
+          captured.textContent = uiText('数据获取于 {time} · 互动数以获取时为准', {time: fmtTimestamp(S.data.snapshot_at)});
+          captured.hidden = !countRows(S.data.stats, [['digg',''],['comment',''],['share',''],['collect','']]).length;
+        }
+      }
+    } catch {} finally { clearTimeout(timeout); }
+  })();
+  try { await _titleRefresh; } finally { _titleRefresh = null; scheduleQuickTitleRefresh(); }
+}
+function startTitleRefresh(){
+  syncShareTitle();
+  if (S.data?.metadata_status === 'pending'){
+    _titleQuickUntil = Date.now() + 10000;
+    scheduleQuickTitleRefresh();
+  }
+  // 仅在页面可见时读取本地快照，后台标签不产生周期请求。
+  setInterval(refreshShareTitle, 30000);
 }
 function countValue(value){
   if (typeof value !== 'number' && !(typeof value === 'string' && /^\d+$/.test(value.trim()))) return null;
@@ -515,8 +656,15 @@ function originalWorkURL(d){
 function captionBlock(d){
   const original = originalWorkURL(d);
   const label = original.includes('tiktok.com') ? '在 TikTok 查看原作品 ↗' : '在抖音查看原作品 ↗';
-  return `${original ? `<div class="caption-tools"><a class="original-work" href="${esc(original)}" target="_blank" rel="noopener noreferrer" data-ui="${label}">${uiText(label)}</a></div>` : ''}
-    ${countRows(d.stats, [['digg',''],['comment',''],['share',''],['collect','']]).length && fmtTimestamp(S.snapshot_at) ? `<p class="snapshot-note">${uiText('数据获取于 {time} · 互动数以获取时为准', {time: esc(fmtTimestamp(S.snapshot_at))})}</p>` : ''}`;
+  return `<h1 class="title" id="shareTitle">${esc(shareTitle())}</h1>
+    <p class="snapshot-note" id="shareTitleHint"${S.data?.title_source === 'share_text' ? '' : ' hidden'}>${uiText('标题来自分享文案，可能不完整')}</p>
+    ${original ? `<div class="caption-tools"><a class="original-work" href="${esc(original)}" target="_blank" rel="noopener noreferrer" data-ui="${label}">${uiText(label)}</a></div>` : ''}
+    <p class="snapshot-note" id="snapshotNote"${countRows(d.stats, [['digg',''],['comment',''],['share',''],['collect','']]).length && fmtTimestamp(S.snapshot_at) ? '' : ' hidden'}>${S.snapshot_at ? uiText('数据获取于 {time} · 互动数以获取时为准', {time: esc(fmtTimestamp(S.snapshot_at))}) : ''}</p>`;
+}
+
+function shareReferralURL(){
+  const sid=String(S.sid||'');
+  return /^[A-Za-z0-9_-]{3,64}$/.test(sid)?'/?ref='+encodeURIComponent(sid):'/';
 }
 
 function render(){
@@ -549,8 +697,8 @@ function render(){
   app.innerHTML = `
   <div class="wrap">
     <div class="top">
-      <a class="brand" href="/"><span class="logo">↓</span><b>${uiText('多平台下载器')}</b></a>
-      <div style="display:flex;gap:8px;align-items:center"><button class="mini" type="button" onclick="switchLanguage()" aria-label="${LANG === 'en' ? '切换中文' : 'Switch to English'}">${LANG === 'en' ? '中文' : 'EN'}</button><a class="mini" href="/">${uiText('生成我的 →')}</a></div>
+      <a class="brand" href="${esc(shareReferralURL())}"><span class="logo">↓</span><b>${uiText('多平台下载器')}</b></a>
+      <div style="display:flex;gap:8px;align-items:center"><button class="mini" type="button" onclick="switchLanguage()" aria-label="${LANG === 'en' ? '切换中文' : 'Switch to English'}">${LANG === 'en' ? '中文' : 'EN'}</button><a class="mini" href="${esc(shareReferralURL())}">${uiText('生成我的 →')}</a></div>
     </div>
     <p class="slogan">${uiText(d.platform === 'tiktok' ? '分享 TikTok 视频，微信点开就能看' : '分享抖音视频，微信点开就能看')}</p>
 
@@ -558,16 +706,17 @@ function render(){
       ${media}
       <div class="body">
         <span class="badge">${isNote ? uiText('图集 · {count} 张原图', {count: (d.images||[]).length}) : uiText('视频 · 无水印原片')}</span>
-        ${engagementBlock(d)}
-        <div id="mediaMetadata">${metadataBlock(d)}</div>
         ${captionBlock(d)}
+        <div id="shareEngagement">${engagementBlock(d)}</div>
+        <div id="mediaMetadata">${metadataBlock(d)}</div>
       </div>
     </div>
 
-    <a class="cta" href="/" onclick="track('cta')">
+    <a class="cta" href="${esc(shareReferralURL())}" onclick="track('cta')">
       <div>
         <div class="t" data-ui="想保存这个视频，或分享你的作品？">想保存这个视频，或分享你的作品？</div>
         <div class="d">${uiText('粘贴链接，即可下载或分享原片')}</div>
+        ${S.reward_eligible?`<div class="d">${uiText('从这里进入、登录并成功解析，可为分享者增加 1 次通用额度，需通过安全校验。')}</div>`:''}
       </div>
       <div class="arrow">›</div>
     </a>
@@ -1260,8 +1409,10 @@ function wrapText(ctx, text, maxW, maxLines){
 
 let _posterURL = null;
 async function makePoster(){
+  if (document.getElementById('pload').classList.contains('show')) return;
   document.getElementById('pload').classList.add('show');
   try {
+    await refreshShareTitle();
     const W = 750, H = 1180, P = 44;
     const c = document.createElement('canvas'); c.width = W; c.height = H;
     const x = c.getContext('2d');
@@ -1299,7 +1450,7 @@ async function makePoster(){
     // 标题
     let y = CH + 62;
     x.fillStyle = '#EDEFF2'; x.font = '650 36px "PingFang SC",system-ui,sans-serif';
-    for (const line of wrapText(x, S.title, W - P*2, 3)){ x.fillText(line, P, y); y += 50; }
+    for (const line of wrapText(x, shareTitle(), W - P*2, 3)){ x.fillText(line, P, y); y += 50; }
 
     // 作者
     y += 14;
@@ -1351,6 +1502,16 @@ async function makePoster(){
 function hidePoster(){ document.getElementById('pmask').classList.remove('show'); }
 
 /* ---------------- 微信分享卡片（JS-SDK，未配置公众号时静默跳过） ---------------- */
+let _wxShareReady = false;
+function updateWxShare(){
+  if (!_wxShareReady || !window.wx) return;
+  const opt = {
+    title: shareTitle().slice(0, 40), desc:shareText(), link:S.url || location.href,
+    imgUrl:S.card_cover || S.cover || (ORIGIN + '/og.png'),
+  };
+  wx.updateAppMessageShareData(opt);
+  wx.updateTimelineShareData({title:opt.title, link:opt.link, imgUrl:opt.imgUrl});
+}
 async function setupWxShare(){
   if (!IS_WECHAT_UA || !S.sid) return;
   let cfg;
@@ -1368,14 +1529,8 @@ async function setupWxShare(){
   wx.config({debug:false, appId:cfg.appId, timestamp:cfg.timestamp, nonceStr:cfg.nonceStr,
     signature:cfg.signature, jsApiList:['updateAppMessageShareData','updateTimelineShareData']});
   wx.ready(() => {
-    const opt = {
-      title: (S.title || uiText('抖音作品')).slice(0, 40),        // 标题=抖音文案，与卡片抓取一致
-      desc: shareText(),
-      link: S.url || location.href,
-      imgUrl: S.card_cover || S.cover || (ORIGIN + '/og.png'),   // 无签名 JPEG 优先；微信不渲染 SVG
-    };
-    wx.updateAppMessageShareData(opt);
-    wx.updateTimelineShareData({title: opt.title, link: opt.link, imgUrl: opt.imgUrl});
+    _wxShareReady = true;
+    updateWxShare();
   });
 }
 
@@ -1390,12 +1545,13 @@ function report(){
 }
 
 /* ---------------- 入口 ---------------- */
+recordPageView();
 if (!S || !S.state || S.state !== 'ok') {
   renderState(S && S.state);
   if (S && (S.state === 'pending' || S.state === 'processing'))
     scheduleStatusPoll(nextStatusPollDelay(S.poll_after_ms, 0));
 } else {
-  render(); setupWxShare(); prepareShareMedia();
+  render(); startTitleRefresh(); setupWxShare(); prepareShareMedia();
 
 }
 </script>

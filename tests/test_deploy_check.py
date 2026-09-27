@@ -11,6 +11,13 @@ from tools import deploy_check
 
 
 class DeploymentCheckTests(unittest.TestCase):
+    @staticmethod
+    def create_schema(conn):
+        for table, columns in deploy_check.REQUIRED_COLUMNS.items():
+            conn.execute(f'CREATE TABLE {table} (' + ','.join(
+                c + (' INTEGER DEFAULT 0' if c.startswith('credit_') and table == 'users' else ' INTEGER')
+                for c in columns) + ')')
+
     def test_missing_database_is_not_created(self):
         with tempfile.TemporaryDirectory() as folder:
             result = deploy_check.check_database(folder)
@@ -31,8 +38,7 @@ class DeploymentCheckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'app.db'
             with sqlite3.connect(path) as conn:
-                for table, columns in deploy_check.REQUIRED_COLUMNS.items():
-                    conn.execute(f'CREATE TABLE {table} (' + ','.join(c + ' INTEGER' for c in columns) + ')')
+                self.create_schema(conn)
                 conn.execute('INSERT INTO users(balance_cents,reserved_cents,spent_cents) VALUES(0,0,0)')
             first = deploy_check.check_database(folder)
             self.assertFalse(any(r['status'] == 'FAIL' for r in first))
@@ -40,6 +46,58 @@ class DeploymentCheckTests(unittest.TestCase):
                 conn.execute('UPDATE users SET balance_cents=-3')
             second = deploy_check.check_database(folder)
             self.assertEqual(next(r for r in second if r['id'] == 'balances')['status'], 'FAIL')
+
+    def test_credit_migration_tables_and_columns_are_required_without_writing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'app.db'
+            with sqlite3.connect(path) as conn:
+                self.create_schema(conn)
+                for table in ('credit_ledger', 'referral_identity_signals', 'referral_visits', 'share_credit_rewards'):
+                    conn.execute(f'DROP TABLE {table}')
+                conn.execute('DROP TABLE quota_reservations')
+                conn.execute('CREATE TABLE quota_reservations(user_id,free_units,price_cents,status)')
+            before = path.read_bytes()
+            result = {r['id']: r for r in deploy_check.check_database(folder)}
+            for table in ('credit_ledger', 'referral_identity_signals', 'referral_visits',
+                          'share_credit_rewards', 'quota_reservations'):
+                self.assertEqual(result['schema_' + table]['status'], 'FAIL')
+            self.assertIn('credit_units', result['schema_quota_reservations']['detail'])
+            self.assertIn('referral_visit_id', result['schema_quota_reservations']['detail'])
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_credit_counters_reject_negative_null_and_noninteger_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'app.db'
+            with sqlite3.connect(path) as conn:
+                self.create_schema(conn)
+                conn.execute('INSERT INTO users(balance_cents,reserved_cents,spent_cents) VALUES(0,0,0)')
+            for column in ('credit_balance', 'credit_reserved', 'credit_spent', 'credit_version'):
+                for value in (-1, None, 0.5, 'broken'):
+                    with self.subTest(column=column, value=value):
+                        with sqlite3.connect(path) as conn:
+                            conn.execute(f'UPDATE users SET {column}=?', (value,))
+                        before = path.read_bytes()
+                        result = {r['id']: r for r in deploy_check.check_database(folder)}
+                        self.assertEqual(result['credits']['status'], 'FAIL')
+                        self.assertEqual(path.read_bytes(), before)
+                    with sqlite3.connect(path) as conn:
+                        conn.execute(f'UPDATE users SET {column}=0')
+            result = {r['id']: r for r in deploy_check.check_database(folder)}
+            self.assertEqual(result['credits']['status'], 'PASS')
+
+    def test_daily_limits_allow_null_zero_and_cap_and_reject_invalid_values(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'app.db'
+            with sqlite3.connect(path) as conn:
+                self.create_schema(conn)
+                conn.execute('INSERT INTO users(balance_cents,reserved_cents,spent_cents) VALUES(0,0,0)')
+            for value, status in ((None, 'PASS'), (0, 'PASS'), (10000, 'PASS'),
+                                  (-1, 'FAIL'), (10001, 'FAIL'), (0.5, 'FAIL'), ('broken', 'FAIL')):
+                with self.subTest(value=value):
+                    with sqlite3.connect(path) as conn:
+                        conn.execute('UPDATE users SET daily_limit=?', (value,))
+                    result = {r['id']: r for r in deploy_check.check_database(folder)}
+                    self.assertEqual(result['user_daily_limits']['status'], status)
 
     def test_http_checks_both_runtime_and_frontend_headers(self):
         def response(url, timeout):

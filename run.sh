@@ -7,6 +7,19 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 本地密码保存在 Git 忽略的 .env.local；显式环境变量始终优先。
+# 只读取 ADMIN_PASSWORD 字段，不执行配置文件中的其他文本。
+if [ "${ADMIN_PASSWORD+x}" != x ] && [ -f .env.local ]; then
+  while IFS= read -r local_config_line || [ -n "$local_config_line" ]; do
+    case "$local_config_line" in
+      ADMIN_PASSWORD=*)
+        export ADMIN_PASSWORD="${local_config_line#ADMIN_PASSWORD=}"
+        break
+        ;;
+    esac
+  done < .env.local
+fi
+
 PORT="${PORT:-3344}"
 HOST="${HOST:-127.0.0.1}"
 PY="${PYTHON:-python3}"

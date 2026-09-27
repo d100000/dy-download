@@ -18,12 +18,14 @@
 
 import base64
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from functools import wraps
 import inspect
 import gzip
 import hashlib
 import hmac
+from html import unescape as html_unescape
+from html.parser import HTMLParser
 import ipaddress
 import io
 import json
@@ -53,12 +55,15 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                PlainTextResponse, Response, StreamingResponse)
 from pydantic import BaseModel, Field, StrictInt
+from browser_titles import BrowserTitleService, valid_work_url, work_identity
+from metadata_fields import (METADATA_SOURCES, is_truncated_title, title_prefix,
+                             sanitize_metadata, metadata_fields_present)
 
 # ---------------------------------------------------------------- 常量与存储
 
 # 版本号（语义化：修 bug +patch，新功能 +minor，不兼容改动 +major）。
 # 每次改动必须同步更新 README.md 顶部版本号与「更新日志」，规则见 CLAUDE.md。
-APP_VERSION = "1.31.1"
+APP_VERSION = "1.34.3"
 UI_MESSAGES = json.loads(Path("static/ui-locales.json").read_text("utf-8"))
 
 
@@ -236,8 +241,40 @@ CREATE TABLE IF NOT EXISTS wallet_ledger(
   spent_delta INTEGER DEFAULT 0, note TEXT DEFAULT '',
   UNIQUE(user_id,event_key)
 );
+CREATE TABLE IF NOT EXISTS credit_ledger(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, ts INTEGER NOT NULL,
+  event TEXT NOT NULL, event_key TEXT NOT NULL, request_hash TEXT NOT NULL DEFAULT '',
+  balance_delta INTEGER NOT NULL DEFAULT 0, reserved_delta INTEGER NOT NULL DEFAULT 0,
+  spent_delta INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
+  UNIQUE(user_id,event_key)
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON credit_ledger(user_id,id DESC);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
+CREATE TABLE IF NOT EXISTS referral_identity_signals(
+  user_id INTEGER NOT NULL, kind TEXT NOT NULL, signal_hash TEXT NOT NULL,
+  created INTEGER NOT NULL, PRIMARY KEY(user_id,kind,signal_hash)
+);
+CREATE TABLE IF NOT EXISTS referral_visits(
+  id TEXT PRIMARY KEY, sid TEXT NOT NULL, owner_user_id INTEGER NOT NULL,
+  visitor_user_id INTEGER, device_hash TEXT NOT NULL, network_hash TEXT NOT NULL,
+  work_key TEXT NOT NULL, created INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  consumed INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_referral_visit_expiry ON referral_visits(expires_at);
+CREATE INDEX IF NOT EXISTS idx_referral_visit_network ON referral_visits(network_hash,created);
+CREATE INDEX IF NOT EXISTS idx_referral_visit_device ON referral_visits(device_hash,created);
+CREATE INDEX IF NOT EXISTS idx_referral_visit_created ON referral_visits(created);
+CREATE TABLE IF NOT EXISTS share_credit_rewards(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_user_id INTEGER NOT NULL, visitor_user_id INTEGER NOT NULL,
+  device_hash TEXT NOT NULL, network_hash TEXT NOT NULL,
+  work_key TEXT NOT NULL, sid TEXT NOT NULL,
+  reservation_id TEXT NOT NULL UNIQUE, created INTEGER NOT NULL,
+  UNIQUE(owner_user_id,visitor_user_id),
+  UNIQUE(owner_user_id,device_hash), UNIQUE(owner_user_id,network_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_share_credit_work ON share_credit_rewards(owner_user_id,work_key);
 CREATE TABLE IF NOT EXISTS api_keys(
   key TEXT PRIMARY KEY, user_id INTEGER, name TEXT, created INTEGER, enabled INTEGER DEFAULT 1,
   balance_cents INTEGER DEFAULT 100, spent_cents INTEGER DEFAULT 0, calls INTEGER DEFAULT 0,
@@ -282,7 +319,7 @@ CREATE TABLE IF NOT EXISTS shares(
   visibility TEXT DEFAULT 'link', pw_salt TEXT, pw_hash TEXT,
   expires_at INTEGER DEFAULT 0, refreshed_at INTEGER,
   status TEXT DEFAULT 'ok',
-  views INTEGER DEFAULT 0, plays INTEGER DEFAULT 0,
+  views INTEGER DEFAULT 0, page_views INTEGER NOT NULL DEFAULT 0, plays INTEGER DEFAULT 0,
   downloads INTEGER DEFAULT 0, cta_clicks INTEGER DEFAULT 0,
   created INTEGER,
   parse_status TEXT DEFAULT 'ready', source_url TEXT,
@@ -392,7 +429,7 @@ _PARSE_LOG_CODES = {
     "input_ok": ("已识别公开作品链接", "Public post link recognized"),
     "invalid_input": ("输入无效或超出限制", "Invalid or oversized input"),
     "quota_ok": ("已预留本次解析额度", "Parsing allowance reserved"),
-    "quota_denied": ("免费次数或可用余额不足，未发起解析", "No available allowance or balance; parsing not started"),
+    "quota_denied": ("免费次数、通用额度或可用余额不足，未发起解析", "Insufficient daily allowance, credits or balance; parsing not started"),
     "quota_settled": ("解析额度已结算", "Parsing allowance settled"),
     "quota_released": ("解析失败，已释放预留额度", "Parsing failed; reserved allowance released"),
     "cache_hit": ("命中已有结果，检查媒体有效期与信息完整性", "Cached result found; checking freshness and metadata"),
@@ -418,6 +455,7 @@ _PARSE_LOG_CODES = {
     "proxy": ("本次平台请求使用代理", "Using a proxy for this platform request"),
     "fallback": ("主解析未成功，尝试平台官方兜底", "Primary parsing failed; trying the platform fallback"),
     "fallback_ok": ("平台官方兜底返回结果", "Platform fallback returned a result"),
+    "fallback_failed": ("平台官方兜底也未成功，保留主解析失败原因", "Platform fallback also failed; retaining the primary parsing failure"),
     "supplement": ("缺少作品或作者信息，尝试平台补全", "Post or author information missing; supplementing from the platform"),
     "supplement_ok": ("平台补全结束，只合并缺失字段", "Supplementation finished; only missing fields merged"),
     "supplement_failed": ("平台补全失败，保留已经获取的媒体与信息", "Supplementation failed; retaining available media and metadata"),
@@ -461,6 +499,8 @@ def _parse_error_code(exc: Exception) -> str:
 
 def _parse_log_write(trace: dict) -> None:
     # 诊断存储故障不得改变解析结果、扣费或退款。
+    if trace.get("_deferred"):
+        return
     try:
         db_exec("UPDATE parse_logs SET updated=?,item_id=?,status=?,code=?,duration_ms=?,events=?,missing=? WHERE id=?",
                 (int(time.time()), trace.get("item_id", ""), trace["status"], trace["code"],
@@ -665,6 +705,7 @@ with _db_lock:
             if col not in have:
                 _c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
+    _ensure_columns("quota_reservations", (("referral_visit_id", "TEXT"),))
     _ensure_columns("share_events", (
         ("source", "TEXT"), ("stage", "TEXT"), ("detail", "TEXT"), ("ms", "INTEGER"),
         ("next_src", "TEXT"), ("event_key", "TEXT")))
@@ -673,10 +714,16 @@ with _db_lock:
         ("balance_cents", "INTEGER NOT NULL DEFAULT 0"),
         ("reserved_cents", "INTEGER NOT NULL DEFAULT 0"),
         ("spent_cents", "INTEGER NOT NULL DEFAULT 0"),
-        ("wallet_version", "INTEGER NOT NULL DEFAULT 0")))
+        ("wallet_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("daily_limit", "INTEGER"), ("quota_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("credit_balance", "INTEGER NOT NULL DEFAULT 0"),
+        ("credit_reserved", "INTEGER NOT NULL DEFAULT 0"),
+        ("credit_spent", "INTEGER NOT NULL DEFAULT 0"),
+        ("credit_version", "INTEGER NOT NULL DEFAULT 0")))
     _ensure_columns("quota_reservations", (
         ("user_id", "INTEGER"), ("free_units", "INTEGER"),
-        ("price_cents", "INTEGER NOT NULL DEFAULT 0")))
+        ("price_cents", "INTEGER NOT NULL DEFAULT 0"),
+        ("credit_units", "INTEGER NOT NULL DEFAULT 0")))
     _ensure_columns("api_keys", (
         ("reserved_cents", "INTEGER DEFAULT 0"), ("deleted_at", "INTEGER")))
     _ensure_columns("jobs", (
@@ -689,6 +736,7 @@ with _db_lock:
         ("lease_until", "INTEGER"), ("started", "INTEGER"), ("finished", "INTEGER")))
     _ensure_columns("api_logs", (("item_idx", "INTEGER"),))
     _ensure_columns("shares", (
+        ("page_views", "INTEGER NOT NULL DEFAULT 0"),
         ("parse_status", "TEXT DEFAULT 'ready'"), ("source_url", "TEXT"),
         ("parse_error_code", "TEXT"), ("attempts", "INTEGER DEFAULT 0"),
         ("next_attempt_at", "INTEGER DEFAULT 0"), ("lease_owner", "TEXT"),
@@ -848,7 +896,11 @@ def _log_link(value: str) -> str:
     return _privacy_hash("submitted-link", value)[:26]
 
 
-def _free_user_daily_in_conn(conn) -> int:
+def _free_user_daily_in_conn(conn, user_id: Optional[int] = None) -> int:
+    if user_id is not None:
+        user = conn.execute("SELECT daily_limit FROM users WHERE id=?", (user_id,)).fetchone()
+        if user and user[0] is not None:
+            return max(0, min(10000, int(user[0])))
     row = conn.execute("SELECT v FROM app_settings WHERE k='free_user_daily'").fetchone()
     try:
         value = int(row[0]) if row else FREE_USER_DAILY
@@ -857,12 +909,12 @@ def _free_user_daily_in_conn(conn) -> int:
     return max(0, min(10000, value))
 
 
-def free_user_daily() -> int:
+def free_user_daily(user_id: Optional[int] = None) -> int:
     """登录用户的每日免费解析次数；后台保存后立即生效。"""
     with _db_lock:
         conn = _db()
         try:
-            return _free_user_daily_in_conn(conn)
+            return _free_user_daily_in_conn(conn, user_id)
         finally:
             conn.close()
 
@@ -871,7 +923,7 @@ def _quota_subjects(request: Request):
     """登录用户按账户和后台限额计数；匿名按用途摘要和独立限额计数。"""
     u = current_user(request)
     if u:
-        return [f"user:{u['id']}"], free_user_daily()
+        return [f"user:{u['id']}"], free_user_daily(u['id'])
     scope = str(_today())
     subs = [f"ip:{_stored_ip(request, 'quota', scope)}"]
     fp = _stored_fp(request, "quota", scope)
@@ -928,27 +980,65 @@ def _wallet_public(row) -> dict:
             ("balance_cents", "reserved_cents", "spent_cents", "wallet_version")}
 
 
+def _credit_change(conn, uid: int, event: str, event_key: str,
+                   balance: int = 0, reserved: int = 0, spent: int = 0,
+                   note: str = "", request_hash: str = "") -> bool:
+    """写事务中的通用额度记账；次数、冻结数和唯一流水一同提交，不跨日清零。"""
+    previous = conn.execute(
+        "SELECT event,request_hash,balance_delta,reserved_delta,spent_delta,note "
+        "FROM credit_ledger WHERE user_id=? AND event_key=?", (uid, event_key)).fetchone()
+    values = (event, request_hash, balance, reserved, spent, note)
+    if previous:
+        if tuple(previous) != values:
+            raise ApiError(409, "额度请求已变化，请刷新后重试")
+        return False
+    changed = conn.execute(
+        "UPDATE users SET credit_balance=credit_balance+?,credit_reserved=credit_reserved+?,"
+        "credit_spent=credit_spent+?,credit_version=credit_version+1 "
+        "WHERE id=? AND credit_balance+?>=0 AND credit_reserved+?>=0 AND credit_spent+?>=0",
+        (balance, reserved, spent, uid, balance, reserved, spent)).rowcount
+    if changed != 1:
+        raise ApiError(409, "通用额度已变化，请刷新后重试")
+    conn.execute(
+        "INSERT INTO credit_ledger(user_id,ts,event,event_key,request_hash,"
+        "balance_delta,reserved_delta,spent_delta,note) VALUES(?,?,?,?,?,?,?,?,?)",
+        (uid, int(time.time()), event, event_key, request_hash, balance, reserved, spent, note))
+    return True
+
+
+def _credit_public(row) -> dict:
+    return {"name": "通用额度", "balance": int(row["credit_balance"] or 0),
+            "reserved": int(row["credit_reserved"] or 0),
+            "spent": int(row["credit_spent"] or 0), "version": int(row["credit_version"] or 0)}
+
+
 def _reserve_quota_in_conn(conn, day: int, subjects: list[str], limit: int,
                            n: int = 1, partial: bool = False,
                            endpoint: str = "web") -> dict:
     """在调用者已经开启的写事务里预占额度。异步任务用它把占位页和额度原子落库。"""
+    subject = subjects[0] if len(subjects) == 1 else ""
+    match = re.fullmatch(r"(?:atc:)?user:(\d+)", subject)
+    uid = int(match[1]) if match else None
+    user = conn.execute("SELECT * FROM users WHERE id=? AND disabled=0", (uid,)).fetchone() if uid else None
+    # 用户单独额度与全局值都在预占事务内重读，避免管理员修改和请求同时发生时用旧配置。
+    web_parse = bool(uid and subject == f"user:{uid}" and endpoint != "atc_transcript")
+    if web_parse:
+        limit = _free_user_daily_in_conn(conn, uid)
     marks = ",".join("?" for _ in subjects)
     rows = conn.execute(
         f"SELECT count FROM usage_daily WHERE day=? AND subject IN ({marks})",
         (day, *subjects)).fetchall()
     used = max((int(r[0]) for r in rows), default=0)
-    available = max(0, limit - used)
-    # 同一事务读取价格和余额：免费优先，余额只为超出免费部分预授权。
-    subject = subjects[0] if len(subjects) == 1 else ""
-    match = re.fullmatch(r"(?:atc:)?user:(\d+)", subject)
-    uid = int(match[1]) if match else None
-    user = conn.execute("SELECT * FROM users WHERE id=? AND disabled=0", (uid,)).fetchone() if uid else None
+    available = max(0, limit - used) if not uid or user else 0
+    # 每日免费优先，其次通用额度，最后才预授权网页钱包；文案提取保持独立计费。
+    credits = int(user["credit_balance"]) if user and web_parse else 0
     price = _web_price_in_conn(conn, "transcript" if endpoint == "atc_transcript" else "parse")
     affordable = (int(user["balance_cents"]) // price if price else n) if user else 0
-    capacity = available + affordable
+    capacity = available + credits + affordable
     take = min(n, capacity) if partial else (n if n <= capacity else 0)
     free = min(take, available)
-    charge = (take - free) * price
+    credit_units = min(take - free, credits)
+    charge = (take - free - credit_units) * price
     reservation_id = ""
     if take:
         for subject in subjects:
@@ -961,20 +1051,24 @@ def _reserve_quota_in_conn(conn, day: int, subjects: list[str], limit: int,
         conn.execute(
             "INSERT INTO quota_reservations("
             "id,day,subjects,units,committed_units,status,endpoint,created,lease_until,"
-            "user_id,free_units,price_cents"
-            ") VALUES(?,?,?,?,0,'pending',?,?,?,?,?,?)",
+            "user_id,free_units,price_cents,credit_units"
+            ") VALUES(?,?,?,?,0,'pending',?,?,?,?,?,?,?)",
             (reservation_id, day, json.dumps(subjects, ensure_ascii=False),
              take, endpoint[:40], now, now + QUOTA_RESERVATION_TTL,
-             uid if user else None, free, price))
+             uid if user else None, free, price, credit_units))
+        if credit_units:
+            _credit_change(conn, uid, "reserve", reservation_id + ":reserve",
+                           balance=-credit_units, reserved=credit_units)
         if charge:
             _wallet_change(conn, uid, "reserve", reservation_id + ":reserve",
                            balance=-charge, reserved=charge)
     return {"ok": take == n, "reserved": take, "limit": limit,
             "used_before": used, "used_after": used + free,
             "remaining": max(0, limit - used - free),
-            "free_units": free, "price_cents": price, "reserved_cents": charge,
+            "free_units": free, "credit_units": credit_units,
+            "price_cents": price, "reserved_cents": charge,
             "insufficient_balance": bool(uid and take < n),
-            "day": day, "subjects": subjects, "id": reservation_id}
+            "day": day, "subjects": subjects, "endpoint": endpoint, "id": reservation_id}
 
 
 def reserve_quota(request: Request, n: int = 1, partial: bool = False,
@@ -989,6 +1083,7 @@ def reserve_quota(request: Request, n: int = 1, partial: bool = False,
             conn.execute("BEGIN IMMEDIATE")
             reservation = _reserve_quota_in_conn(
                 conn, day, subs, limit, n, partial, endpoint)
+            _attach_referral_in_conn(conn, request, reservation)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1016,8 +1111,13 @@ def _settle_quota_in_conn(conn, reservation_id: str,
         conn.execute(
             "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
             (refund, int(row["day"]), subject))
-    held = (units - free) * int(row["price_cents"])
-    cost = max(0, committed - free) * int(row["price_cents"])
+    credits = int(row["credit_units"] or 0)
+    credit_cost = min(credits, max(0, committed - free))
+    if credits:
+        _credit_change(conn, row["user_id"], "settle", reservation_id + ":settle",
+                       balance=credits - credit_cost, reserved=-credits, spent=credit_cost)
+    held = (units - free - credits) * int(row["price_cents"])
+    cost = max(0, committed - free - credits) * int(row["price_cents"])
     if held:
         _wallet_change(conn, row["user_id"], "settle", reservation_id + ":settle",
                        balance=held - cost, reserved=-held, spent=cost)
@@ -1026,6 +1126,7 @@ def _settle_quota_in_conn(conn, reservation_id: str,
         "UPDATE quota_reservations SET committed_units=?,status=?,settled=? "
         "WHERE id=? AND status='pending'",
         (committed, status, int(time.time()), reservation_id))
+    _reward_referral_in_conn(conn, row, committed)
     return committed
 
 
@@ -1041,11 +1142,16 @@ def _admin_refund_quota_in_conn(conn, reservation_id: str) -> Optional[int]:
         return None
     committed = int(row["committed_units"] or 0)
     free = int(row["units"]) if row["free_units"] is None else int(row["free_units"])
-    cost = max(0, committed - free) * int(row["price_cents"])
+    credits = int(row["credit_units"] or 0)
+    credit_cost = min(credits, max(0, committed - free))
+    cost = max(0, committed - free - credits) * int(row["price_cents"])
     for subject in json.loads(row["subjects"] or "[]"):
         conn.execute(
             "UPDATE usage_daily SET count=MAX(0,count-?) WHERE day=? AND subject=?",
             (min(free, committed), int(row["day"]), subject))
+    if credit_cost:
+        _credit_change(conn, row["user_id"], "refund", reservation_id + ":admin_refund",
+                       balance=credit_cost, spent=-credit_cost)
     if cost:
         _wallet_change(conn, row["user_id"], "refund", reservation_id + ":admin_refund",
                        balance=cost, spent=-cost)
@@ -1582,6 +1688,8 @@ def _cleanup_retained_data(force: bool = False) -> None:
             # 覆盖小时窗口和跨日边界，同时避免审计摘要无限增长。
             conn.execute("DELETE FROM share_submissions WHERE ts<?",
                          (int(now) - 2 * 86400,))
+            # 归因明细只有 24 小时；奖励账本与去重摘要不能随普通访问日志清理。
+            conn.execute("DELETE FROM referral_visits WHERE expires_at<=?", (int(now),))
             conn.execute("DELETE FROM parse_snapshots WHERE expires_at<=?", (int(now),))
             conn.execute("DELETE FROM user_sessions WHERE expires_at<=? "
                          "OR user_id NOT IN (SELECT id FROM users WHERE disabled=0)", (int(now),))
@@ -2486,6 +2594,20 @@ def _raw_open(url: str, follow: bool, headers: dict, timeout: int, proxy: Option
         raise
 
 
+_metadata_deadline = ContextVar("metadata_deadline", default=None)
+_metadata_fallback_rejected = ContextVar("metadata_fallback_rejected", default=None)
+
+
+def _metadata_time_left(default: float = 20) -> float:
+    deadline = _metadata_deadline.get()
+    if deadline is None:
+        return default
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("metadata budget exhausted")
+    return min(default, remaining)
+
+
 def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
              timeout: int = 30, retry_http_statuses: tuple = (),
              ban_on_auth_error: bool = True,
@@ -2510,19 +2632,20 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
             raise ApiError(503, "没有可用代理，且已开启「禁止服务器直连」——为避免暴露服务器 IP，"
                                 "不会直连抖音。请在管理后台添加并启用代理。")
         _parse_event("network", "direct")
-        r = _raw_open(url, follow, hdrs, timeout, None)
+        r = _raw_open(url, follow, hdrs, _metadata_time_left(timeout), None)
         proxy_mgr.mark_ok(None)
         return r, None
 
     cands = cands[:proxy_mgr.retries]               # 每请求最多尝试 N 个代理
     errors = []
     for i, p in enumerate(cands):
+        attempt_timeout = _metadata_time_left(timeout)
         if i > 0:
             proxy_mgr.note_retry()                  # 记录一次自动重试（换代理）
         t0 = time.time()
         try:
             _parse_event("network", "proxy", attempt=i + 1)
-            r = _raw_open(url, follow, hdrs, timeout, p)
+            r = _raw_open(url, follow, hdrs, attempt_timeout, p)
             proxy_mgr.mark_ok(p, int((time.time() - t0) * 1000))
             return r, p
         except urlerr.HTTPError as e:
@@ -2582,7 +2705,7 @@ def open_url(url: str, follow: bool = True, headers: Optional[dict] = None,
     if proxy_mgr.force_proxy:
         raise ApiError(502, "全部代理均不可用，且已禁止服务器直连抖音。"
                             "请在管理后台检查代理状态。")
-    r = _raw_open(url, follow, hdrs, timeout, None)
+    r = _raw_open(url, follow, hdrs, _metadata_time_left(timeout), None)
     proxy_mgr.mark_ok(None)
     return r, None
 
@@ -3352,6 +3475,21 @@ _metadata_retry_lock = threading.RLock()
 _metadata_retries: dict = {}      # item_id -> (下次重试时间, 是否进行中)
 _metadata_last_failure: dict = {}
 METADATA_RETRY_SECONDS = 60
+BROWSER_TITLE_TIMEOUT_SECONDS = min(15, max(2, float(os.environ.get("BROWSER_TITLE_TIMEOUT_SECONDS", "6"))))
+_browser_title_lock = threading.RLock()
+_browser_title_jobs: dict = {}
+_browser_title_results: dict = {}
+_browser_title_service = BrowserTitleService(
+    enabled=os.environ.get("BROWSER_TITLE_ENABLED", "1").lower() not in ("0", "false", "off"),
+    timeout=BROWSER_TITLE_TIMEOUT_SECONDS,
+    workers=min(2, max(1, int(os.environ.get("BROWSER_TITLE_WORKERS", "2")))),
+    max_queue=min(64, max(1, int(os.environ.get("BROWSER_TITLE_QUEUE_MAX", "8")))),
+    startup_timeout=float(os.environ.get("BROWSER_TITLE_STARTUP_TIMEOUT_SECONDS", "12")),
+    python_executable=(os.environ.get("BROWSER_TITLE_PYTHON") or
+                       (str(Path(__file__).resolve().parent / ".venv-metadata/bin/python")
+                        if (Path(__file__).resolve().parent / ".venv-metadata/bin/python").is_file() else None)),
+    proxy=os.environ.get("BROWSER_TITLE_PROXY_URL") or None,
+)
 CDN_HEADERS = {
     "Referer": "https://www.douyin.com/",
     "Accept-Encoding": "identity",
@@ -3366,6 +3504,7 @@ def _cache_get(key: str):
 def _cache_put(key: str, value: dict, now: Optional[float] = None) -> None:
     now = time.time() if now is None else float(now)
     with _cache_lock:
+        value = _browser_title_merge(str(key), value)
         _cache[str(key)] = (now, value)
         if len(_cache) <= 500:
             return
@@ -3494,8 +3633,15 @@ def _douyin_item_lock(item_id: str):
         entry["last"] = time.time()
         lock = entry["lock"]
     try:
-        with lock:
+        deadline = _metadata_deadline.get()
+        acquired = (lock.acquire(timeout=_metadata_time_left())
+                    if deadline is not None else lock.acquire())
+        if not acquired:
+            raise TimeoutError("metadata lock budget exhausted")
+        try:
             yield
+        finally:
+            lock.release()
     finally:
         with _douyin_item_locks_guard:
             current = _douyin_item_locks.get(item_id)
@@ -3577,6 +3723,7 @@ def _douyin_resolve_share_url(short_url: str) -> tuple[str, str, str]:
     current = str(short_url).strip()
     visited = set()
     for _ in range(6):
+        _metadata_time_left()
         if current in visited:
             raise ApiError(502, "抖音官方链接出现循环跳转，请稍后重试")
         visited.add(current)
@@ -3607,7 +3754,9 @@ def _douyin_resolve_share_url(short_url: str) -> tuple[str, str, str]:
                     raise ApiError(400, "抖音官方短链跳转目标无效")
                 current = target
                 continue
-            if hasattr(resp, "read"):
+            if _metadata_deadline.get() is not None:
+                body = _metadata_read_body(resp, 256 * 1024)
+            elif hasattr(resp, "read"):
                 try:
                     body = resp.read(256 * 1024)
                 except TypeError:
@@ -3718,7 +3867,37 @@ def _douyin_extract_json_after(text: str, marker: str):
     return None
 
 
-def _douyin_html_payloads(text: str) -> list:
+class _DouyinPageMetadata(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.values = {}
+        self.urls = []
+        self.page_title = []
+        self.in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag.lower() == "meta":
+            name = str(attrs.get("property") or attrs.get("name") or "").lower()
+            value = attrs.get("content") or ""
+            self.values.setdefault(name, value)
+            if name == "og:url":
+                self.urls.append(value)
+        elif tag.lower() == "link" and "canonical" in (attrs.get("rel") or "").lower().split():
+            self.urls.append(attrs.get("href") or "")
+        elif tag.lower() == "title":
+            self.in_title = True
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.page_title.append(data)
+
+
+def _douyin_html_payloads(text: str, item_id: str = "") -> list:
     payloads = []
     for marker in ("window._ROUTER_DATA", "window.__ROUTER_DATA",
                    "window._SSR_DATA", "window.__SSR_DATA"):
@@ -3734,33 +3913,88 @@ def _douyin_html_payloads(text: str) -> list:
                 payloads.append(value)
         except (TypeError, ValueError):
             pass
+    for match in re.finditer(
+            r"<script\b[^>]*\bid=[\"']RENDER_DATA[\"'][^>]*>(.*?)</script>",
+            text, re.I | re.S):
+        try:
+            payloads.append(json.loads(urlparse.unquote(html_unescape(match.group(1).strip()))))
+        except (TypeError, ValueError):
+            pass
+    if item_id:
+        page = _DouyinPageMetadata()
+        page.feed(text)
+        identities = {_douyin_item_from_url(url)[1] for url in page.urls}
+        # canonical/og:url 必须明确指向当前作品；URL 请求本身不证明空壳页属于作品。
+        if identities == {item_id}:
+            title = next((value for value in (_valid_title(page.values.get(key)) for key in
+                          ("og:title", "twitter:title", "og:description", "description")) if value), "")
+            if not title:
+                title = _valid_title("".join(page.page_title))
+            if title:
+                title = re.sub(r"\s*[-|_]\s*抖音\s*$", "", title).strip()
+                payloads.append({"aweme_id": item_id, "desc": title, "video": {},
+                                 "_title_source": "official_meta"})
     return payloads
+
+
+def _metadata_read_body(response, limit: int) -> bytes:
+    """小块读取并更新 socket 剩余超时，慢响应不能为每个块重新获得完整预算。"""
+    chunks, size = [], 0
+    reader = getattr(response, "read1", None) or response.read
+    while size < limit:
+        remaining = _metadata_time_left()
+        sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+        if sock is not None:
+            sock.settimeout(remaining)
+        chunk = reader(min(64 * 1024, limit - size))
+        _metadata_time_left()
+        if not chunk:
+            break
+        if not isinstance(chunk, bytes):
+            chunk = str(chunk).encode("utf-8")
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
 
 
 def _douyin_fetch_html(kind: str, item_id: str) -> tuple[str, list]:
     url = _douyin_work_url(kind, item_id)
     response = None
     try:
-        response, used_proxy = open_url(
-            url,
-            headers={
+        bounded = _metadata_deadline.get() is not None
+        for attempt in range(3):
+            response, used_proxy = open_url(
+                url, follow=not bounded,
+                headers={
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
                 "Referer": "https://www.douyin.com/",
-            },
-            timeout=20)
+                }, timeout=_metadata_time_left())
+            location = _douyin_response_location(response) if bounded else ""
+            if not location:
+                break
+            target = urlparse.urljoin(url, location)
+            if not _is_douyin_work_url(target) or attempt == 2:
+                raise ApiError(502, "抖音官方页面跳转无效")
+            response.close()
+            response = None
+            url = target
         if used_proxy:
             # SSR/JSON-LD 里的签名媒体也可能绑定抓取时出口；
             # 固定后续图片/视频请求的代理出口。
             _remember_douyin_media_proxy(item_id, used_proxy)
-        try:
-            raw = response.read(4 * 1024 * 1024)
-        except TypeError:
-            raw = response.read()
+        if bounded:
+            raw = _metadata_read_body(response, 4 * 1024 * 1024)
+        else:
+            try:
+                raw = response.read(4 * 1024 * 1024)
+            except TypeError:
+                raw = response.read()
         if (response.headers.get("Content-Encoding") or "").lower() == "gzip":
             raw = gzip.decompress(raw)
         text = raw.decode("utf-8", "replace")
-        return text, _douyin_html_payloads(text)
+        _metadata_time_left()
+        return text, _douyin_html_payloads(text, item_id)
     finally:
         if response is not None:
             try:
@@ -3843,7 +4077,7 @@ def _douyin_number(value):
             return None
 
 
-def _douyin_find_item(payload, _depth: int = 0):
+def _douyin_find_item(payload, _depth: int = 0, expected_item_id: str = ""):
     """从官方响应/SSR 任意嵌套层找作品对象。"""
     if _depth > 16:
         return None
@@ -3852,32 +4086,39 @@ def _douyin_find_item(payload, _depth: int = 0):
         for key in ("aweme_detail", "item", "aweme", "post", "data"):
             value = payload.get(key)
             if isinstance(value, dict):
-                found = _douyin_find_item(value, _depth + 1)
+                found = _douyin_find_item(value, _depth + 1, expected_item_id)
                 if found:
                     return found
             elif isinstance(value, list):
-                found = _douyin_find_item(value, _depth + 1)
+                found = _douyin_find_item(value, _depth + 1, expected_item_id)
                 if found:
                     return found
         for key in ("item_list", "aweme_list", "items", "list"):
             value = payload.get(key)
             if isinstance(value, list):
                 for entry in value:
-                    found = _douyin_find_item(entry, _depth + 1)
+                    found = _douyin_find_item(entry, _depth + 1, expected_item_id)
                     if found:
                         return found
-        if (any(key in payload for key in ("aweme_id", "awemeId", "item_id"))
-                and any(key in payload for key in ("video", "images", "statistics", "author", "desc"))):
-            return payload
+        if (any(key in payload for key in ("aweme_id", "awemeId", "item_id", "itemId"))
+                and any(key in payload for key in ("video", "images", "statistics", "author", "desc", "title", "description"))):
+            identity = str(_douyin_first(payload, "aweme_id", "awemeId", "item_id", "itemId") or "")
+            if not expected_item_id or identity == expected_item_id:
+                return payload
         if payload.get("@type") in ("VideoObject", "ImageObject"):
-            return payload
+            urls = [payload.get(key) for key in ("url", "@id", "mainEntityOfPage")]
+            identities = {_douyin_item_from_url(value.get("@id", "") if isinstance(value, dict) else value)[1]
+                          for value in urls if value}
+            identities.discard("")
+            if not expected_item_id or identities == {expected_item_id}:
+                return payload
         for value in payload.values():
-            found = _douyin_find_item(value, _depth + 1)
+            found = _douyin_find_item(value, _depth + 1, expected_item_id)
             if found:
                 return found
     elif isinstance(payload, list):
         for value in payload:
-            found = _douyin_find_item(value, _depth + 1)
+            found = _douyin_find_item(value, _depth + 1, expected_item_id)
             if found:
                 return found
     return None
@@ -3956,13 +4197,13 @@ def _douyin_cached_note_media(item_id: str,
 
 
 def _douyin_note_result_with_media(result: dict,
-                                   item_id: str) -> Optional[dict]:
+                                   item_id: str, *, record: Optional[dict] = None) -> Optional[dict]:
     """给图集快照注入当前有效的 CDN 与同源刷新端点。
 
     数据库/结果缓存只保留文件名等稳定元数据；原始签名
     URL 只住在短时内存缓存里，避免分享页长期下发死链。
     """
-    record = _douyin_cached_note_media(item_id)
+    record = record if record is not None else _douyin_cached_note_media(item_id)
     if not record:
         return None
     urls = list(record.get("urls") or [])
@@ -4032,9 +4273,9 @@ def _sweep_douyin_memory() -> None:
 
 
 def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
-                          kind_hint: str = "") -> Optional[dict]:
+                          kind_hint: str = "", *, cache_media: bool = True) -> Optional[dict]:
     """把 detail/SSR/JSON-LD 归一化成首页、分享页和 API 共用的结果契约。"""
-    item = _douyin_find_item(payload)
+    item = _douyin_find_item(payload, expected_item_id=item_id_hint)
     if not isinstance(item, dict):
         return None
     item_id = str(_douyin_first(
@@ -4115,11 +4356,9 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
             default=_douyin_first(item, "share_count", "shareCount", default=None))),
     }
 
-    title = str(_douyin_first(
-        item, "desc", "title", "name", "preview_title", "item_title",
-        "description", default="（无标题）") or "（无标题）").strip()
-    title = title[:1000] or "（无标题）"
-    content = str(_douyin_first(item, "desc", "description", "content", default=title) or title)
+    title = _first_valid_title(item, "desc", "title", "name", "preview_title", "item_title",
+                               "description", "caption", "content") or "（无标题）"
+    content = _first_valid_title(item, "desc", "description", "content", "caption", limit=20000)
     tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content)))[:50]
     for extra in item.get("text_extra") or item.get("textExtra") or []:
         if isinstance(extra, dict):
@@ -4183,13 +4422,16 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
 
     result = {
         "kind": kind, "item_id": item_id, "source": "douyin_direct",
-        "metadata_source": "douyin_web", "title": title, "platform": "douyin",
+        "metadata_source": "douyin_web", "title": title, "content": content, "platform": "douyin",
         "share_supported": True, "author": author, "avatar": avatar,
         "author_url": author_url, "create_time": _douyin_number(
             _douyin_first(item, "create_time", "createTime", default=None)),
         "stats": stats, "tags": tags, "music": None, "location": None,
-        "base": base, "cover": cover, "_link": work_url,
+        "base": base, "cover": cover, "_link": work_url, "author_detail": author_detail,
     }
+    if _valid_title(title):
+        result["title_source"] = item.get("_title_source") or "official_structured"
+        result["title_status"] = "partial" if is_truncated_title(title, item) else "available"
     music = _douyin_first(item, "music", default={})
     if isinstance(music, dict):
         result["music"] = {
@@ -4203,12 +4445,15 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
 
     if kind == "note":
         if not image_values:
-            return None
-        _douyin_cache_note_media(item_id, image_values)
+            result.update(images=[], metadata_only=True)
+            return result
+        if cache_media:
+            _douyin_cache_note_media(item_id, image_values)
         result["images"] = [
             {"index": index, "filename": f"{base}_{index:02d}.jpeg"}
             for index, _ in enumerate(image_values, 1)]
-        return _douyin_note_result_with_media(result, item_id)
+        return _douyin_note_result_with_media(
+            result, item_id, record=None if cache_media else {"urls": image_values})
 
     # 官方 video.duration 明确为毫秒；JSON-LD/item.duration 通常为 ISO-8601
     # 或秒。依据字段语义区分，避免把 1000 秒以上的长视频误当毫秒。
@@ -4231,7 +4476,7 @@ def _douyin_native_result(payload, work_url: str, item_id_hint: str = "",
         "height": _douyin_first(video_data, "height", default=None),
         "video_id": video_id, "media_available": bool(direct_url),
     }
-    if direct_url:
+    if direct_url and cache_media:
         _douyin_cache_media(
             item_id, all_video_urls,
             proxy=_douyin_media_proxy_for_item(item_id))
@@ -4275,19 +4520,40 @@ def _parse_douyin_item_direct(kind: str, item_id: str,
         try:
             _parse_event("official", "html")
             _, payloads = _douyin_fetch_html(kind, item_id)
-        except ApiError:
+        except ApiError as exc:
+            _parse_event("official", _parse_error_code(exc), "warn")
             raise
-        except Exception:
+        except Exception as exc:
+            # 网络失败与空页面分别诊断；只保存白名单分类及 HTTP 状态，
+            # 不记录异常文本、上游响应或带签名的地址。
+            _parse_event("official", _parse_error_code(exc), "warn",
+                         http_status=exc.code if isinstance(exc, urlerr.HTTPError) else None)
+            if isinstance(exc, urlerr.HTTPError):
+                exc.close()
             payloads = []
         for candidate in payloads:
+            _metadata_time_left()
             normalized = _douyin_native_result(
-                candidate, work_url or _douyin_work_url(kind, item_id), item_id, kind)
-            if normalized and (normalized.get("kind") == "note"
-                               or (normalized.get("video") or {}).get("media_available")):
-                _douyin_result_cache[item_id] = (time.time(), normalized)
-                return normalized
-            if normalized and result is None:
+                candidate, work_url or _douyin_work_url(kind, item_id), item_id, kind,
+                cache_media=not (result and _result_has_media(result)))
+            if not normalized:
+                continue
+            if result is None:
                 result = normalized
+            elif result.get("kind") == normalized.get("kind"):
+                # 后续 meta 只补空字段；第一个媒体线路保持原样。
+                if not _result_has_media(result) and _result_has_media(normalized):
+                    result = _merge_metadata_snapshot(normalized, result)
+                else:
+                    result = _merge_metadata_snapshot(result, normalized)
+            elif not _result_has_media(result) and _result_has_media(normalized):
+                result = normalized
+        if result and result.get("author_detail"):
+            _author_cache[item_id] = (time.time(), result["author_detail"])
+        if result and _result_has_media(result):
+            result.pop("metadata_only", None)
+            _douyin_result_cache[item_id] = (time.time(), result)
+            return result
         if result:
             # 官方 HTML 可能只有元数据；允许调用方看到作者/点赞，但明确媒体不可用。
             result["metadata_only"] = True
@@ -4410,7 +4676,7 @@ def _parse_item(kind: str, item_id: str) -> dict:
 
 def _remember_parse_result(key: str, data: dict, now: float) -> dict:
     """成功后先持久化展示快照，再返回结果；网页、批量和开放 API 共用。"""
-    data = dict(data)
+    data = _without_title_hint(data)
     data["snapshot_at"] = int(now)
     detail = _snapshot_author(data)
     previous = _get_parse_snapshot(str(data.get("item_id") or "")) or {}
@@ -4427,12 +4693,12 @@ def _remember_parse_result(key: str, data: dict, now: float) -> dict:
     if data.get("kind") == "video" and re.fullmatch(r"[\w-]{8,40}", str(data.get("item_id") or "")):
         data.setdefault("video", {})["download_refresh_url"] = _video_download_refresh_url(data["item_id"])
     data = _download_filenames(data)
-    _save_parse_snapshot(data, source_text=key)
+    data = _save_parse_snapshot(data, source_text=key)
     _backfill_share_metadata(data)
     _parse_event("snapshot", "snapshot", "ok")
     _cache_put(key, data, now)
     _cache_put(data["item_id"], data, now)
-    return data
+    return _browser_title_merge(key, data)
 
 
 @_traced_parse("internal")
@@ -4475,7 +4741,7 @@ def _parse_cached(text: str) -> dict:
                         item_id_hint=item_id,
                         kind_hint=cached_data.get("kind") or "video",
                     )
-                    return _remember_parse_result(key, refreshed, time.time())
+                    return _with_title_hint(_remember_parse_result(key, refreshed, time.time()), text)
                 except Exception as exc:
                     _parse_event("cache", _parse_error_code(exc), "warn")
                     # 刷新失败时只返回元数据和可再刷新的同源端点，
@@ -4505,11 +4771,11 @@ def _parse_cached(text: str) -> dict:
                             safe_video["proxy_url"] = _douyin_video_proxy_url(item_id)
                             safe_video["download_url"] = _douyin_video_download_url(
                                 item_id, filename)
-                    return _download_filenames(safe)
-            return _download_filenames(_retry_cached_metadata(key, cached_data))
+                    return _with_title_hint(_download_filenames(safe), text)
+            return _with_title_hint(_download_filenames(_retry_cached_metadata(key, cached_data)), text)
     _parse_event("cache", "cache_miss")
     data = _parse_share(text)
-    return _remember_parse_result(key, data, time.time())
+    return _with_title_hint(_remember_parse_result(key, data, time.time()), text)
 
 
 # ---------------------------------------------------------------- 分享页
@@ -4660,6 +4926,212 @@ def _share_state(row: dict) -> str:
     return "ok"
 
 
+# 分享奖励：服务端签名的随机浏览器标识，仅用于去重，不采集硬件指纹。
+REWARD_BROWSER_TTL = 30 * 86400
+REFERRAL_VISIT_TTL = 86400
+SHARE_REWARD_MAX = 5
+
+
+def _reward_signature(purpose: str, value: str) -> str:
+    return hmac.new(APP_SECRET, ("reward:v1:" + purpose + ":" + value).encode(), hashlib.sha256).hexdigest()
+
+
+def _reward_browser_id(request: Request) -> str:
+    prepared = getattr(request.state, "reward_browser_id", "")
+    if prepared:
+        return prepared
+    value = request.cookies.get("reward_browser", "")
+    parts = value.split(".")
+    if (len(parts) != 3 or not re.fullmatch(r"\d{10,12}", parts[0])
+            or not re.fullmatch(r"[A-Za-z0-9_-]{24,64}", parts[1])
+            or not re.fullmatch(r"[a-f0-9]{64}", parts[2])):
+        return ""
+    now = int(time.time())
+    if not now < int(parts[0]) <= now + REWARD_BROWSER_TTL + 300:
+        return ""
+    return parts[1] if hmac.compare_digest(parts[2], _reward_signature("browser", ".".join(parts[:2]))) else ""
+
+
+def _prepare_reward_browser(request: Request, response: Response) -> None:
+    if _reward_browser_id(request):
+        return
+    token = secrets.token_urlsafe(24)
+    value = str(int(time.time()) + REWARD_BROWSER_TTL) + "." + token
+    request.state.reward_browser_id = token
+    response.set_cookie("reward_browser", value + "." + _reward_signature("browser", value),
+                        httponly=True, samesite="lax", secure=COOKIE_SECURE, max_age=REWARD_BROWSER_TTL)
+
+
+def _referral_facts(request: Request) -> tuple:
+    browser_id = _reward_browser_id(request)
+    device = _privacy_hash("reward-device", browser_id) if browser_id else ""
+    try:
+        address = ipaddress.ip_address(_client_ip(request))
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        network = str(ipaddress.ip_network(f"{address}/{24 if address.version == 4 else 64}", strict=False))
+    except ValueError:
+        return device, ""
+    return device, _privacy_hash("reward-network", network)
+
+
+def _record_reward_signals_in_conn(conn, uid: int, request: Request) -> None:
+    device, network = _referral_facts(request)
+    for kind, value in (("device", device), ("network", network)):
+        if value:
+            conn.execute("INSERT OR IGNORE INTO referral_identity_signals(user_id,kind,signal_hash,created) VALUES(?,?,?,?)",
+                         (uid, kind, value, int(time.time())))
+            # 账户历史限制大小；已经发过奖励的去重事实另行长期保留。
+            conn.execute("DELETE FROM referral_identity_signals WHERE user_id=? AND kind=? AND rowid NOT IN "
+                         "(SELECT rowid FROM referral_identity_signals WHERE user_id=? AND kind=? ORDER BY created DESC,rowid DESC LIMIT 128)",
+                         (uid, kind, uid, kind))
+
+
+def _reward_share_in_conn(conn, sid: str):
+    row = conn.execute("SELECT s.* FROM shares s JOIN users u ON u.id=s.owner_user_id "
+                       "WHERE s.id=? AND u.disabled=0", (sid,)).fetchone()
+    if not row or row["status"] != "ok" or _share_state(dict(row)) != "ok":
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    platform_name = payload.get("platform") or ("douyin" if payload.get("source") in ("douyin", "douyin_direct", "douyin_web") else "")
+    if (not platform_name or not row["item_id"] or row["kind"] not in ("video", "note")
+            or conn.execute("SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?", (row["kind"], row["item_id"])).fetchone()):
+        return None
+    result = dict(row)
+    result["work_key"] = _privacy_hash("reward-work", f"{platform_name}:{row['kind']}:{row['item_id']}")
+    return result
+
+
+def _referral_visit_id(request: Request) -> str:
+    parts = request.cookies.get("share_referral", "").split(".")
+    if (len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9_-]{24,64}", parts[0])
+            and re.fullmatch(r"[a-f0-9]{64}", parts[1])
+            and hmac.compare_digest(parts[1], _reward_signature("visit", parts[0]))):
+        return parts[0]
+    return ""
+
+
+def _referral_owner_matches(conn, owner: int, device: str, network: str) -> bool:
+    return bool(conn.execute("SELECT 1 FROM referral_identity_signals WHERE user_id=? "
+                             "AND ((kind='device' AND signal_hash=?) OR (kind='network' AND signal_hash=?)) LIMIT 1",
+                             (owner, device, network)).fetchone())
+
+
+def _create_referral_visit(request: Request, response: Response, sid: str) -> None:
+    """访问只建立归因，不发奖励；访问、网络和浏览器数量都有界。"""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", sid):
+        return
+    device, network = _referral_facts(request)
+    if not device or not network:
+        return
+    user = current_user(request)
+    uid = user["id"] if user else None
+    now = int(time.time())
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            share = _reward_share_in_conn(conn, sid)
+            if (not share or share["owner_user_id"] == uid
+                    or _referral_owner_matches(conn, share["owner_user_id"], device, network)):
+                conn.rollback()
+                return
+            owner = share["owner_user_id"]
+            # 旧分享也可参与；至少要有分享者本人登录/解析时记录的网络事实。
+            if not conn.execute("SELECT 1 FROM referral_identity_signals WHERE user_id=? AND kind='network' LIMIT 1", (owner,)).fetchone():
+                conn.rollback()
+                return
+            visit = conn.execute("SELECT id FROM referral_visits WHERE sid=? AND device_hash=? AND network_hash=? "
+                                 "AND COALESCE(visitor_user_id,0)=? AND expires_at>? AND consumed=0 ORDER BY created DESC LIMIT 1",
+                                 (sid, device, network, uid or 0, now)).fetchone()
+            if visit:
+                visit_id = visit["id"]
+            else:
+                counts = conn.execute(
+                    "SELECT (SELECT COUNT(*) FROM referral_visits WHERE network_hash=? AND created>?),"
+                    "(SELECT COUNT(*) FROM referral_visits WHERE device_hash=? AND created>?),"
+                    "(SELECT COUNT(*) FROM referral_visits WHERE created>?)",
+                    (network, now - 3600, device, now - 3600, now - 3600)).fetchone()
+                if int(counts[0] or 0) >= 60 or int(counts[1] or 0) >= 20 or counts[2] >= 10000:
+                    conn.rollback()
+                    return
+                visit_id = secrets.token_urlsafe(24)
+                conn.execute("INSERT INTO referral_visits(id,sid,owner_user_id,visitor_user_id,device_hash,network_hash,work_key,created,expires_at) "
+                             "VALUES(?,?,?,?,?,?,?,?,?)", (visit_id, sid, owner, uid, device, network, share["work_key"], now, now + REFERRAL_VISIT_TTL))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    response.set_cookie("share_referral", visit_id + "." + _reward_signature("visit", visit_id),
+                        httponly=True, samesite="lax", secure=COOKIE_SECURE, max_age=REFERRAL_VISIT_TTL)
+
+
+def _bind_referral_login_in_conn(conn, uid: int, request: Request) -> None:
+    visit_id = _referral_visit_id(request)
+    device, network = _referral_facts(request)
+    if visit_id and device and network:
+        # 首个登录账号绑定后不可再改绑；后续换号也不能复用归因。
+        conn.execute("UPDATE referral_visits SET visitor_user_id=? WHERE id=? AND visitor_user_id IS NULL "
+                     "AND device_hash=? AND network_hash=? AND expires_at>? AND consumed=0",
+                     (uid, visit_id, device, network, int(time.time())))
+
+
+def _attach_referral_in_conn(conn, request: Request, reservation: dict) -> None:
+    if not reservation.get("id"):
+        return
+    row = conn.execute("SELECT user_id,endpoint FROM quota_reservations WHERE id=?", (reservation["id"],)).fetchone()
+    if not row or not row["user_id"]:
+        return
+    uid = row["user_id"]
+    _record_reward_signals_in_conn(conn, uid, request)
+    if row["endpoint"] not in ("web", "parse", "parse_batch", "share_parse", "share_parse_async"):
+        return
+    visit_id = _referral_visit_id(request)
+    device, network = _referral_facts(request)
+    if not visit_id or not device or not network:
+        return
+    _bind_referral_login_in_conn(conn, uid, request)
+    visit = conn.execute("SELECT * FROM referral_visits WHERE id=? AND consumed=0 AND expires_at>? "
+                         "AND visitor_user_id=? AND device_hash=? AND network_hash=?",
+                         (visit_id, int(time.time()), uid, device, network)).fetchone()
+    if not visit or visit["owner_user_id"] == uid or _referral_owner_matches(conn, visit["owner_user_id"], device, network):
+        return
+    share = _reward_share_in_conn(conn, visit["sid"])
+    if share and share["owner_user_id"] == visit["owner_user_id"] and share["work_key"] == visit["work_key"]:
+        conn.execute("UPDATE quota_reservations SET referral_visit_id=? WHERE id=?", (visit_id, reservation["id"]))
+
+
+def _reward_referral_in_conn(conn, reservation, committed: int) -> None:
+    """和业务成功结算共用写事务；任何重复回调都不能重复发放。"""
+    if (committed <= 0 or not reservation["referral_visit_id"]
+            or reservation["endpoint"] not in ("web", "parse", "parse_batch", "share_parse", "share_parse_async")):
+        return
+    visit = conn.execute("SELECT * FROM referral_visits WHERE id=? AND consumed=0 AND expires_at>? AND visitor_user_id=?",
+                         (reservation["referral_visit_id"], int(time.time()), reservation["user_id"])).fetchone()
+    if not visit or visit["owner_user_id"] == reservation["user_id"]:
+        return
+    share = _reward_share_in_conn(conn, visit["sid"])
+    owner = visit["owner_user_id"]
+    if (not share or share["owner_user_id"] != owner or share["work_key"] != visit["work_key"]
+            or not conn.execute("SELECT 1 FROM users WHERE id=? AND disabled=0", (reservation["user_id"],)).fetchone()
+            or _referral_owner_matches(conn, owner, visit["device_hash"], visit["network_hash"])):
+        return
+    conn.execute("UPDATE referral_visits SET consumed=1 WHERE id=?", (visit["id"],))
+    if conn.execute("SELECT COUNT(*) FROM share_credit_rewards WHERE owner_user_id=? AND work_key=?", (owner, visit["work_key"])).fetchone()[0] >= SHARE_REWARD_MAX:
+        return
+    changed = conn.execute("INSERT OR IGNORE INTO share_credit_rewards(owner_user_id,visitor_user_id,device_hash,network_hash,work_key,sid,reservation_id,created) "
+                           "VALUES(?,?,?,?,?,?,?,?)", (owner, reservation["user_id"], visit["device_hash"], visit["network_hash"],
+                            visit["work_key"], visit["sid"], reservation["id"], int(time.time()))).rowcount
+    if changed:
+        _credit_change(conn, owner, "share_reward", "referral:" + str(reservation["user_id"]),
+                       balance=1, note="分享奖励 +1")
+
+
 _LEGACY_DIRECT_SOURCES = frozenset(("douyin_direct", "douyin_web"))
 
 
@@ -4792,10 +5264,47 @@ def _share_original_url(row: dict, data: dict) -> str:
     return ""
 
 
+def _share_titles(row: dict, data: Optional[dict] = None) -> dict:
+    """自定义标题只在当前分享展示时覆盖，不回写原作品快照。"""
+    if data is None:
+        try:
+            data = json.loads(row.get("payload") or "{}")
+        except (TypeError, ValueError):
+            data = {}
+    data = data if isinstance(data, dict) else {}
+    hinted = data.get("title_source") == "share_text"
+    original = next((title for value in (
+        "" if hinted else data.get("title"), data.get("content"),
+        row.get("title"), data.get("title_hint"), data.get("title")
+    ) if (title := _valid_title(value))), "")
+    custom = str(row.get("custom_title") or "").strip()
+    fallback = ("视频正在准备中" if _share_state(row) in ("pending", "processing")
+                else "（无标题）")
+    return {"title": custom or original or fallback,
+            "original_title": original, "custom_title": custom}
+
+
 def _share_view(row: dict, origin: str = "") -> dict:
     """把 shares 行转成分享页要用的数据结构（含重拼后的播放地址）。"""
     data = json.loads(row["payload"] or "{}")
     state = _share_state(row)
+    if state == "ok":
+        data = _browser_title_merge(data.get("_link") or "", data)
+        data["metadata_status"] = _browser_title_state(data)
+    data.pop("metadata_url", None)
+    titles = _share_titles(row, data)
+    hint_title = _valid_title(data.get("title_hint") or (
+        data.get("title") if data.get("title_source") == "share_text" else ""))
+    data["title"] = titles["title"]
+    data.setdefault("kind", row["kind"])
+    data.setdefault("item_id", row["item_id"])
+    if titles["custom_title"]:
+        data["title_source"] = "custom"
+        data["title_status"] = "complete"
+    elif data.get("title_source") == "share_text" and titles["original_title"] != hint_title:
+        # 后续补齐的真实标题优先于旧文案提示，不能继续标注为未完整提取。
+        data["title_source"] = "snapshot"
+        data["title_status"] = "complete"
     original_url = _share_original_url(row, data) if state == "ok" else ""
     data.pop("original_url", None)
     if original_url:
@@ -4971,13 +5480,12 @@ def _share_view(row: dict, origin: str = "") -> dict:
         for private_key in ("work_url", "source_url"):
             video.pop(private_key, None)
     if state == "ok":
-        data = _download_filenames(data, fallback_title=row.get("title") or "")
+        data = _download_filenames(data, fallback_title=titles["title"])
     view = {
         "sid": row["id"],
         "kind": row["kind"],
         "item_id": row["item_id"],
-        "title": row["custom_title"] or data.get("title") or row["title"] or (
-            "视频正在准备中" if state in ("pending", "processing") else "（无标题）"),
+        **titles,
         "author": row["author"] or "",
         "avatar": row["avatar"] or "",
         "cover": row["cover"] or "",
@@ -4989,8 +5497,10 @@ def _share_view(row: dict, origin: str = "") -> dict:
         "state": state,
         "ready": state == "ok",
         "shareable": state == "ok",
+        "reward_eligible": bool(row.get("owner_user_id") and state == "ok"),
         "url": f"{origin}/s/{row['id']}" if origin else f"/s/{row['id']}",
-        "views": row["views"], "plays": row["plays"], "downloads": row["downloads"],
+        "views": row["views"], "page_views": int(row.get("page_views") or 0),
+        "plays": row["plays"], "downloads": row["downloads"],
         "data": data,
     }
     if is_note:
@@ -5034,6 +5544,7 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
     kind = str(data.get("kind") or "video")
     reservation_id = (reservation or {}).get("id") or None
     stored_data = _share_storage_payload(data)
+    original_title = _without_title_hint(data).get("title") or ""
     stored_data.setdefault("snapshot_at", now)
     vid = ""
     if data.get("video", {}).get("url"):
@@ -5043,17 +5554,23 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
         conn = _db()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if u:
+                _record_reward_signals_in_conn(conn, u["id"], request)
             if item_id and conn.execute(
                     "SELECT 1 FROM blocked_share_items WHERE kind=? AND item_id=?",
                     (kind, item_id)).fetchone():
                 raise ApiError(451, "content_blocked: 该作品已被下架")
+            data = _browser_title_merge(data.get("_link") or "", data)
+            stored_data = _share_storage_payload(data)
+            stored_data.setdefault("snapshot_at", now)
+            original_title = _without_title_hint(data).get("title") or ""
             conn.execute(
                 "INSERT INTO shares(id,item_id,kind,vid,owner_user_id,owner_fp,owner_ip,"
                 "title,author,avatar,cover,payload,custom_title,visibility,expires_at,"
                 "refreshed_at,status,created,quota_reservation_id,source_url) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, item_id, kind, vid, u["id"] if u else None, "", "",
-                 (data.get("title") or "")[:300], (data.get("author") or "")[:100],
+                 original_title[:300], (data.get("author") or "")[:100],
                  data.get("avatar", ""), data.get("cover", ""),
                  json.dumps(stored_data, ensure_ascii=False), (custom_title or "")[:300],
                  "link", now + share_ttl, now, "ok", now,
@@ -5076,19 +5593,21 @@ def _share_create(request: Request, data: dict, custom_title: str = "",
 
 def _share_event(request: Request, sid: str, kind: str, source: str = "",
                  stage: str = "", detail: str = "", ms: int = 0,
-                 next_src: str = ""):
+                 next_src: str = "", page_view_id: str = ""):
     """记录分享页埋点。播放类事件额外带 source/stage/detail/ms/next_src，用于诊断
     「微信里哪些视频能播、走的哪条线路、失败在哪一步、失败后接着重试哪条」。
     注意：只记线路名，不记带签名的完整媒体地址（隐私红线）。"""
     if (not re.fullmatch(r"[A-Za-z0-9_-]{3,64}", str(sid or ""))
             or kind not in SHARE_EVENT_KINDS):
         return "missing"
+    if kind == "page_view" and not re.fullmatch(r"[A-Za-z0-9_-]{16,96}", page_view_id):
+        return "invalid"
     ip = _client_ip(request)
     if not _rate_ok(
             _share_event_hits, ip, 60, SHARE_EVENT_MAX_PER_MIN):
         return "limited"
     now = int(time.time())
-    col = {"view": "views", "play": "plays",
+    col = {"view": "views", "page_view": "page_views", "play": "plays",
            "download": "downloads", "cta": "cta_clicks"}.get(kind)
     # 同 IP/链接/类型在一分钟内只记一次；诊断事件额外带线路和阶段，
     # 保留真实的 fallback 链，同时防止简单重放污染统计。
@@ -5096,7 +5615,8 @@ def _share_event(request: Request, sid: str, kind: str, source: str = "",
                      if kind.startswith("play_") or kind == "fallback" else "")
     event_key = hmac.new(
         APP_SECRET,
-        f"share-event:v1:{ip}:{sid}:{kind}:{discriminator}:{now // 60}".encode(),
+        (f"share-page-view:v1:{sid}:{page_view_id}" if kind == "page_view" else
+         f"share-event:v1:{ip}:{sid}:{kind}:{discriminator}:{now // 60}").encode(),
         hashlib.sha256).hexdigest()
     try:
         with _db_lock:
@@ -5118,7 +5638,20 @@ def _share_event(request: Request, sid: str, kind: str, source: str = "",
                      detail[:120], max(0, min(300000, int(ms or 0))),
                      next_src[:24], event_key)).rowcount
                 if inserted and col:
-                    conn.execute(f"UPDATE shares SET {col}={col}+1 WHERE id=?", (sid,))
+                    conn.execute(f"UPDATE shares SET {col}=COALESCE({col},0)+1 WHERE id=?", (sid,))
+                if inserted and kind == "page_view":
+                    # PV 按一次页面打开计数；旧 views 保留同 IP 每分钟去重口径。
+                    # 与 PV 在同一事务中写入，重放同一页面事件不会跨分钟重复计数。
+                    view_key = hmac.new(
+                        APP_SECRET, f"share-event:v1:{ip}:{sid}:view::{now // 60}".encode(),
+                        hashlib.sha256).hexdigest()
+                    unique_view = conn.execute(
+                        "INSERT OR IGNORE INTO share_events("
+                        "ts,sid,kind,ip,ua,referer,wechat,fp,event_key) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (now, sid, "view", "", _coarse_ua(request), "",
+                         1 if _is_wechat(request) else 0, "", view_key)).rowcount
+                    if unique_view:
+                        conn.execute("UPDATE shares SET views=COALESCE(views,0)+1 WHERE id=?", (sid,))
                 conn.commit()
                 return "inserted" if inserted else "duplicate"
             except Exception:
@@ -5188,7 +5721,11 @@ def _share_owner_scope(request: Request, user: Optional[dict] = None) -> str:
     return _privacy_hash("async-share-owner", _client_ip(request))
 
 
-def _share_request_hash(source_url: str, title: str) -> str:
+def _share_request_hash(source_url: str, title: str, title_hint: str = "") -> str:
+    # 不带提示的旧请求保持原摘要；不同分享文案不得静默复用同一幂等请求。
+    if title_hint:
+        return _privacy_hash("async-share-request-hint", json.dumps(
+            [source_url, title, title_hint], ensure_ascii=False, separators=(",", ":")))
     return _privacy_hash("async-share-request", f"{source_url}\n{title}")
 
 
@@ -5216,10 +5753,317 @@ def _snapshot_author(data: dict) -> dict:
 _EMPTY_TITLES = ("", "（无标题）", "(无标题)", "暂无标题", "无标题")
 
 
+def _valid_title(value) -> str:
+    """标题只接受有效文本，过滤接口占位和官方通用/验证页面文案。"""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"\s+", " ", value).strip()
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cf", "Cs"))
+    if text.casefold() in (*_EMPTY_TITLES, "untitled", "no title", "null", "none", "unknown"):
+        return ""
+    if re.fullmatch(r"(?:在抖音[，,]?记录美好生活\d*|抖音[，,]?记录美好生活|抖音|验证码|安全验证|访问验证|页面不存在|作品不存在|登录抖音)(?:\s*[-|_]\s*抖音)?", text):
+        return ""
+    return text
+
+
+def _first_valid_title(mapping, *keys, limit: int = 1000) -> str:
+    if not isinstance(mapping, dict):
+        return ""
+    return next((value[:limit] for key in keys if (value := _valid_title(mapping.get(key)))), "")
+
+
+def _extract_title_hint(text: str) -> str:
+    """只保留单链接分享文案中的标题片段；提示不代表核验过的完整原标题。"""
+    text = str(text or "")[:BATCH_TEXT_MAX]
+    matches = list(re.finditer(r"https?://[^\s<>]+", text, re.I))
+    if len(matches) != 1 or not _extract_supported_work_urls(text, 2):
+        return ""
+    candidate = text[:matches[0].start()].strip()
+    # 抖音复制文案：数字口令 + 复制打开抖音，看看【作者的作品】 + 标题。
+    candidate = re.sub(r"^.*?(?:看看|观看)[【\[][^】\]]*的作品[】\]]\s*", "", candidate, count=1, flags=re.S)
+    candidate = re.sub(r"^\s*\d+(?:\.\d+)?\s+", "", candidate)
+    candidate = re.sub(r"\s*(?:复制(?:此)?链接|复制打开|打开抖音|打开 TikTok|长按复制|点击链接|点击观看)[\s\S]*$", "", candidate, flags=re.I)
+    candidate = candidate.strip(" \n\t，,：:；;")
+    if candidate in ("复制", "分享", "点击", "查看", "打开", "观看", "复制链接", "分享链接"):
+        return ""
+    if not candidate or re.fullmatch(r"(?:\d+[./:-]){1,4}[\d\s]*", candidate):
+        return ""
+    return _valid_title(candidate)[:1000]
+
+
+def _without_title_hint(data: dict) -> dict:
+    """共享作品快照禁止保存请求局部文案，连同提示生成的下载文件名一起清理。"""
+    result = json.loads(json.dumps(data, ensure_ascii=False))
+    hint = result.pop("title_hint", None)
+    if result.get("title_source") == "share_text":
+        result["title"] = "（无标题）"
+        result.pop("title_source", None)
+        result.pop("title_status", None)
+        if result.get("content") == hint:
+            result["content"] = ""
+        result = _download_filenames(result)
+    return result
+
+
+def _apply_title_hint(data: dict, hint: str) -> dict:
+    """仅在返回结果/所属分享上应用文案，不更改解析缓存或可信原标题。"""
+    previous_hint = _valid_title(data.get("title_hint"))
+    result = _without_title_hint(data)
+    hint = _valid_title(hint)[:1000] or previous_hint[:1000]
+    trusted = _first_valid_title(result, "title", "content")
+    if trusted:
+        result["title"] = trusted
+    elif hint:
+        result.update(title=hint, title_source="share_text", title_status="partial")
+    if hint:
+        result["title_hint"] = hint
+    return _download_filenames(result)
+
+
+def _with_title_hint(data: dict, text: str) -> dict:
+    return _browser_title_response(_apply_title_hint(data, _extract_title_hint(text)))
+
+
+def _browser_title_key(work_url: str) -> str:
+    link = _normalize_parse_source(work_url)
+    if not valid_work_url(link):
+        return ""
+    kind, item_id = work_identity(link)
+    if item_id:
+        return _douyin_work_url(kind, item_id)
+    parsed = urlparse.urlsplit(link)
+    return "https://v.douyin.com" + parsed.path.rstrip("/") + "/"
+
+
+def _browser_title_prune(now: float) -> None:
+    # 调用方持有标题锁。结果/失败均有期限，输入任意多链接也不能增长无界。
+    for records in (_browser_title_jobs, _browser_title_results):
+        for key, value in list(records.items()):
+            if value["expires_at"] <= now:
+                records.pop(key, None)
+        while len(records) >= 512:
+            records.pop(next(iter(records)))
+
+
+def _metadata_proxy_required() -> bool:
+    """严格代理模式只接受显式的旁路代理配置；不隐式直连或读取系统代理。"""
+    configured = getattr(_browser_title_service, "proxy", "")
+    return bool(proxy_mgr.force_proxy and not (isinstance(configured, str) and configured.strip()))
+
+
+def _browser_title_start(work_url: str) -> bool:
+    """只由解析入口调用；接受后立即继续媒体 API，不等待浏览器预热/取标题。"""
+    key = _browser_title_key(work_url)
+    if not key or _metadata_proxy_required():
+        # 旁路没有配置代理时，严格代理模式必须沿用原官方 HTTP 通路。
+        return False
+    now = time.monotonic()
+    with _browser_title_lock:
+        _browser_title_prune(now)
+        old = _browser_title_jobs.get(key)
+        if old:
+            return old["state"] == "ready" or (old["state"] == "pending" and old["deadline"] > now)
+        identity = work_identity(key)
+        if identity in _browser_title_results:
+            return True
+        if identity[1] and any(job.get("identity") == identity and job["state"] == "pending"
+                               and job["deadline"] > now for job in _browser_title_jobs.values()):
+            return True
+        _browser_title_jobs[key] = {
+            "state": "pending", "deadline": now + BROWSER_TITLE_TIMEOUT_SECONDS,
+            "expires_at": now + BROWSER_TITLE_TIMEOUT_SECONDS + 60,
+            "identity": identity,
+        }
+    try:
+        accepted = _browser_title_service.submit(
+            key, lambda result: _browser_title_complete(key, result))
+    except Exception:
+        accepted = False  # 可选子系统启动失败不能中断媒体解析和配额结算。
+    if not accepted:
+        _browser_title_complete(key, None)
+    return accepted
+
+
+def _browser_title_apply(data: dict, result: dict) -> dict:
+    """只补同作品的展示字段；有效原标题、人工标题和媒体线路保持优先。"""
+    if (data.get("platform") != "douyin" or data.get("item_id") != result.get("item_id")
+            or data.get("kind") != result.get("kind")):
+        return data
+    merged = json.loads(json.dumps(data, ensure_ascii=False))
+    extra = sanitize_metadata(result)
+    full_title = _valid_title(result.get("title"))[:5000]
+    title = full_title[:1000]
+    current = _first_valid_title(data, "title", "content")
+    truncated = data.get("title_status") == "partial" or is_truncated_title(current)
+    incoming_partial = result.get("title_status") == "partial" or is_truncated_title(full_title)
+    replace_title = bool(title and data.get("title_source") != "custom"
+                         and (not current or data.get("title_source") == "share_text"))
+    if title and current and truncated and not incoming_partial and data.get("title_source") != "custom":
+        prefix = title_prefix(current)
+        replace_title = (result.get("title_status") == "complete"
+                         or bool(prefix and len(full_title) > len(prefix) and full_title.startswith(prefix)))
+    if replace_title:
+        status = "partial" if incoming_partial or len(full_title) > 1000 else result.get("title_status", "available")
+        merged.update(title=title, title_source=result["title_source"], title_status=status)
+        if len(full_title) > 1000 and not extra.get("content"):
+            extra.update(content=full_title, content_status="partial" if incoming_partial else "available")
+    elif current and truncated and data.get("title_source") != "custom":
+        merged["title_status"] = "partial"
+    # 元数据只有白名单字段；既有 0 计数有效，不以旁路响应覆盖媒体 URL。
+    for key in ("content", "author", "avatar", "author_url", "cover", "create_time", "stats", "tags"):
+        if key not in extra:
+            continue
+        if key == "author" and merged.get(key) == "未知作者":
+            merged[key] = ""
+        if key == "tags" and merged.get(key) == []:
+            merged[key] = extra[key]
+        if key == "content" and merged.get(key) and (merged.get("content_status") == "partial"
+                                                    or is_truncated_title(merged[key])):
+            prefix = title_prefix(merged[key])
+            if (extra.get("content_status") != "partial" and prefix
+                    and extra[key].startswith(prefix) and len(extra[key]) > len(prefix)):
+                merged[key] = extra[key]
+                merged["content_status"] = extra.get("content_status", "available")
+        old_value = merged.get(key)
+        merged[key] = _merge_missing_fields({key: old_value}, {key: extra[key]})[key]
+        if key == "content" and merged[key] != old_value:
+            merged["content_status"] = extra.get("content_status", "available")
+    if not merged.get("duration_ms") and extra.get("duration_ms"):
+        merged["duration_ms"] = extra["duration_ms"]
+    if isinstance(merged.get("video"), dict):
+        for key in ("width", "height"):
+            if not merged["video"].get(key) and (extra.get("video") or {}).get(key):
+                merged["video"][key] = extra["video"][key]
+    if merged == data:
+        return data
+    if extra:
+        merged["snapshot_at"] = int(extra.get("snapshot_at") or time.time())
+        merged["metadata_source"] = "douyin_web"
+    merged["metadata_fields"] = metadata_fields_present(merged)
+    return _download_filenames(merged)
+
+
+def _browser_title_merge(work_url: str, data: dict) -> dict:
+    """内存快照合并；不等待任务，不发网络请求，也不修改媒体来源。"""
+    if data.get("platform") != "douyin":
+        return data
+    identity = (data.get("kind"), data.get("item_id"))
+    key = _browser_title_key(work_url or data.get("_link") or "")
+    with _browser_title_lock:
+        job = _browser_title_jobs.get(key)
+        if job and job["state"] == "pending":
+            known = job.get("identity")
+            if not known or not known[1] or known == identity:
+                job["identity"] = identity
+        entry = _browser_title_results.get(identity)
+        result = entry["result"] if entry and entry["expires_at"] > time.monotonic() else None
+    return _browser_title_apply(data, result) if result else data
+
+
+def _browser_title_state(data: dict) -> str:
+    if data.get("platform") != "douyin":
+        return "unavailable"
+    identity = (data.get("kind"), data.get("item_id"))
+    now = time.monotonic()
+    with _browser_title_lock:
+        entry = _browser_title_results.get(identity)
+        if entry and entry["expires_at"] > now:
+            return "ready"
+        if any(job.get("identity") == identity and job["state"] == "pending"
+               and job["deadline"] > now for job in _browser_title_jobs.values()):
+            return "pending"
+    return "unavailable"
+
+
+def _browser_title_response(data: dict) -> dict:
+    data = dict(_browser_title_merge(data.get("_link") or "", data))
+    data.pop("metadata_url", None)
+    data.pop("metadata_status", None)
+    state = _browser_title_state(data)
+    if state == "pending":
+        resource = str(data["kind"]) + ":" + str(data["item_id"])
+        exp, sig = _media_token("parse_metadata", resource, ttl=600)
+        data["metadata_url"] = f"/api/parse-metadata/{data['item_id']}?" + urlparse.urlencode({
+            "kind": data["kind"], "exp": exp, "sig": sig})
+        data["metadata_status"] = state
+    return data
+
+
+def _browser_title_complete(work_url: str, result: Optional[dict]) -> None:
+    """晚到标题只更新仍有效的记录；不创建分享、不续期、不计费。"""
+    key = _browser_title_key(work_url)
+    if not key:
+        return
+    identity = work_identity(result.get("_link")) if isinstance(result, dict) else ("", "")
+    expected = work_identity(key)
+    if (not isinstance(result, dict) or not identity[1]
+            or identity != (result.get("kind"), result.get("item_id"))
+            or (expected[1] and expected != identity)
+            or result.get("title_source") not in METADATA_SOURCES
+            or result.get("title_status") not in ("complete", "available", "partial")
+            or not _valid_title(result.get("title"))):
+        result = None
+    now = time.monotonic()
+    with _browser_title_lock:
+        _browser_title_prune(now)
+        job = _browser_title_jobs.get(key, {})
+        # 短链接在媒体先完成时绑定了作品，拒绝重定向到其他作品的结果。
+        bound = job.get("identity")
+        if result and bound and bound[1] and bound != identity:
+            result = None
+        job.update(state="ready" if result else "unavailable",
+                   deadline=now, expires_at=now + (PARSE_SNAPSHOT_TTL if result else 60))
+        if result:
+            job["identity"] = identity
+        _browser_title_jobs[key] = job
+        if result:
+            result = {**sanitize_metadata(result), **{field: result[field] for field in (
+                "kind", "item_id", "title", "title_source", "title_status")}}
+            _browser_title_results[identity] = {"result": result, "expires_at": now + PARSE_SNAPSHOT_TTL}
+    if not result:
+        return
+    # 锁顺序：标题锁在拿数据库/缓存锁之前释放；保存者可在事务中再读标题锁。
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for table, field, condition in (
+                ("parse_snapshots", "item_id", "expires_at>?"),
+                ("shares", "id", "status='ok' AND COALESCE(parse_status,'ready')='ready' "
+                 "AND (expires_at=0 OR expires_at>?)"),
+            ):
+                rows = conn.execute(
+                    f"SELECT {field},payload FROM {table} WHERE item_id=? AND {condition}",
+                    (identity[1], int(time.time()))).fetchall()
+                for row in rows:
+                    old = json.loads(row["payload"] or "{}")
+                    merged = _browser_title_apply(old, result)
+                    if merged != old:
+                        payload = json.dumps(merged, ensure_ascii=False)
+                        if table == "shares":
+                            conn.execute("UPDATE shares SET payload=?,title=?,author=?,avatar=?,cover=? WHERE id=?",
+                                         (payload, merged["title"][:300], merged.get("author") or "",
+                                          merged.get("avatar") or "", merged.get("cover") or "", row[field]))
+                        else:
+                            conn.execute("UPDATE parse_snapshots SET payload=? WHERE item_id=?",
+                                         (payload, row[field]))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    with _cache_lock:
+        for cache_key, (ts, old) in list(_cache.items()):
+            if time.time() - ts < CACHE_TTL:
+                _cache[cache_key] = (ts, _browser_title_apply(old, result))
+
+
 def _metadata_missing(data: dict) -> list[str]:
     """核心展示字段的完整性；合法的 0 不视为空，不以视频可播放代替信息完整。"""
     missing = []
-    if str(data.get("title") or "").strip() in _EMPTY_TITLES:
+    if (not _first_valid_title(data, "title", "content") or data.get("title_status") == "partial"
+            or is_truncated_title(data.get("title"))):
         missing.append("title")
     if str(data.get("author") or "").strip() in ("", "未知作者"):
         missing.append("author")
@@ -5238,8 +6082,17 @@ def _merge_metadata_snapshot(old: dict, fresh: dict) -> dict:
             or (old.get("platform") and fresh.get("platform")
                 and old["platform"] != fresh["platform"])):
         raise ApiError(409, "作品身份不一致，已停止信息补齐")
-    data = json.loads(json.dumps(old, ensure_ascii=False))
-    for key in ("title", "author", "avatar", "author_url", "create_time",
+    local_hint = old.get("title_hint") or (old.get("title") if old.get("title_source") == "share_text" else "")
+    data = _without_title_hint(old)
+    fresh = _without_title_hint(fresh)
+    if fresh.get("title_source") in METADATA_SOURCES:
+        data = _browser_title_apply(data, fresh)
+    if not _valid_title(data.get("title")):
+        data["title"] = _first_valid_title(fresh, "title", "content") or "（无标题）"
+        for key in ("title_source", "title_status"):
+            if fresh.get(key):
+                data[key] = fresh[key]
+    for key in ("content", "author", "avatar", "author_url", "create_time",
                 "stats", "tags", "music", "location", "author_detail"):
         if key not in fresh:
             continue
@@ -5261,11 +6114,12 @@ def _merge_metadata_snapshot(old: dict, fresh: dict) -> dict:
         data["base"] = _safe_name(data["title"], data["item_id"])
     if data != old:
         data["snapshot_at"] = int(fresh.get("snapshot_at") or time.time())
-    return data
+    return _apply_title_hint(data, local_hint) if local_hint else data
 
 
 def _backfill_share_metadata(data: dict, sid: str = "") -> int:
     """在解析/管理员修复时补旧快照；分享页 GET 永远不触发。"""
+    data = _without_title_hint(data)
     item_id = str(data.get("item_id") or "")
     if not item_id:
         return 0
@@ -5290,6 +6144,10 @@ def _backfill_share_metadata(data: dict, sid: str = "") -> int:
                 # 顶层字段也可能来自旧占位符；custom_title / expires_at 等保持原状。
                 top = _merge_missing_fields(
                     {k: row[k] for k in ("title", "author", "avatar", "cover")}, merged)
+                if (old.get("title_source") == "share_text"
+                        and merged.get("title_source") != "share_text"
+                        and _valid_title(merged.get("title"))):
+                    top["title"] = merged["title"]
                 if merged == old and all(top[k] == row[k] for k in ("title", "author", "avatar", "cover")):
                     continue
                 conn.execute("UPDATE shares SET title=?,author=?,avatar=?,cover=?,payload=? WHERE id=?",
@@ -5315,7 +6173,9 @@ def _backfill_share_metadata(data: dict, sid: str = "") -> int:
 
 def _retry_cached_metadata(key: str, data: dict) -> dict:
     """缺信息的抖音缓存按作品限流重试，只补官方元数据，不重复提交主解析。"""
-    if not _metadata_missing(data) or data.get("source") not in ("atc", "parser"):
+    data = _browser_title_merge(key, data)
+    if (_browser_title_state(data) == "pending" or not _metadata_missing(data)
+            or data.get("source") not in ("atc", "parser")):
         return data
     item_id = str(data.get("item_id") or "")
     work_url = data.get("_link") or (_atc_cache_get(item_id) or {}).get("work_url") or ""
@@ -5403,23 +6263,37 @@ def _saved_parse_source(item_id: str) -> str:
             conn.close()
 
 
-def _save_parse_snapshot(data: dict, source_text: str = "") -> None:
+def _save_parse_snapshot(data: dict, source_text: str = "") -> dict:
+    data = _without_title_hint(data)
     item_id = str(data.get("item_id") or "")
     if not item_id:
-        return
+        return data
     now = int(time.time())
-    stored = _share_storage_payload(data)
-    stored.setdefault("snapshot_at", now)
-    db_exec(
-        "INSERT INTO parse_snapshots(item_id,payload,created,expires_at,source_url,canonical_url) "
-        "VALUES(?,?,?,?,?,?) "
-        "ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload,"
-        "created=excluded.created,expires_at=excluded.expires_at,"
-        "source_url=COALESCE(NULLIF(excluded.source_url,''),parse_snapshots.source_url),"
-        "canonical_url=COALESCE(NULLIF(excluded.canonical_url,''),parse_snapshots.canonical_url)",
-        (item_id, json.dumps(stored, ensure_ascii=False), now, now + PARSE_SNAPSHOT_TTL,
-         _normalize_parse_source(source_text),
-         _normalize_parse_source(data.get("_link") or data.get("original_url") or "")))
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # 在写事务内再次读取最新标题，覆盖 callback 与保存之间的竞态窗口。
+            data = _browser_title_merge(source_text, data)
+            stored = _share_storage_payload(data)
+            stored.setdefault("snapshot_at", now)
+            conn.execute(
+                "INSERT INTO parse_snapshots(item_id,payload,created,expires_at,source_url,canonical_url) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(item_id) DO UPDATE SET payload=excluded.payload,"
+                "created=excluded.created,expires_at=excluded.expires_at,"
+                "source_url=COALESCE(NULLIF(excluded.source_url,''),parse_snapshots.source_url),"
+                "canonical_url=COALESCE(NULLIF(excluded.canonical_url,''),parse_snapshots.canonical_url)",
+                (item_id, json.dumps(stored, ensure_ascii=False), now, now + PARSE_SNAPSHOT_TTL,
+                 _normalize_parse_source(source_text),
+                 _normalize_parse_source(data.get("_link") or data.get("original_url") or "")))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return data
 
 
 def _get_parse_snapshot(item_id: str) -> Optional[dict]:
@@ -5480,7 +6354,7 @@ def _share_storage_payload(data: dict) -> dict:
     detail = _snapshot_author(stored)
     if detail:
         stored["author_detail"] = detail
-    for key in ("_link", "work_url", "source_url"):
+    for key in ("_link", "work_url", "source_url", "metadata_url", "metadata_status"):
         stored.pop(key, None)
     video = stored.get("video")
     source = str(
@@ -5558,13 +6432,13 @@ def _share_async_payload(row: dict, origin: str) -> dict:
         view = _share_view(row, origin)
         data.update({
             "kind": row["kind"], "item_id": row["item_id"],
-            "title": row["custom_title"] or row["title"] or "（无标题）",
+            "title": view["title"],
             "author": row["author"] or "", "cover": row["cover"] or "",
             "media_available": bool(view.get("media_available")),
             "media_pending": bool(view.get("media_pending")),
             "media_poll_after_ms": int(view.get("media_poll_after_ms") or 0),
             # 微信若曾抓取过 pending OG，完成后复制带版本的 URL 可降低命中旧卡片的概率。
-            "share_url_versioned": f"{share_url}?v={int(row.get('ready_at') or 1)}",
+            "share_url_versioned": f"{share_url}?v={int(row.get('updated') or row.get('ready_at') or 1)}",
         })
     elif state == "failed":
         view = _share_view(row, origin)
@@ -5591,6 +6465,7 @@ class AsyncShareBody(BaseModel):
 def api_share_create_async(body: AsyncShareBody, request: Request):
     """只校验并持久化任务，立即返回分享地址；抖音内容由后台 worker 获取。"""
     source_url = _normalize_share_short_link(body.text)
+    title_hint = _extract_title_hint(body.text)
     custom_title = (body.title or "").strip()
     if len(custom_title) > 300:
         raise ApiError(422, "invalid_title: 自定义标题最多 300 个字符")
@@ -5604,7 +6479,7 @@ def api_share_create_async(body: AsyncShareBody, request: Request):
     ip_scope = _privacy_hash("async-share-rate-ip", _client_ip(request))
     source_hash = _share_source_hash(source_url)
     assigned_origin = _share_origin(request)
-    request_hash = _share_request_hash(source_url, custom_title)
+    request_hash = _share_request_hash(source_url, custom_title, title_hint)
     idem_hash = (_privacy_hash(
         "async-share-idempotency", f"{owner_scope}:{idem_key}") if idem_key else None)
     subjects, limit = _quota_subjects(request)
@@ -5688,6 +6563,7 @@ def api_share_create_async(body: AsyncShareBody, request: Request):
                 reservation = _reserve_quota_in_conn(
                     conn, _today(), subjects, limit, 1, False,
                     "share_parse_async")
+                _attach_referral_in_conn(conn, request, reservation)
                 if not reservation["ok"]:
                     raise _quota_error(limit, reservation)
                 conn.execute(
@@ -5700,13 +6576,15 @@ def api_share_create_async(body: AsyncShareBody, request: Request):
                     "source_hash,assigned_origin,updated,ready_at"
                     ") VALUES("
                     ":id,'','','',:owner_user_id,'','',"
-                    "'','','','','{}',:custom_title,'link',"
+                    "'','','','',:payload,:custom_title,'link',"
                     ":expires_at,NULL,'ok',:created,'pending',:source_url,"
                     "NULL,0,:next_attempt_at,NULL,NULL,"
                     ":quota_reservation_id,:owner_scope,:idem_key_hash,:request_hash,"
                     ":source_hash,:assigned_origin,:updated,NULL)",
                     {"id": sid, "owner_user_id": user["id"] if user else None,
                      "custom_title": custom_title, "expires_at": now + ttl,
+                     "payload": json.dumps({"title_hint": title_hint} if title_hint else {},
+                                           ensure_ascii=False),
                      "created": now, "source_url": source_url,
                      "next_attempt_at": now,
                      "quota_reservation_id": reservation["id"],
@@ -5779,6 +6657,8 @@ def api_share_create(body: ShareBody, request: Request):
     if not data.get("item_id"):
         release_quota(reservation)
         raise ApiError(400, "解析数据不完整，无法生成分享页")
+    # 同作品旧分享可借用可信快照，用户输入提示只属于本次分享。
+    data = _apply_title_hint(_without_title_hint(data), _extract_title_hint(body.text))
     try:
         _require_share_item_allowed(data)
     except Exception:
@@ -5973,6 +6853,10 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
                 conn.commit()
                 return False
             ttl = SHARE_TTL_USER if current["owner_user_id"] else SHARE_TTL_ANON
+            pending_payload = json.loads(current["payload"] or "{}")
+            data = _browser_title_merge(current["source_url"] or data.get("_link") or "", data)
+            stored_data = _share_storage_payload(_apply_title_hint(
+                _without_title_hint(data), pending_payload.get("title_hint") or ""))
             changed = conn.execute(
                 "UPDATE shares SET item_id=?,kind=?,vid=?,title=?,author=?,avatar=?,"
                 "cover=?,payload=?,expires_at=?,refreshed_at=?,parse_status='ready',"
@@ -5982,7 +6866,7 @@ def _finish_share_parse_success(item: dict, data: dict) -> bool:
                 (item_id, kind, vid, (data.get("title") or "")[:300],
                  (data.get("author") or "")[:100], data.get("avatar", ""),
                  data.get("cover", ""),
-                 json.dumps(_share_storage_payload(data), ensure_ascii=False),
+                 json.dumps(stored_data, ensure_ascii=False),
                  now + ttl, now, now, now, item["id"], item["lease_owner"])
             ).rowcount
             if changed != 1:
@@ -6221,11 +7105,12 @@ class ShareEventBody(BaseModel):
     detail: str = Field(default="", max_length=120)  # media error code、readyState 等
     ms: int = 0                 # 从该线路开始到出结果的耗时
     next: str = Field(default="", max_length=24)
+    page_view_id: str = Field(default="", max_length=96)
 
 
 # 播放诊断事件：play_try/play_ok/play_fail 只写 share_events，不累加 shares 计数，
 # 避免把「尝试次数」混进 plays（plays 仍只由 play 事件累加，代表一次成功起播）。
-SHARE_EVENT_KINDS = ("view", "play", "download", "cta", "fallback",
+SHARE_EVENT_KINDS = ("view", "page_view", "play", "download", "cta", "fallback",
                      "play_try", "play_ok", "play_fail")
 
 
@@ -6234,7 +7119,9 @@ def api_share_event(sid: str, body: ShareEventBody, request: Request):
     if body.kind not in SHARE_EVENT_KINDS:
         raise ApiError(422, "不支持的事件类型")
     outcome = _share_event(request, sid, body.kind, body.source, body.stage,
-                           body.detail, body.ms, body.next)
+                           body.detail, body.ms, body.next, body.page_view_id)
+    if outcome == "invalid":
+        raise ApiError(422, "页面访问标识无效")
     if outcome == "missing":
         raise ApiError(404, "分享页不存在或已失效")
     if outcome == "limited":
@@ -6539,7 +7426,7 @@ def _atc_request(method: str, path: str, params: dict, cfg: dict) -> dict:
         _parse_event("primary", "network", "warn", http_status=exc.code)
         exc.close()
         if exc.code in (401, 403):
-            raise _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="auth")
+            raise _ParserServiceError(503, "视频解析服务配置异常，请联系管理员", reason="auth")
         if exc.code == 429:
             raise _ParserServiceError(503, "视频解析请求较多，请稍后重试",
                                       reason="busy", retryable=True)
@@ -6564,7 +7451,7 @@ def _atc_rejected(resp: dict, action: str = "任务") -> ApiError:
     lowered = msg.lower()
     if code in ("401", "403") or any(
             token in lowered for token in ("api key", "secret", "验证失败", "鉴权")):
-        return _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="auth")
+        return _ParserServiceError(503, "视频解析服务配置异常，请联系管理员", reason="auth")
     if code == "601" or any(token in lowered for token in ("会员", "权益", "余额", "额度")):
         return _ParserServiceError(503, "视频解析服务暂时不可用，请稍后重试", reason="entitlement")
     if code == "429" or "并发" in msg or "concurrent" in lowered:
@@ -7028,10 +7915,9 @@ def _atc_result_to_parse(work_url: str, data: dict,
             host = (urlparse.urlsplit(work_url).hostname or "site").lower()
             namespace = "web" + hashlib.sha256(host.encode()).hexdigest()[:8]
         item_id = f"{namespace}_{raw_item_id}"[:40]
-    title = str(data.get("title") or data.get("content") or data.get("video_description")
-                or native_item.get("desc") or native_item.get("title")
-                or "（无标题）").strip()
-    title = title[:1000] or "（无标题）"
+    title = (_first_valid_title(data, "title", "content", "video_description", "description", "desc", "caption")
+             or _first_valid_title(native_item, "desc", "title", "description", "caption", "content")
+             or "（无标题）")
     base = _safe_name(title, item_id)
 
     author_data = data.get("author") or data.get("creator") or native_item.get("author") or {}
@@ -7074,7 +7960,8 @@ def _atc_result_to_parse(work_url: str, data: dict,
         "share": stat_value("share", "share_count", "shareCount"),
     }
     stats = {key: _douyin_number(value) for key, value in stats.items()}
-    content = str(data.get("content") or "").strip()[:20000]
+    content = (_first_valid_title(data, "content", "description", "desc", "caption", "video_description", limit=20000)
+               or _first_valid_title(native_item, "desc", "description", "content", "caption", limit=20000))
     tags = list(dict.fromkeys(re.findall(r"#\s*([^\s#]+)", content or title)))[:50]
     result = {
         "kind": kind, "item_id": item_id, "source": "parser", "title": title,
@@ -7088,6 +7975,9 @@ def _atc_result_to_parse(work_url: str, data: dict,
             data.get("cover") or data.get("coverUrl") or data.get("cover_image_url")
             or video_obj.get("cover") or video_obj.get("origin_cover")),
     }
+    if _valid_title(title):
+        result["title_source"] = "provider"
+        result["title_status"] = "partial" if is_truncated_title(title, data) else "available"
 
     if kind == "note":
         if not image_urls and not allow_partial:
@@ -7178,7 +8068,7 @@ def _merge_missing_fields(primary: dict, extra: dict) -> dict:
         if isinstance(old, dict) and isinstance(value, dict):
             merged[key] = _merge_missing_fields(old, value)
         elif (old is None or old == "" or old in ("（无标题）", "(无标题)")
-              or (key == "title" and str(old).strip() in ("暂无标题", "无标题"))):
+              or (key == "title" and not _valid_title(old))):
             merged[key] = value
     return merged
 
@@ -7194,8 +8084,10 @@ def _result_has_media(result: dict) -> bool:
 def _douyin_needs_supplement(result: dict) -> bool:
     if not _result_has_media(result):
         return True
+    if not _first_valid_title(result, "title", "content"):
+        return True
     if any(not result.get(key) or result.get(key) in _EMPTY_TITLES
-           for key in ("title", "author", "avatar", "author_url", "cover")):
+           for key in ("author", "avatar", "author_url", "cover")):
         return True
     if any((result.get("stats") or {}).get(key) is None
            for key in ("digg", "comment", "collect", "share")):
@@ -7210,11 +8102,81 @@ def _douyin_needs_supplement(result: dict) -> bool:
     return False
 
 
+DOUYIN_METADATA_BUDGET_SECONDS = 2.0
+_metadata_slots = threading.BoundedSemaphore(4)
+
+
 def _complete_douyin_result(work_url: str, primary: dict) -> dict:
+    """已有媒体的附加信息最多等待两秒；同时限制在途任务和每次网络操作预算。"""
+    known_id = _douyin_item_from_url(work_url)[1]
+    if known_id and re.fullmatch(r"\d{8,30}", str(primary.get("item_id") or "")) and known_id != primary["item_id"]:
+        # 已知主媒体属于另一作品，应当进入真正的媒体兜底，不能超时返回错作品。
+        return _complete_douyin_result_inner(work_url, primary)
+    if (not _result_has_media(primary)
+            or (not _douyin_needs_supplement(primary) and primary.get("kind") != "note")):
+        return _complete_douyin_result_inner(work_url, primary)
+    if not _metadata_slots.acquire(blocking=False):
+        _metadata_attempt(str(primary.get("item_id") or ""))
+        _parse_event("official", "cooldown", "warn", missing=_metadata_missing(primary))
+        return primary
+    deadline = time.monotonic() + DOUYIN_METADATA_BUDGET_SECONDS
+    done = threading.Event()
+    rejected = threading.Event()
+    outcome = {}
+    context = copy_context()
+    isolated = json.loads(json.dumps(primary, ensure_ascii=False))
+    parent_trace = _parse_trace.get()
+    child_trace = (dict(parent_trace, events=list(parent_trace.get("events") or []), _deferred=True)
+                   if parent_trace is not None else None)
+
+    def supplement():
+        token = _metadata_deadline.set(deadline)
+        reject_token = _metadata_fallback_rejected.set(rejected)
+        trace_token = _parse_trace.set(child_trace)
+        try:
+            outcome["result"] = _complete_douyin_result_inner(work_url, isolated)
+        except Exception as exc:
+            outcome["error"] = exc
+        finally:
+            _metadata_deadline.reset(token)
+            _metadata_fallback_rejected.reset(reject_token)
+            _parse_trace.reset(trace_token)
+            _metadata_slots.release()
+            done.set()
+
+    # DNS 等系统调用不能由 urllib socket timeout 强制中止；外层只保障调用方延迟，
+    # semaphore 为这类异常卡住的任务设并发上限，内部 deadline 阻止后续重试/跳转。
+    worker = threading.Thread(target=lambda: context.run(supplement), daemon=True,
+                              name="douyin-metadata")
+    try:
+        worker.start()
+    except RuntimeError:
+        _metadata_slots.release()
+        _metadata_attempt(str(primary.get("item_id") or ""))
+        _parse_event("official", "supplement_failed", "warn", reason="busy")
+        return primary
+    if not done.wait(max(0, deadline - time.monotonic())):
+        _parse_event("official", "supplement_failed", "warn", reason="timeout")
+        if rejected.is_set():
+            raise ApiError(503, "暂未获取到作品内容，请稍后重试")
+        return primary
+    if parent_trace is not None and child_trace is not None:
+        parent_trace["events"] = child_trace["events"]
+        if "last_error" in child_trace:
+            parent_trace["last_error"] = child_trace["last_error"]
+        _parse_log_write(parent_trace)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
+
+
+def _complete_douyin_result_inner(work_url: str, primary: dict) -> dict:
     """服务器端按需补作品详情；失败时已有媒体仍可用，禁止合并错作品。"""
     old_id = str(primary.get("item_id") or "")
     primary_author = dict((_author_cache.get(old_id) or (0, {}))[1])
-    needs_detail = _douyin_needs_supplement(primary)
+    known_id = _douyin_item_from_url(work_url)[1]
+    needs_detail = (_douyin_needs_supplement(primary)
+                    or bool(known_id and re.fullmatch(r"\d{8,30}", old_id) and old_id != known_id))
     # 图集需要真实作品 ID 才能生成受签名保护、可惰性刷新的图片端点。
     if not needs_detail and primary.get("kind") != "note":
         _parse_event("official", "metadata_complete", "ok")
@@ -7229,8 +8191,12 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
         if re.fullmatch(r"\d{8,30}", old_id) and old_id != item_id:
             # 主服务返回了另一作品，不能把它的媒体、标题或作者混进当前结果。
             _parse_event("resolve", "mismatch", "warn")
+            rejected = _metadata_fallback_rejected.get()
+            if rejected is not None:
+                rejected.set()
             primary, primary_author = {}, {}
             return _parse_douyin_item_direct(kind, item_id, canonical)
+        _metadata_time_left()
         if primary.get("kind") == "note" and _result_has_media(primary):
             urls = [image["url"] for image in primary["images"] if image.get("url")]
             if urls and all(_douyin_public_url(url) for url in urls):
@@ -7240,6 +8206,7 @@ def _complete_douyin_result(work_url: str, primary: dict) -> dict:
         if needs_detail:
             stage = "metadata"
             extra = _parse_douyin_item_direct(kind, item_id, canonical, allow_metadata=True)
+            _metadata_time_left()
             extra_author = dict((_author_cache.get(item_id) or (0, {}))[1])
             merged = _merge_missing_fields(primary, extra)
             if _result_has_media(primary):
@@ -7288,6 +8255,7 @@ def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
                         kind_hint: str = "") -> dict:
     """统一优先级入口；仅抖音可使用当前服务器的官方补充接口。"""
     douyin = _is_douyin_work_url(work_url)
+    browser_started = _browser_title_start(work_url) if douyin else False
     _parse_event("primary", "primary_start")
     try:
         data = _atc_extract(work_url, include_text=False)
@@ -7298,11 +8266,33 @@ def _atc_parse_work_url(work_url: str, item_id_hint: str = "",
         if not douyin:
             raise
         _parse_event("official", "fallback", "warn")
-        result = _parse_douyin_share_direct(work_url)
+        try:
+            result = _parse_douyin_share_direct(work_url)
+        except Exception as fallback_exc:
+            _parse_event("official", "fallback_failed", "warn",
+                         reason=_parse_error_code(fallback_exc))
+            # 兜底失败不能把鉴权、未配置、限流或作品不存在等主原因
+            # 覆盖成官方通用错误；保留原状态、重试头和内部诊断分类。
+            raise exc from None
         _parse_event("official", "fallback_ok", "ok", missing=_metadata_missing(result))
-        return _download_filenames(result)
+        return _download_filenames(_browser_title_merge(work_url, result))
     _parse_event("primary", "primary_ok", "ok", missing=_metadata_missing(primary))
-    return _download_filenames(_complete_douyin_result(work_url, primary) if douyin else primary)
+    # 浏览器与主解析并行时，媒体已就绪便立即返回，不能又串行等待两秒元数据。
+    # 缺媒体仍走原官方补充；浏览器标题绝不能把失败结果伪装成成功。
+    with _browser_title_lock:
+        browser_job = _browser_title_jobs.get(_browser_title_key(work_url), {})
+        browser_failed = browser_job.get("state") == "unavailable"
+        browser_identity = browser_job.get("identity") if browser_job.get("state") == "ready" else None
+    validation_url = work_url
+    if browser_identity and browser_identity[1]:
+        validation_url = _douyin_work_url(*browser_identity)
+    known_id = _douyin_item_from_url(validation_url)[1] if douyin else ""
+    numeric_identity = bool(re.fullmatch(r"\d{8,30}", str(primary.get("item_id") or "")))
+    identity_mismatch = bool(known_id and numeric_identity and known_id != primary["item_id"])
+    if douyin and (not browser_started or browser_failed or not _result_has_media(primary)
+                   or not numeric_identity or identity_mismatch or primary.get("kind") == "note"):
+        primary = _complete_douyin_result(validation_url, primary)
+    return _download_filenames(_browser_title_merge(work_url, primary))
 
 
 def _atc_cache_get(item_id: str) -> Optional[dict]:
@@ -7975,7 +8965,10 @@ class ParseBody(BaseModel):
 
 def _quota_error(limit: int, reservation: Optional[dict] = None):
     if reservation and reservation.get("insufficient_balance"):
-        return ApiError(402, "今日免费次数已用完，账户余额不足，请联系管理员充值后重试")
+        message = ("今日免费次数已用完，账户余额不足，请联系管理员充值后重试"
+                   if reservation.get("endpoint") == "atc_transcript" else
+                   "今日免费次数、通用额度和账户余额不足，请联系管理员充值后重试")
+        return ApiError(402, message)
     daily = free_user_daily()
     account_hint = (f"注册登录后每天免费 {daily} 次，超出后可使用账户余额。" if daily
                     else "注册登录后可使用账户余额继续解析。")
@@ -8000,6 +8993,31 @@ def api_parse(body: ParseBody, request: Request):
     _parse_event("quota", "quota_settled", "ok")
     log_request(request, "web", body.text[:100], True)
     return data
+
+
+@app.get("/api/parse-metadata/{item_id}")
+def api_parse_metadata(item_id: str, kind: str = "video", exp: int = 0, sig: str = ""):
+    """解析结果持有者短轮询本地元数据；不能启动浏览器、上游请求或扣费。"""
+    if kind not in ("video", "note") or not re.fullmatch(r"\d{8,30}", item_id):
+        raise ApiError(404, "作品不存在或已过期")
+    _require_media_token("parse_metadata", kind + ":" + item_id, exp, sig)
+    data = _get_parse_snapshot(item_id)
+    if not data or data.get("kind") != kind or data.get("platform") != "douyin":
+        raise ApiError(404, "作品不存在或已过期")
+    data = _browser_title_merge("", data)
+    public = {key: data[key] for key in (
+        "item_id", "kind", "title", "title_source", "title_status", "base", "content", "content_status",
+        "author", "avatar", "author_url", "create_time", "stats", "tags", "duration_ms", "cover",
+        "snapshot_at", "metadata_source") if key in data}
+    public["metadata_fields"] = metadata_fields_present(data)
+    public["metadata_status"] = _browser_title_state(data)
+    if kind == "video":
+        public["video"] = {key: (data.get("video") or {}).get(key) for key in ("filename", "width", "height")}
+    else:
+        public["images"] = [{"index": image.get("index", index),
+                             "filename": image.get("filename") or ""}
+                            for index, image in enumerate(data.get("images") or [], 1)]
+    return JSONResponse({"ok": True, "data": public}, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------- 开放 API v1（异步任务 + 计费）
@@ -8710,6 +9728,22 @@ class BatchBody(BaseModel):
     text: str = Field(min_length=1, max_length=BATCH_TEXT_MAX)
 
 
+def _batch_parse_inputs(text: str, links: list) -> dict:
+    """仅关联同一行的单链接文案；混排多链接时不猜测标题归属。"""
+    inputs = {link: link for link in links}
+    if len(_extract_supported_work_urls(text, 2)) == 1:
+        if links:
+            inputs[links[0]] = text
+        return inputs
+    for line in text.splitlines():
+        line_links = _extract_supported_work_urls(line, 2)
+        if len(line_links) == 1 and line_links[0] in inputs:
+            link = line_links[0]
+            if inputs[link] == link:
+                inputs[link] = line
+    return inputs
+
+
 @app.post("/api/parse/batch")
 def api_parse_batch(body: BatchBody, request: Request):
     """批量解析：每条链接算一次配额，超出今日免费额度的部分不解析。"""
@@ -8725,11 +9759,12 @@ def api_parse_batch(body: BatchBody, request: Request):
     limit = reservation["limit"]
     process = uniq[:reservation["reserved"]]
     over = uniq[reservation["reserved"]:]   # 超额部分不解析
+    inputs = _batch_parse_inputs(body.text, process)
 
     out, spent = [], 0
     for l in process:
         try:
-            out.append({"ok": True, "link": l, "data": _logged_parse(l, "batch", (current_user(request) or {}).get("id"))})
+            out.append({"ok": True, "link": l, "data": _logged_parse(inputs[l], "batch", (current_user(request) or {}).get("id"))})
             spent += 1
             log_request(request, "web", l, True)
         except ApiError as e:
@@ -8740,7 +9775,7 @@ def api_parse_batch(body: BatchBody, request: Request):
             log_request(request, "web", l, False)
     for l in over:
         out.append({"ok": False, "link": l,
-                    "error": ("免费次数及账户余额不足，未解析" if reservation.get("insufficient_balance")
+                    "error": ("免费次数、通用额度及账户余额不足，未解析" if reservation.get("insufficient_balance")
                               else f"今日免费次数不足未解析（每天 {limit} 次，登录后 {free_user_daily()} 次）")})
     settle_quota(reservation, spent)
     remaining = quota_status(request)[2]
@@ -9510,6 +10545,9 @@ def admin_state(request: Request):
         "stats": proxy_mgr.stats,
         "ua_pool_size": len(UA_POOL),
         "captcha": dict(_captcha_stats),     # 滑块漏斗（内存计数，重启清零）
+        "browser_title": ({**_browser_title_service.status(), "available": False,
+                           "error_code": "proxy_required"} if _metadata_proxy_required()
+                          else _browser_title_service.status()),
     }
 
 
@@ -9799,14 +10837,150 @@ def admin_users(request: Request, limit: int = 100):
     rows = db_exec(
         "SELECT u.id,u.email,u.created_at,u.last_login,u.disabled,u.reg_ip,"
         "u.balance_cents,u.reserved_cents,u.spent_cents,u.wallet_version,"
-        "MAX(0,? - COALESCE((SELECT count FROM usage_daily d "
+        "u.daily_limit,u.quota_version,COALESCE(u.daily_limit,?) AS daily_effective,"
+        "u.credit_balance,u.credit_reserved,u.credit_spent,u.credit_version,"
+        "COALESCE((SELECT count FROM usage_daily d "
+        "WHERE d.day=? AND d.subject='user:'||u.id),0) AS free_used,"
+        "MAX(0,COALESCE(u.daily_limit,?) - COALESCE((SELECT count FROM usage_daily d "
         "WHERE d.day=? AND d.subject='user:'||u.id),0)) AS free_remaining,"
         "(SELECT COUNT(*) FROM request_logs r WHERE r.user_id=u.id AND r.ok=1) AS parses,"
         "(SELECT COALESCE(SUM(spent_cents),0) FROM api_keys k WHERE k.user_id=u.id) AS spent,"
         "(SELECT COUNT(*) FROM api_keys k WHERE k.user_id=u.id) AS keys "
         "FROM users u ORDER BY u.created_at DESC LIMIT ?",
-        (free_user_daily(), _today(), max(1, min(limit, 500))), "all")
+        (free_user_daily(), _today(), free_user_daily(), _today(), max(1, min(limit, 500))), "all")
     return {"users": [dict(r) for r in rows]}
+
+
+def _user_quota_public(conn, row) -> dict:
+    global_limit = _free_user_daily_in_conn(conn)
+    effective = global_limit if row["daily_limit"] is None else int(row["daily_limit"])
+    usage = conn.execute("SELECT count FROM usage_daily WHERE day=? AND subject=?",
+                         (_today(), f"user:{row['id']}")).fetchone()
+    used = int(usage[0]) if usage else 0
+    return {"user_id": row["id"], "email": row["email"], "daily_limit": row["daily_limit"],
+            "daily_effective": effective, "daily_global": global_limit,
+            "quota_version": int(row["quota_version"] or 0),
+            "free_used": used, "free_remaining": max(0, effective - used)}
+
+
+class UserQuotaEditBody(BaseModel):
+    daily_limit: Optional[StrictInt] = Field(..., ge=0, le=10000)
+    expected_version: StrictInt = Field(ge=0)
+
+
+@app.get("/api/admin/users/{uid}/quota")
+def admin_user_quota(uid: int, request: Request):
+    _require_admin(request)
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise ApiError(404, "用户不存在")
+            return _user_quota_public(conn, row)
+        finally:
+            conn.close()
+
+
+@app.patch("/api/admin/users/{uid}/quota")
+def admin_edit_user_quota(uid: int, body: UserQuotaEditBody, request: Request):
+    _require_admin(request)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise ApiError(404, "用户不存在")
+            if int(row["quota_version"]) != body.expected_version:
+                raise ApiError(409, "每日额度设置已变化，请刷新后重试")
+            conn.execute("UPDATE users SET daily_limit=?,quota_version=quota_version+1 WHERE id=?",
+                         (body.daily_limit, uid))
+            updated = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            result = _user_quota_public(conn, updated)
+            conn.commit()
+            return {"ok": True, **result}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
+class CreditEditBody(BaseModel):
+    mode: str
+    units: StrictInt = Field(ge=0, le=1000000000)
+    expected_version: StrictInt = Field(ge=0)
+    request_id: str = Field(min_length=8, max_length=80)
+    note: str = Field(default="", max_length=200)
+    source: str = "admin"
+
+
+def _user_credits_public(conn, row) -> dict:
+    logs = conn.execute(
+        "SELECT ts,event,balance_delta,reserved_delta,spent_delta,note "
+        "FROM credit_ledger WHERE user_id=? ORDER BY id DESC LIMIT 30", (row["id"],)).fetchall()
+    return {"user_id": row["id"], "email": row["email"], **_credit_public(row),
+            "ledger": [dict(log) for log in logs]}
+
+
+@app.get("/api/admin/users/{uid}/credits")
+def admin_user_credits(uid: int, request: Request):
+    _require_admin(request)
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise ApiError(404, "用户不存在")
+            return _user_credits_public(conn, row)
+        finally:
+            conn.close()
+
+
+@app.post("/api/admin/users/{uid}/credits")
+def admin_edit_credits(uid: int, body: CreditEditBody, request: Request):
+    _require_admin(request)
+    if (body.mode not in ("add", "set") or body.source not in ("admin", "purchase")
+            or (body.mode == "add" and body.units == 0)
+            or (body.source == "purchase" and body.mode != "add")):
+        raise ApiError(400, "请输入有效的通用额度调整方式和次数")
+    request_hash = hashlib.sha256(json.dumps(
+        [body.mode, body.units, body.expected_version, body.note, body.source],
+        ensure_ascii=False).encode()).hexdigest()
+    event_key = "admin:" + body.request_id
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                raise ApiError(404, "用户不存在")
+            previous = conn.execute(
+                "SELECT request_hash FROM credit_ledger WHERE user_id=? AND event_key=?",
+                (uid, event_key)).fetchone()
+            if previous:
+                if previous[0] != request_hash:
+                    raise ApiError(409, "请刷新通用额度后重新提交")
+                result = _user_credits_public(conn, row)
+                conn.commit()
+                return {"ok": True, **result}
+            if int(row["credit_version"]) != body.expected_version:
+                raise ApiError(409, "通用额度已变化，请刷新后重试")
+            delta = body.units if body.mode == "add" else body.units - int(row["credit_balance"])
+            if int(row["credit_balance"]) + int(row["credit_reserved"]) + delta > 1000000000:
+                raise ApiError(400, "通用额度超过可设置上限")
+            _credit_change(conn, uid, "purchase" if body.source == "purchase" else "adjust",
+                           event_key, balance=delta, note=body.note, request_hash=request_hash)
+            updated = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            result = _user_credits_public(conn, updated)
+            conn.commit()
+            return {"ok": True, **result}
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 class WalletEditBody(BaseModel):
@@ -9880,9 +11054,12 @@ def _web_billing_status(user_id: Optional[int] = None) -> dict:
         try:
             prices = {"parse_price_cents": _web_price_in_conn(conn),
                       "transcript_price_cents": _web_price_in_conn(conn, "transcript"),
-                      "user_daily": _free_user_daily_in_conn(conn)}
+                      "user_daily": _free_user_daily_in_conn(conn, user_id),
+                      "user_daily_default": _free_user_daily_in_conn(conn)}
             row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone() if user_id else None
-            return {**prices, "wallet": _wallet_public(row) if row else None}
+            return {**prices, "daily_limit": row["daily_limit"] if row else None,
+                    "credits": _credit_public(row) if row else None,
+                    "wallet": _wallet_public(row) if row else None}
         finally:
             conn.close()
 
@@ -10065,6 +11242,15 @@ def _function_check_environment() -> dict:
     checks.append(_check_item("proxy", "fail" if proxy_mgr.force_proxy and not available else "pass",
                               "proxy_required" if proxy_mgr.force_proxy and not available else
                               "proxy_strict" if proxy_mgr.force_proxy else "proxy_direct", available))
+    browser = _browser_title_service.status()
+    browser_code = ("strict_proxy" if _metadata_proxy_required() else
+                    browser.get("error_code") or ("ready" if browser.get("ready") else "starting"))
+    if browser_code not in ("strict_proxy", "ready", "starting", "disabled", "dependency_missing",
+                            "browser_unavailable", "worker_timeout", "blocked_private_dns"):
+        browser_code = "browser_unavailable"
+    checks.append(_check_item("browser_title", "pending" if browser_code == "ready" else
+                              "skipped" if browser_code == "disabled" else "warn",
+                              "browser_" + browser_code))
     try:
         samples = _incomplete_share_samples()
         checks.append(_check_item("database", "pass", "database_readable"))
@@ -10074,7 +11260,8 @@ def _function_check_environment() -> dict:
     with _metadata_retry_lock:
         failure = dict(_metadata_last_failure)
     return {"version": APP_VERSION, "frontend_version": FRONTEND_VERSION,
-            "checks": checks, "shares": samples, "last_metadata_failure": failure}
+            "checks": checks, "shares": samples, "last_metadata_failure": failure,
+            "browser_title": browser}
 
 
 def _function_check_record(ident: str, status: str, code: str, value=None) -> None:
@@ -10417,16 +11604,48 @@ def admin_shares(request: Request, limit: int = 100, q: str = ""):
     _require_admin(request)
     like = f"%{q}%"
     rows = db_exec(
-        "SELECT id,item_id,kind,title,author,status,parse_status,parse_error_code,"
-        "views,plays,downloads,cta_clicks,"
+        "SELECT id,item_id,kind,title,custom_title,payload,author,status,parse_status,parse_error_code,"
+        "views,page_views,plays,downloads,cta_clicks,"
         "expires_at,created,owner_user_id,owner_ip FROM shares "
-        "WHERE (?='' OR title LIKE ? OR author LIKE ? OR id=?) "
+        "WHERE (?='' OR title LIKE ? OR custom_title LIKE ? OR author LIKE ? OR id=?) "
         "ORDER BY created DESC LIMIT ?",
-        (q, like, like, q, max(1, min(500, limit))), "all")
-    tot = db_exec("SELECT COUNT(*) c, COALESCE(SUM(views),0) v, COALESCE(SUM(plays),0) p, "
+        (q, like, like, like, q, max(1, min(500, limit))), "all")
+    shares = []
+    for record in rows:
+        share = dict(record)
+        share.update(_share_titles(share))
+        share.pop("payload", None)
+        shares.append(share)
+    tot = db_exec("SELECT COUNT(*) c, COALESCE(SUM(views),0) v, COALESCE(SUM(page_views),0) pv, COALESCE(SUM(plays),0) p, "
                   "COALESCE(SUM(cta_clicks),0) k FROM shares", (), "one")
-    return {"shares": [dict(r) for r in rows],
-            "total": tot["c"], "views": tot["v"], "plays": tot["p"], "cta": tot["k"]}
+    return {"shares": shares, "total": tot["c"], "page_views": tot["pv"],
+            "views": tot["v"], "plays": tot["p"], "cta": tot["k"]}
+
+
+class ShareTitleBody(BaseModel):
+    title: str = Field(max_length=300)
+
+
+@app.patch("/api/admin/shares/{sid}/title")
+def admin_share_title(sid: str, body: ShareTitleBody, request: Request):
+    _require_admin(request)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE shares SET custom_title=?,updated=? WHERE id=?",
+                (body.title.strip(), int(time.time()), sid)).rowcount
+            if not updated:
+                raise ApiError(404, "分享页不存在")
+            row = dict(conn.execute("SELECT * FROM shares WHERE id=?", (sid,)).fetchone())
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    return {"ok": True, **_share_titles(row)}
 
 
 @app.post("/api/admin/shares/{sid}/takedown")
@@ -10788,6 +12007,8 @@ def _start_health():
     _start_share_parse_workers(prepared=True)
     _start_api_job_workers(prepared=True)
     _start_atc_workers(prepared=True)
+    if not _metadata_proxy_required():
+        _browser_title_service.start()
     threading.Thread(target=_health_loop, daemon=True).start()
     threading.Thread(target=mihomo_mgr.supervise, daemon=True).start()
 
@@ -10797,6 +12018,7 @@ def _stop_mihomo():
     _stop_share_parse_workers()
     _stop_api_job_workers()
     _stop_atc_workers()
+    _browser_title_service.close()
     # 内存里的转发流量计数落库，重启不丢
     try:
         _flush_media_traffic()
@@ -10946,7 +12168,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "支持 50+ 内容平台的视频与图集解析工具：粘贴抖音、小红书、快手、B站、微博、视频号、Twitter/X、TikTok、YouTube 等平台的公开作品链接，即可预览无水印原片、图集与作品信息。基础解析不要求登录源平台，普通解析默认不获取语音文案，站点不保存媒体文件。",
             "features": ["50+ 内容平台统一解析", "抖音、小红书、快手、B站视频解析", "微博、视频号、Twitter/X 作品解析", "TikTok 与 YouTube 视频解析", "视频与图集预览", "批量解析与 Excel 导出", "抖音作品分享页", "可选语音文案提取", "媒体文件不落地", "开发者 API"],
             "faq": [
-                ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选，注册会保存邮箱与加盐密码哈希。公开作品链接会提交给已配置的第三方内容解析服务，抖音缺失信息由服务器通过官方接口补全；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
+                ("这个多平台下载器会处理和保留哪些数据？", "前端代码开源可审查，本站不保存视频或图片文件。浏览器使用 30 天随机第一方匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息及事件。普通访问明细及 API 任务结果最多保留 30 天，到期后每 5 分钟清理；通用额度流水和分享奖励去重摘要长期保留，防止重复奖励。分享防刷另使用签名的随机 Cookie，不采集硬件指纹。站内账号可选，注册会保存邮箱与加盐密码哈希。公开作品链接会提交给已配置的第三方内容解析服务，抖音缺失信息由服务器通过官方接口补全；普通解析默认不获取语音文案，只有用户主动打开「获取文案」时才请求语音转文字。媒体直连时媒体源会收到请求方网络与浏览器信息；安全的同源视频线路仅对已验证媒体域名流式转发。"),
                 ("怎么把抖音视频分享到微信？发出去是卡片还是链接？", "解析后点「生成分享页」得到一条链接。想让好友收到带封面标题的卡片，要在微信里打开这个页面，再点右上角 ··· →「发送给朋友」，这样转发出去才是卡片。若只是复制链接粘贴到聊天窗口，微信不会把网址展开成卡片，会显示为一条普通网址（这是微信的机制，对任何网站都一样）。两种方式好友点开都能直接观看无水印原片，无需安装抖音 App、不用复制口令跳转。"),
                 ("分享给朋友后，对方需要装抖音 App 吗？链接会过期吗？", "不需要装任何 App，用微信内置浏览器点开就能看。分享页匿名有效期 7 天、登录后 30 天；页面保存作品文案、互动数据和已获取的作者资料等信息，不存储任何视频文件，版权仍归原作者。你也可以生成带二维码的分享海报，长按保存后发朋友圈。"),
                 ("需要登录或安装软件吗？", "无需登录源平台账号或安装软件。基础解析无需注册本站账号；API 控制台等账号功能需要登录。"),
@@ -10964,7 +12186,7 @@ def _seo_head(lang: str, origin: str, path = "/") -> str:
             "app_desc": "A video and gallery parser for 50+ content platforms. Paste a public post link from Douyin, Xiaohongshu, Kuaishou, Bilibili, Weibo, WeChat Channels, Twitter/X, TikTok, YouTube and more to preview the original media and post details. Basic parsing requires no source-platform login, transcript extraction is off by default, and the site stores no media files.",
             "features": ["Unified parsing for 50+ platforms", "Douyin, Xiaohongshu, Kuaishou and Bilibili", "Weibo, WeChat Channels and Twitter/X", "TikTok and YouTube", "Video and gallery preview", "Batch parsing and Excel export", "Douyin share pages", "Optional speech transcript", "No media-file storage", "Developer API"],
             "faq": [
-                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Purpose-specific network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period; expired records are removed by a cleanup task that runs every five minutes. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, video downloads prefer direct original-media requests and try the site's proxy if those fail."),
+                ("What data does this downloader process and retain?", "The front end is open source and auditable, and the service stores no video or image files. A random first-party anonymous ID lasts 30 days. Ordinary network and anonymous-ID digests, coarse browser details, quota or diagnostic events, API jobs and results have a configurable 1–30 day retention period and are cleaned every five minutes. Credit ledgers and referral abuse-prevention digests are kept longer to prevent duplicate rewards. Referrals use a signed random browser cookie, never hardware fingerprints. A site account is optional and stores an email address and salted password hash. Public post links are sent to the configured third-party content parsing service for metadata and media URLs. Missing Douyin information is supplemented through official interfaces on the server. Normal parsing does not request a speech transcript; speech-to-text is requested only when the user actively turns on Transcript. Direct media requests disclose browser network information to the media host, video downloads prefer direct original-media requests and try the site's proxy if those fail."),
                 ("How do I share a Douyin video to WeChat? Does it show as a card or a plain link?", "Create a share page after parsing. Pasting its URL into a chat produces a plain link. To send a card with a cover and title, open the page inside WeChat and forward it from the top-right menu. Either form opens without the Douyin app."),
                 ("Do my friends need the Douyin app? Do share links expire?", "No app is needed — the page opens right in WeChat's built-in browser. Share pages last 7 days anonymously and 30 days when signed in. The page stores the post’s metadata, including its caption, engagement counts and available author details; no video files are stored and copyright stays with the original creator. You can also generate a poster with a QR code to save and post to Moments."),
                 ("Do I need to log in or install anything?", "No Douyin login, app, or extension is required. Basic parsing needs no site account; account features such as the API console require sign-in."),
@@ -11114,6 +12336,8 @@ def index(request: Request):
     resp.headers["Cache-Control"] = "private, no-store"
     resp.headers["Pragma"] = "no-cache"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax")
+    _prepare_reward_browser(request, resp)
+    _create_referral_visit(request, resp, request.query_params.get("ref", ""))
     return resp
 
 
@@ -11125,12 +12349,14 @@ def _share_head(view: Optional[dict], origin: str, lang: str = "zh") -> str:
 
     if view and view["state"] in ("pending", "processing"):
         url = esc(view.get("url") or f"{origin}/s/{view.get('sid', '')}")
-        return f'''<title>{_ui_text('视频正在准备中', lang)} · {_ui_text('分享页', lang)}</title>
+        title = esc((view.get("custom_title") or view.get("original_title")
+                     or _ui_text("视频正在准备中", lang))[:300])
+        return f'''<title>{title} · {_ui_text('分享页', lang)}</title>
 <meta name="description" content="{_ui_text('链接已创建，内容正在后台获取，完成后页面会自动更新。', lang)}">
 <meta name="robots" content="noindex,nofollow">
 <meta name="theme-color" content="#0E1013">
 <meta property="og:type" content="website">
-<meta property="og:title" content="{_ui_text('视频正在准备中', lang)}">
+<meta property="og:title" content="{title}">
 <meta property="og:description" content="{_ui_text('内容获取完成后，打开该链接即可播放。', lang)}">
 <meta property="og:image" content="{esc(origin)}{_frontend_asset('/og.png')}">
 <meta property="og:image:type" content="image/png">
@@ -11143,7 +12369,7 @@ def _share_head(view: Optional[dict], origin: str, lang: str = "zh") -> str:
     # 微信抓取网页 meta 生成卡片：title/og:title→标题，og:image→缩略图，description→摘要。
     # 卡片底部的"来源/抬头"由微信按域名自动填（域名或其绑定的公众号名称），网页无法自定义。
     platform = "TikTok" if (view.get("data") or {}).get("platform") == "tiktok" else ("Douyin" if lang == "en" else "抖音")
-    title = (view["title"] or platform + " video")[:60]
+    title = (view["title"] or platform + " video")[:300]
     author = view["author"] or _ui_text("视频创作者", lang)
     desc = (f"{platform} video by @{author} · Watch without the app" if lang == "en"
             else f"@{author} 的 {platform} 作品 · 点开即可观看，无需安装 App")
@@ -11179,9 +12405,7 @@ def share_page(sid: str, request: Request):
         row = dict(row)
         # 页面只读已保存的快照；媒体端点在播放/下载时处理地址过期。
         view = _share_view(row, origin)
-        # pending 页面完成后会自动 reload；只在终态记录一次，避免单次访问被算成 2 次。
-        if view["state"] not in ("pending", "processing"):
-            _share_event(request, sid, "view")
+        # 浏览器可见时上报 page_view；单纯抓取卡片和状态轮询不冒充浏览。
 
     html = _frontend_template("share.html")
     # 注入 <script> 前把 < 转义成 <，防止标题里的 </script> 打断脚本
@@ -11198,6 +12422,9 @@ def share_page(sid: str, request: Request):
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Vary"] = "User-Agent, Accept-Language, Cookie"
     resp.set_cookie("lang", lang, max_age=31536000, samesite="lax", secure=COOKIE_SECURE)
+    _prepare_reward_browser(request, resp)
+    if view and view.get("state") == "ok":
+        _create_referral_visit(request, resp, sid)
     return resp
 
 
@@ -11242,8 +12469,9 @@ def api_quota(request: Request):
     else:
         # 匿名也返回真实每日上限（前端提示"登录后每天 N 次"要用），剩余恒 0
         atc_limit, atc_remaining = (cfg["transcript_daily"] if atc_on else 0), 0
+    billing = _web_billing_status(u["id"] if u else None)
     return {"limit": limit, "used": used, "remaining": remaining,
-            "billing": _web_billing_status(u["id"] if u else None),
+            "billing": billing, "credits": billing["credits"],
             "user_daily": limit if u else free_user_daily(),
             "user": {"email": u["email"]} if u else None,
             "transcript": {"enabled": atc_on,
@@ -11309,8 +12537,9 @@ def auth_me(request: Request):
     u = current_user(request)
     if not u:
         return {"user": None}
+    billing = _web_billing_status(u["id"])
     return {"user": {"email": u["email"], "id": u["id"], "created_at": u["created_at"]},
-            "billing": _web_billing_status(u["id"])}
+            "billing": billing, "credits": billing["credits"]}
 
 
 class RegisterBody(BaseModel):
@@ -11334,6 +12563,19 @@ def _issue_session(uid: int, request: Request) -> JSONResponse:
     resp = JSONResponse({"ok": True})
     resp.set_cookie("sess", tok, httponly=True, samesite="lax",
                     secure=COOKIE_SECURE, max_age=USER_SESSION_TTL)
+    _prepare_reward_browser(request, resp)
+    with _db_lock:
+        conn = _db()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _record_reward_signals_in_conn(conn, uid, request)
+            _bind_referral_login_in_conn(conn, uid, request)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
     return resp
 
 
@@ -11427,7 +12669,7 @@ def llms_txt(request: Request):
 3. 在线预览视频或图集，按页面提供的当前平台方式保存原片；抖音作品还可点「生成分享页」发给微信好友。
 
 ## 常见问答
-- 会处理和保留哪些数据？——不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。相关明细及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
+- 会处理和保留哪些数据？——不保存视频或图片文件。公开作品链接会提交给配置的第三方内容解析服务；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不请求语音文案。浏览器使用 30 天随机匿名 ID；免费额度、防滥用和播放诊断会处理用途化网络/匿名 ID 摘要、粗粒度浏览器信息与事件。普通访问明细及 API 任务结果最多保留 30 天，到期后每 5 分钟清理；通用额度流水和分享奖励去重摘要长期保留，防止重复奖励。分享防刷另使用签名的随机 Cookie，不采集硬件指纹。站内账号可选并保存邮箱与加盐密码哈希；媒体直连时，媒体源会收到请求方网络与浏览器信息。
 - 怎么把抖音视频分享到微信？——解析后生成分享页。想发出带封面标题的卡片，需在微信里打开该页面，点右上角 ··· →「发送给朋友」；直接复制链接粘贴进聊天窗口不会展开成卡片，只显示为一条网址（微信机制，对所有网站一致）。两种方式好友点开都能直接观看无水印原片，无需装抖音 App。
 - 对方需要装抖音 App 吗？会过期吗？——不需要装 App，微信内直接看；分享页匿名 7 天、登录后 30 天有效，保存文案、互动统计及作者公开资料等元数据，不存储视频文件。
 - 需要登录或装软件吗？——无需登录源平台或安装软件；基础解析无需本站账号，API 控制台等账号功能需要登录。

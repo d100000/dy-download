@@ -116,7 +116,8 @@ h1{font-size:34px; font-weight:750; line-height:1.3; text-wrap:balance}
 .composer textarea::placeholder{color:var(--faint)}
 .composer-bar{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 4px 1px; flex-wrap:wrap}
 .composer-actions{display:flex; gap:8px; flex-wrap:wrap}
-.quota-hint{display:block; margin:4px 4px 0; color:var(--muted); font-size:12px}
+.quota-hint{display:block; margin:4px 4px 0; color:var(--muted); font-size:12px;overflow-wrap:anywhere}
+.quota-hint[hidden]{display:none}.quota-hint summary{cursor:pointer;width:fit-content}.quota-hint p{margin:5px 0;line-height:1.6}
 .composer .ghost-btn{padding:7px 12px; border-radius:9px; font-size:13px}
 .composer .ghost-btn svg{flex:none}
 .composer .primary-btn{min-width:142px; justify-content:center; border-radius:11px; background:var(--accent); box-shadow:none; font-size:14.5px; transition:background .15s,transform .15s}
@@ -218,6 +219,7 @@ h1{font-size:34px; font-weight:750; line-height:1.3; text-wrap:balance}
   object-fit:contain;
 }
 .info{flex:1; min-width:0; display:flex; flex-direction:column; gap:14px; container:result-info / inline-size}
+[data-metadata-author]:empty,[data-metadata-stats]:empty,[data-metadata-extras]:empty{display:none}
 .badge{
   align-self:flex-start; font-size:12px; font-weight:600; letter-spacing:.06em;
   padding:3px 11px; border-radius:99px; background:var(--surface-2);
@@ -330,7 +332,7 @@ a.ghost-btn{text-decoration:none}
 .pm-title{padding:14px 16px 4px; font-size:14.5px; font-weight:600; line-height:1.5}
 .pm-meta{display:flex; gap:8px; padding:4px 16px; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums}
 .pm-meta span+span::before{content:"·"; margin-right:8px; color:var(--faint)}
-.pm-body>.engagement-row{margin:10px 16px}
+.pm-body>.engagement-row,.pm-body>[data-metadata-stats]>.engagement-row{margin:10px 16px}
 .pm-act{padding:8px 16px 16px}
 .pm-act .primary-btn{width:100%; justify-content:center; text-decoration:none}
 .pm-imgs{display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; padding:12px 16px 16px}
@@ -704,7 +706,8 @@ footer{
         <input type="file" id="fileInput" accept=".txt,.csv,text/plain" hidden>
       </div>
     </div>
-    <div class="quota-hint" id="quotaHint"></div>
+    <div class="quota-hint" id="quotaHint" role="status" aria-live="polite"></div>
+    <details class="quota-hint" id="shareCreditRules" hidden><summary data-ui="分享赚通用额度">分享赚通用额度</summary><p data-ui="奖励规则：登录后生成分享页。不同好友通过分享页进入本站、登录并成功解析后，通过安全校验即可为你增加 1 次通用额度。每位好友只能为你奖励 1 次，同一作品的分享链接合计最多奖励 5 次。自己访问、仅打开链接及重复请求不计奖励。为防刷量，同一浏览器或网络环境的不同用户也可能不计奖。">奖励规则：登录后生成分享页。不同好友通过分享页进入本站、登录并成功解析后，通过安全校验即可为你增加 1 次通用额度。每位好友只能为你奖励 1 次，同一作品的分享链接合计最多奖励 5 次。自己访问、仅打开链接及重复请求不计奖励。为防刷量，同一浏览器或网络环境的不同用户也可能不计奖。</p></details>
     <div class="parse-progress" aria-hidden="true"></div>
   </div>
 
@@ -743,7 +746,7 @@ footer{
   <div class="faq-list">
     <details class="faq-item">
       <summary data-i18n="faq_q1">这个下载器会处理和保留哪些数据？</summary>
-      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。浏览器会生成一个<strong>30 天有效的随机第一方匿名 ID</strong>；为提供免费额度、防滥用和播放诊断，服务端会把 IP 和该 ID 转为用途化摘要。这些摘要、粗粒度浏览器信息、访问/解析/播放事件及 API 任务结果的保留期最多设为 30 天，到期后由每 5 分钟运行的任务删除。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载优先使用原片直连，失败后尝试本站代理线路。</p>
+      <p data-i18n-html="faq_a1">前端代码<strong>开源可审查</strong>。本站不保存视频或图片文件，媒体线路只做流式转发。本站使用<strong>30 天有效的随机第一方匿名标识和分享防刷标识</strong>，不采集浏览器硬件指纹。为提供免费额度、防滥用和播放诊断，服务端将网络与随机标识转为用途化摘要。普通访问/解析/播放日志、粗粒度浏览器信息及 API 任务结果最多保留 30 天，到期后由每 5 分钟运行的任务删除。<strong>额度及退款流水、分享奖励去重记录长期保留</strong>，用于核对余额和避免重复发奖；其中仅保存网络与随机标识的用途化摘要，不保存原始网络地址。站内账号可选；注册时保存邮箱与加盐密码哈希。<strong>公开作品链接会提交给配置的第三方内容解析服务</strong>；抖音缺失的信息由服务器通过官方接口补全。普通解析默认不获取语音文案，只有你主动打开「获取文案」时才请求语音转文字。浏览器直连媒体时，媒体源会收到你的网络与浏览器信息；视频下载优先使用原片直连，失败后尝试本站代理线路。</p>
     </details>
     <details class="faq-item">
       <summary data-i18n="faq_q6">怎么把抖音视频分享到微信？发出去是卡片还是链接？</summary>
@@ -958,7 +961,7 @@ function jsonHeaders(){ const h={'Content-Type':'application/json'}; if(_anonId)
 /* 登录态与文案提取额度（refreshQuota/refreshUser 维护，结果卡开关用） */
 let _loggedIn = false;
 let _atc = {enabled:false, daily:0, remaining:0};
-let _billing = {wallet:null,parse_price_cents:3,transcript_price_cents:3};
+let _billing = {wallet:null,credits:null,parse_price_cents:3,transcript_price_cents:3};
 let _userDaily = null;
 
 function quotaSignupText(daily,kind='login'){
@@ -971,22 +974,32 @@ function quotaSignupText(daily,kind='login'){
   return LANG==='en'?'Sign in to use your account balance →':'登录后使用账户余额 →';
 }
 
+function generalCreditsHint(credits){
+  if(!credits)return '';
+  const balance=Number.isSafeInteger(credits.balance)&&credits.balance>=0?credits.balance:0;
+  const reserved=Number.isSafeInteger(credits.reserved)&&credits.reserved>0?credits.reserved:0;
+  return LANG==='en'?` · General credits: ${balance} (no expiry)`+(reserved?` · ${reserved} credits reserved`:''):` · 通用额度 ${balance} 次（长期有效）`+(reserved?` · 预留 ${reserved} 次`:'');
+}
+function shareCreditsCopy(){return uiText('好友通过分享页进入、登录并成功解析，通过安全校验后可为你增加 1 次通用额度。同一作品最多奖励 5 次，每位好友仅为你奖励 1 次；相同浏览器或网络不计。');}
+
 function billingHint(billing, purpose='parse'){
   if(!billing?.wallet)return '';
   const money=c=>'¥'+(Number(c||0)/100).toFixed(2);
   const wallet=billing.wallet,price=purpose==='transcript'?billing.transcript_price_cents:billing.parse_price_cents;
   const reserve=wallet.reserved_cents>0?(LANG==='en'?` · Reserved ${money(wallet.reserved_cents)}`:` · 预留 ${money(wallet.reserved_cents)}`):'';
+  const hasCredits=purpose==='parse'&&Boolean(billing.credits);
   return LANG==='en'
-    ? ` · Balance ${money(wallet.balance_cents)}${reserve} · After free uses: ${money(price)}/use; failures refunded`
-    : ` · 余额 ${money(wallet.balance_cents)}${reserve} · 免费用完后 ${money(price)}/次，失败退回`;
+    ? ` · Balance ${money(wallet.balance_cents)}${reserve} · ${hasCredits?'After free uses and credits':'After free uses'}: ${money(price)}/use; failures refunded`
+    : ` · 余额 ${money(wallet.balance_cents)}${reserve} · ${hasCredits?'免费次数和通用额度用完后':'免费用完后'} ${money(price)}/次，失败退回`;
 }
 
 async function refreshQuota(){
   try { const q = await (await fetch('/api/quota', {headers: _anonId?{'X-FP':_anonId}:{}})).json();
     const el = $('#quotaHint');
-    if(q.billing)_billing=q.billing;
+    if(q.billing)_billing={...q.billing,credits:q.credits||q.billing.credits||null};
     if(Number.isInteger(q.user_daily)&&q.user_daily>=0)_userDaily=q.user_daily;
-    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily,Boolean(q.user))+billingHint(_billing);
+    if (el) el.textContent = (I18N[LANG]||I18N.zh).quota_tpl(q.remaining, q.limit, q.user_daily,Boolean(q.user))+(q.user?generalCreditsHint(q.credits||_billing.credits):'')+billingHint(_billing);
+    const rules=$('#shareCreditRules');if(rules)rules.hidden=!q.user;
     document.querySelectorAll('[data-quota-signup]').forEach(node=>node.textContent=quotaSignupText(_userDaily,node.dataset.quotaSignup));
     if (q.transcript || q.atc) _atc = q.transcript || q.atc;
     _loggedIn = Boolean(q.user);
@@ -998,6 +1011,7 @@ async function refreshQuota(){
 let resultScrollTimer = 0, composerSuccessTimer = 0, parseRun = 0;
 function invalidateParse(){
   parseRun += 1;
+  stopResultTitlePolling();
   clearTimeout(resultScrollTimer);
   if (composer.classList.contains('is-loading')) setLoading(false);
 }
@@ -1070,6 +1084,7 @@ async function parse(){
   if (parseBtn.disabled) return;
   const text = input.value.trim();
   const run = ++parseRun;
+  stopResultTitlePolling();
   clearTimeout(resultScrollTimer);
   hideError();
   if (!text) { showError(t('err_link') || '请粘贴受支持平台的公开作品链接'); return; }
@@ -1148,7 +1163,7 @@ async function parseBatch(text, run = parseRun){
   _batch = data.results.filter(r=>r.ok).map(r => ({...r.data, _link:r.link}));
   const fails = data.results.filter(r=>!r.ok);
   _batch.forEach(d => { if (d.kind==='note') _albums[d.item_id]=d.images;
-                        _shareSrc[d.item_id] = d._link || ''; });
+                        _shareSrc[d.item_id] = [d.title_hint, d._link].filter(Boolean).join(' '); });
   renderBatch(data.count, fails);
 }
 
@@ -1158,12 +1173,12 @@ function renderBatch(count, fails){
     const cover = isNote ? albumImageSrc(d.images?.[0]) : (d.cover || '');
     const canDownload = isNote || Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video, d.source) || d.video?.download_url || d.video?.proxy_url);
     const canShare = sharePageSupported(d);
-    return `<tr>
+    return `<tr data-metadata-item="${esc(d.item_id)}" data-metadata-view="batch">
       <td class="bt-idx tnum">${i+1}</td>
       <td>${cover?`<img class="bt-thumb" src="${esc(cover)}" alt="" loading="lazy" onclick="openPlayer(${i})">`:'<div class="bt-thumb"></div>'}</td>
-      <td class="bt-title">${resultTitleHTML(d, 'bt-t')}<div class="bt-a">${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||uiText('未知'))}</div>${engagementHTML(d.stats)}</td>
+      <td class="bt-title">${resultTitleHTML(d, 'bt-t')}<div class="bt-a" data-metadata-author>${esc(platformName(d.platform || 'douyin'))} · @${esc(d.author||uiText('未知'))}</div><div data-metadata-stats>${engagementHTML(d.stats)}</div></td>
       <td><span class="bt-tag">${isNote?uiText('图集'):uiText('视频')}</span></td>
-      <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}"`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,uiText('待读取'))}</td>
+      <td class="tnum" ${isNote ? '' : `data-batch-duration="${i}" data-video-duration`}>${isNote?('· '+(d.images?.length||0)+'图'):videoDurationText(d.duration_ms,uiText('待读取'))}</td>
       <td class="bt-ops">
         ${isNote?`<button class="mini-btn" onclick="downloadBatchAlbum(${i},this)">${uiText('下载图集')}</button>`
                 :(canDownload
@@ -1195,6 +1210,7 @@ function renderBatch(count, fails){
   $('#exportBtn').onclick = exportBatch;
   const dlAll = $('#dlAllBtn'); if (dlAll) dlAll.onclick = downloadAllVideos;
   maybeRegTip();
+  startResultTitlePolling(_batch);
 }
 
 async function dlBatchOne(i, btn){
@@ -1246,8 +1262,10 @@ function openPlayer(i){
     document.addEventListener('keydown', e => { if (e.key==='Escape') closePlayer(); });
   }
   const body = m.querySelector('.pm-body');
+  body.dataset.metadataItem = d.item_id;
+  body.dataset.metadataView = 'preview';
   if (d.kind === 'note'){
-    body.innerHTML = `${resultTitleHTML(d, 'pm-title')}${engagementHTML(d.stats)}<div class="pm-imgs">${
+    body.innerHTML = `${resultTitleHTML(d, 'pm-title')}<div data-metadata-stats>${engagementHTML(d.stats)}</div><div class="pm-imgs">${
       (d.images||[]).map(im=>`<img src="${esc(albumImageSrc(im))}" alt="" loading="lazy" decoding="async">`).join('')}</div>`;
   } else {
     const canDownload = Boolean(videoDownloadRefreshURL(d.video) || videoDirectDownloadURL(d.video,d.source) || d.video?.download_url || d.video?.proxy_url);
@@ -1261,7 +1279,7 @@ function openPlayer(i){
       ${d.cover?`poster="${esc(d.cover)}"`:''}></video>
       ${resultTitleHTML(d, 'pm-title')}
       <div class="pm-meta"><span data-video-duration>${videoDurationText(d.duration_ms,uiText('读取中…'))}</span><span data-video-resolution>${videoResolutionText(d.video,uiText('读取中…'))}</span></div>
-      ${engagementHTML(d.stats)}
+      <div data-metadata-stats>${engagementHTML(d.stats)}</div>
       <div class="pm-act">${canDownload
         ? `<button class="primary-btn" onclick="dlBatchOne(${i},this)" data-ui="⬇ 下载视频">⬇ 下载视频</button>`
         : `<a class="primary-btn" href="${esc(d.video?.url || '')}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}</div>`;
@@ -1373,7 +1391,14 @@ function resultCaption(d){
 }
 function resultTitleHTML(d, className='v-title'){
   const title = resultCaption(d);
-  return title ? `<div class="${className}">${esc(title)}</div>` : '';
+  const item = d.item_id ? ` data-title-item="${esc(d.item_id)}"` : '';
+  return title || d.metadata_status === 'pending'
+    ? `<div class="${className}"${item}${title ? '' : ' style="display:none"'}>${esc(title)}</div>` : '';
+}
+function resultCopyHTML(d){
+  const title = resultCaption(d);
+  return title || d.metadata_status === 'pending'
+    ? `<button class="ghost-btn" data-title-copy="${esc(d.item_id)}"${title ? '' : ' style="display:none"'} onclick="copyCard(this)" data-ui="复制文案">${uiText('复制文案')}</button>` : '';
 }
 function extrasBlock(d){
   let h = '';
@@ -1470,6 +1495,134 @@ function render(d){
   wireVideoPlayback(result);
   wireAvatar(result, d.item_id);
   maybeRegTip();
+  startResultTitlePolling([d]);
+}
+
+/* ---------- 完整标题：只读取本地快照，不重复解析或重建播放器 ---------- */
+const TITLE_POLL_WINDOW_MS = 10000, TITLE_POLL_INTERVAL_MS = 750, TITLE_POLL_TIMEOUT_MS = 1500;
+let _titlePollGeneration = 0;
+const _titlePollTasks = new Set();
+function stopResultTitlePolling(){
+  _titlePollGeneration += 1;
+  for (const task of _titlePollTasks){
+    clearTimeout(task.timer);
+    task.controller?.abort();
+  }
+  _titlePollTasks.clear();
+}
+function applyResultTitleMetadata(data, fresh){
+  if (!fresh || fresh.item_id !== data.item_id || fresh.kind !== data.kind) return false;
+  if (typeof fresh.metadata_status === 'string') data.metadata_status = fresh.metadata_status;
+  for (const key of ['content','content_status','author','avatar','author_url','cover','metadata_source']){
+    if (typeof fresh[key] === 'string' && fresh[key]) data[key] = fresh[key];
+  }
+  for (const key of ['create_time','duration_ms','snapshot_at']){
+    if (typeof fresh[key] === 'number' && Number.isFinite(fresh[key]) && fresh[key] > 0) data[key] = fresh[key];
+  }
+  if (fresh.stats && typeof fresh.stats === 'object'){
+    data.stats = data.stats || {};
+    for (const key of ['digg','comment','share','collect']){
+      const value = fresh.stats[key];
+      if (Number.isSafeInteger(value) && value >= 0) data.stats[key] = value;
+    }
+  }
+  if (Array.isArray(fresh.tags)) data.tags = fresh.tags.filter(tag => typeof tag === 'string');
+  if (Array.isArray(fresh.metadata_fields)) data.metadata_fields = fresh.metadata_fields.filter(key => typeof key === 'string');
+  if (data.video) for (const key of ['width','height']){
+    const value = fresh.video?.[key];
+    if (Number.isSafeInteger(value) && value > 0){
+      if (!data.video[key]) data.video[key] = value;
+      if (_videos[data.item_id] && !_videos[data.item_id][key]) _videos[data.item_id][key] = value;
+    }
+  }
+  const hasTitle = Boolean(resultCaption({title:fresh.title}));
+  if (hasTitle) for (const key of ['title','title_source','title_status','base']){
+      if (typeof fresh[key] === 'string') data[key] = fresh[key];
+    }
+  if (hasTitle && data.video && typeof fresh.video?.filename === 'string'){
+    data.video.filename = fresh.video.filename;
+    if (_videos[data.item_id]) _videos[data.item_id].filename = fresh.video.filename;
+  }
+  if (hasTitle && Array.isArray(data.images) && Array.isArray(fresh.images)
+      && data.images.length === fresh.images.length){
+    data.images.forEach((image, index) => {
+      const next = fresh.images[index];
+      if (image && next && (image.index || index + 1) === next.index && typeof next.filename === 'string')
+        image.filename = next.filename;
+    });
+  }
+  const title = resultCaption(data);
+  for (const node of document.querySelectorAll('[data-title-item]')){
+    if (node.dataset.titleItem !== data.item_id) continue;
+    node.textContent = title;
+    node.style.display = title ? '' : 'none';
+  }
+  for (const node of document.querySelectorAll('[data-title-copy]')){
+    if (node.dataset.titleCopy === data.item_id) node.style.display = title ? '' : 'none';
+  }
+  for (const node of document.querySelectorAll('[data-metadata-item]')){
+    if (node.dataset.metadataItem !== data.item_id) continue;
+    const update = (selector, html) => {
+      const slot = node.querySelector(selector);
+      if (!slot || slot.innerHTML === html) return false;
+      slot.innerHTML = html;
+      return true;
+    };
+    const authorChanged = update('[data-metadata-author]', node.dataset.metadataView === 'batch'
+      ? `${esc(platformName(data.platform || 'douyin'))} · @${esc(data.author || uiText('未知'))}` : authorRow(data));
+    update('[data-metadata-stats]', engagementHTML(data.stats));
+    update('[data-metadata-extras]', extrasBlock(data));
+    const published = node.querySelector('[data-metadata-published]');
+    if (published && data.create_time){
+      published.style.display = '';
+      const value = published.querySelector('[data-metadata-date]');
+      if (value) value.textContent = fmtDate(data.create_time);
+    }
+    if (data.duration_ms) setVideoMetadataValue(node, '[data-video-duration]', fmtDur(data.duration_ms));
+    if (data.video?.width && data.video?.height)
+      setVideoMetadataValue(node, '[data-video-resolution]', `${data.video.width}×${data.video.height}`);
+    // 播放线路的实际参数优先用于展示；只读现有 video，不替换节点或重新加载。
+    const playingVideo = node.closest('.card,.pm-body')?.querySelector('video[data-read-metadata]');
+    if (playingVideo) syncVideoMetadata(playingVideo);
+    if (authorChanged) wireAvatar(node, data.item_id);
+  }
+  return true;
+}
+function startResultTitlePolling(items){
+  stopResultTitlePolling();
+  const generation = _titlePollGeneration, run = parseRun, text = input.value.trim();
+  for (const data of items){
+    if (data.metadata_status !== 'pending' || typeof data.metadata_url !== 'string') continue;
+    let url;
+    try {
+      url = new URL(data.metadata_url, location.origin);
+      if (url.origin !== location.origin || !url.pathname.startsWith('/api/parse-metadata/') || url.username || url.password) continue;
+    } catch { continue; }
+    const task = {timer:0, controller:null, until:Date.now() + TITLE_POLL_WINDOW_MS};
+    _titlePollTasks.add(task);
+    const current = () => generation === _titlePollGeneration && run === parseRun && input.value.trim() === text;
+    const poll = async () => {
+      if (!current() || Date.now() >= task.until){ _titlePollTasks.delete(task); return; }
+      if (!document.hidden){
+        task.controller = new AbortController();
+        const timeout = setTimeout(() => task.controller?.abort(), TITLE_POLL_TIMEOUT_MS);
+        try {
+          const response = await fetch(url.href, {credentials:'same-origin', cache:'no-store',
+            signal:task.controller.signal, headers:{'Accept':'application/json'}});
+          if (!response.ok){
+            if (current() && [400,401,403,404,410].includes(response.status)) data.metadata_status = 'unavailable';
+          } else {
+            const body = await response.json();
+            if (current() && body.ok === true) applyResultTitleMetadata(data, body.data);
+          }
+        } catch {} finally { clearTimeout(timeout); task.controller = null; }
+      }
+      if (current() && data.metadata_status === 'pending' && Date.now() < task.until)
+        task.timer = setTimeout(poll, TITLE_POLL_INTERVAL_MS);
+      else _titlePollTasks.delete(task);
+    };
+    task.timer = setTimeout(poll, TITLE_POLL_INTERVAL_MS);
+  }
 }
 
 /* ================= 文案提取（语音转文字，注册用户每日限额）================= */
@@ -2105,24 +2258,24 @@ function videoHTML(d){
           ${uiText('播放不出来？')} <a href="javascript:void(0)" onclick="useProxyFallback(this.parentNode)" data-ui="改用服务器代理播放">改用服务器代理播放</a>
         </div>`}
       </div>
-      <div class="info">
+      <div class="info" data-metadata-item="${esc(d.item_id)}">
         <span class="badge">${esc(platform)} · ${uiText('视频 · 无水印')}</span>
         ${resultTitleHTML(d)}
-        ${authorRow(d)}
+        <div data-metadata-author>${authorRow(d)}</div>
         <div class="meta-row">
           <div class="meta-item"><div class="k" data-ui="时长">时长</div><div class="v${hasDuration?'':' is-pending'}" data-video-duration>${videoDurationText(d.duration_ms)}</div></div>
           <div class="meta-item"><div class="k" data-ui="分辨率">分辨率</div><div class="v${hasResolution?'':' is-pending'}" data-video-resolution>${videoResolutionText(d.video)}</div></div>
           <div class="meta-item"><div class="k" data-ui="格式">格式</div><div class="v">MP4</div></div>
-          ${d.create_time?`<div class="meta-item"><div class="k" data-ui="发布">发布</div><div class="v" style="font-size:13px">${fmtDate(d.create_time)}</div></div>`:''}
+          <div class="meta-item" data-metadata-published${d.create_time ? '' : ' style="display:none"'}><div class="k" data-ui="发布">${uiText('发布')}</div><div class="v" data-metadata-date style="font-size:13px">${d.create_time ? fmtDate(d.create_time) : ''}</div></div>
         </div>
-        ${engagementHTML(d.stats)}
-        ${extrasBlock(d)}
+        <div data-metadata-stats>${engagementHTML(d.stats)}</div>
+        <div data-metadata-extras>${extrasBlock(d)}</div>
         <div class="actions">
           ${canDownload
             ? `<button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadVideoItem(this)" data-ui="⬇ 下载视频">⬇ 下载视频</button>`
             : `<a class="primary-btn" href="${esc(d.video.url)}" target="_blank" rel="noopener noreferrer" data-ui="↗ 打开无水印原片">↗ 打开无水印原片</a>`}
           ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
-          ${resultCaption(d) ? '<button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>' : ''}
+          ${resultCopyHTML(d)}
         </div>
         <div class="ts-box" data-item="${esc(d.item_id)}">
           <div class="ts-head">
@@ -2144,16 +2297,16 @@ function albumHTML(d){
   return `
   <div class="card">
     <div class="album-head">
-      <div class="info" style="gap:10px">
+      <div class="info" style="gap:10px" data-metadata-item="${esc(d.item_id)}">
         <span class="badge">${esc(platform)} · ${uiText('图集 · {count} 张原图', {count: imgs.length})}</span>
         ${resultTitleHTML(d)}
-        ${authorRow(d)}
-        ${d.create_time?`<div class="sub" style="font-size:12.5px;color:var(--muted)">发布于 ${fmtDate(d.create_time)}</div>`:''}
-        ${engagementHTML(d.stats)}
-        ${extrasBlock(d)}
+        <div data-metadata-author>${authorRow(d)}</div>
+        <div class="sub" data-metadata-published style="font-size:12.5px;color:var(--muted);${d.create_time ? '' : 'display:none'}">${uiText('发布于')} <span data-metadata-date>${d.create_time ? fmtDate(d.create_time) : ''}</span></div>
+        <div data-metadata-stats>${engagementHTML(d.stats)}</div>
+        <div data-metadata-extras>${extrasBlock(d)}</div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        ${resultCaption(d) ? '<button class="ghost-btn" onclick="copyCard(this)" data-ui="复制文案">复制文案</button>' : ''}
+        ${resultCopyHTML(d)}
         ${canShare ? `<button class="ghost-btn" data-item-id="${esc(d.item_id)}" onclick="makeShareButton(this)" data-ui="🔗 生成分享页">🔗 生成分享页</button>` : ''}
         <button class="primary-btn" data-item-id="${esc(d.item_id)}" onclick="downloadAlbumAll(this)" data-ui="⬇ 下载全部">⬇ 下载全部</button>
       </div>
@@ -2236,6 +2389,7 @@ function shareResultHTML(d){
   openShare(`
     <h3>${uiText('🔗 分享页已生成')}</h3>
     <div class="sub">${uiText('把这个链接发到微信，对方点开就能直接看，无需安装 App。')}</div>
+    ${_loggedIn?`<p class="share-tips">${esc(shareCreditsCopy())}</p>`:''}
     <div class="share-link">
       <input id="shareUrl" value="${esc(url)}" readonly onclick="this.select()"
              data-title="${esc(d.title || '')}" data-author="${esc(d.author || '')}">

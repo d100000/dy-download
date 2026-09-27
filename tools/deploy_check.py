@@ -11,10 +11,20 @@ from urllib import request
 
 
 REQUIRED_COLUMNS = {
-    'users': {'balance_cents', 'reserved_cents', 'spent_cents', 'wallet_version'},
+    'users': {'balance_cents', 'reserved_cents', 'spent_cents', 'wallet_version',
+              'daily_limit', 'quota_version', 'credit_balance', 'credit_reserved',
+              'credit_spent', 'credit_version'},
     'user_sessions': {'token_hash', 'user_id', 'expires_at'},
     'wallet_ledger': {'user_id', 'event_key', 'balance_delta', 'reserved_delta', 'spent_delta'},
-    'quota_reservations': {'user_id', 'free_units', 'price_cents', 'status'},
+    'credit_ledger': {'user_id', 'ts', 'event', 'event_key', 'request_hash',
+                      'balance_delta', 'reserved_delta', 'spent_delta', 'note'},
+    'quota_reservations': {'user_id', 'free_units', 'credit_units', 'price_cents',
+                           'status', 'referral_visit_id'},
+    'referral_identity_signals': {'user_id', 'kind', 'signal_hash', 'created'},
+    'referral_visits': {'id', 'sid', 'owner_user_id', 'visitor_user_id', 'device_hash',
+                        'network_hash', 'work_key', 'created', 'expires_at', 'consumed'},
+    'share_credit_rewards': {'owner_user_id', 'visitor_user_id', 'device_hash',
+                             'network_hash', 'work_key', 'sid', 'reservation_id', 'created'},
     'shares': {'source_url', 'payload', 'parse_status', 'assigned_origin', 'expires_at'},
     'parse_snapshots': {'source_url', 'canonical_url', 'payload', 'expires_at'},
     'api_keys': {'balance_cents', 'reserved_cents', 'spent_cents'},
@@ -50,6 +60,18 @@ def check_database(data_dir):
                 ).fetchone()[0] for table in ('users', 'api_keys'))
                 checks.append({'id': 'balances', 'status': 'FAIL' if invalid else 'PASS',
                                'detail': f'负余额/预留/累计扣费异常记录：{invalid}；不替代逐笔对账'})
+                credit_columns = ('credit_balance', 'credit_reserved', 'credit_spent', 'credit_version')
+                invalid_credits = conn.execute('SELECT COUNT(*) FROM users WHERE ' + ' OR '.join(
+                    f"{column}<0 OR typeof({column})!='integer'" for column in credit_columns
+                )).fetchone()[0]
+                checks.append({'id': 'credits', 'status': 'FAIL' if invalid_credits else 'PASS',
+                               'detail': f'通用额度余额/冻结/累计消费/版本异常记录：{invalid_credits}；不替代逐笔对账'})
+                invalid_limits = conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE daily_limit IS NOT NULL "
+                    "AND (typeof(daily_limit)!='integer' OR daily_limit<0 OR daily_limit>10000)"
+                ).fetchone()[0]
+                checks.append({'id': 'user_daily_limits', 'status': 'FAIL' if invalid_limits else 'PASS',
+                               'detail': f'单用户每日额度异常记录：{invalid_limits}；允许跟随默认值或 0–10000 次'})
         private = not bool(path.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO))
         checks.append({'id': 'database_permissions', 'status': 'PASS' if private else 'WARN',
                        'detail': '数据库应仅允许运行账号访问'})

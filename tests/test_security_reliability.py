@@ -25,6 +25,7 @@ os.environ["DATA_DIR"] = _TEST_DATA.name
 os.environ["APP_SECRET"] = "test-only-app-secret-" + "x" * 48
 os.environ["ADMIN_PASSWORD"] = "test-only-admin-password"
 os.environ["MIHOMO_OFF"] = "1"
+os.environ["BROWSER_TITLE_ENABLED"] = "0"  # 离线回归不因本机安装了可选浏览器而联网。
 
 import server  # noqa: E402  (环境变量必须在导入服务前设置)
 
